@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "AlgoTradeKit"
+version = "0.1.0"
+description = "Algorithmic Trading Toolkit — data collection, indicators, strategy, simulation, and live trading"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Amir Mohammad Bazdar", email = "ambazdar03@gmail.com" }]
+keywords = [
+    "algorithmic-trading", "trading-bot", "finance", "crypto",
+    "binance", "backtesting", "indicators", "quant",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+# Runtime dependencies (kept minimal — only what data module needs)
+dependencies = [
+    "requests>=2.28",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "ruff",
+    "build",
+    "twine",
+]
+
+[project.urls]
+Homepage   = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
+Repository = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
+Issues     = "https://github.com/AmirMohammadBazdar/AlgoTradeKit/issues"
+Changelog  = "https://github.com/AmirMohammadBazdar/AlgoTradeKit/blob/main/CHANGELOG.md"
+
+# ---------------------------------------------------------------------------
+# Hatchling build — only include the src/ tree
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["src/AlgoTradeKit"]
+
+# ---------------------------------------------------------------------------
+# Ruff linting
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+# ---------------------------------------------------------------------------
+# Black formatting
+# ---------------------------------------------------------------------------
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts   = "-v --tb=short"
