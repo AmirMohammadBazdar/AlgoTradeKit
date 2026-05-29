@@ -324,9 +324,132 @@ class Converter:
                 f"got {type(source).__name__}."
             )
 
-    def _resample(self, df, source_tf, target_tf) -> pd.DataFrame:
-        # The actual OHLCV resampling logic
-        ...
+    def _resample(
+        self,
+        df: pd.DataFrame,
+        source_tf: str,
+        target_tf: str,
+    ) -> pd.DataFrame:
+        """
+        Resample *df* from *source_tf* to *target_tf*.
+
+        Returns a DataFrame with the same column schema as the input,
+        with incomplete groups at the edges dropped.
+
+        How aggregation works
+        ---------------------
+        * open         → first
+        * high         → max
+        * low          → min
+        * close        → last
+        * volume       → sum
+        * quote_volume → sum
+        * trades       → sum
+        * taker_buy_*  → sum
+        * close_time   → last   (close time of the last sub-candle in the group)
+        * timestamp    → first  (open time of the first sub-candle = new open time)
+        """
+        freq = _PANDAS_FREQ[target_tf]
+
+        # Build a datetime index from the millisecond timestamps
+        df = df.copy()
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        df = df.set_index("datetime").sort_index()
+
+        # Define aggregation rules for every column we care about
+        # (extra columns not listed here are silently dropped)
+        agg_rules: dict[str, str] = {
+            "open":            "first",
+            "high":            "max",
+            "low":             "min",
+            "close":           "last",
+            "volume":          "sum",
+            "close_time":      "last",
+            "quote_volume":    "sum",
+            "trades":          "sum",
+            "taker_buy_base":  "sum",
+            "taker_buy_quote": "sum",
+        }
+
+        # Only aggregate columns that actually exist in the source data
+        existing_agg = {col: rule for col, rule in agg_rules.items() if col in df.columns}
+
+        resampled = df.resample(freq).agg(existing_agg)
+
+        # Drop groups where there was no data at all (open is NaN)
+        resampled = resampled.dropna(subset=["open"])
+
+        # ---- Drop incomplete groups ------------------------------------
+        resampled = self._drop_incomplete(df, resampled, source_tf, target_tf, freq)
+
+        # Convert datetime index back to millisecond timestamp
+        resampled["timestamp"] = (
+            resampled.index.astype("int64") // 1_000_000
+        )
+        resampled = resampled.reset_index(drop=True)
+
+        # Ensure correct column order, filling any missing optional columns with None
+        final_cols = [c for c in _COLUMNS if c in resampled.columns]
+        return resampled[final_cols]
+
+    def _drop_incomplete(
+        self,
+        source_df:   pd.DataFrame,
+        resampled:   pd.DataFrame,
+        source_tf:   str,
+        target_tf:   str,
+        freq:        str,
+    ) -> pd.DataFrame:
+        """
+        Remove groups that do not have the expected number of source candles.
+
+        For fixed-length timeframes, every complete group must contain
+        exactly ``target_ms // source_ms`` source candles.
+
+        For monthly targets (``"1M"``), we count source candles per calendar
+        month and compare against the most common count.  We keep only groups
+        that match the mode — this drops partial months at both edges.
+        """
+        if target_tf == "1M":
+            return self._drop_incomplete_monthly(source_df, resampled, freq)
+
+        source_ms   = TIMEFRAME_MS[source_tf]
+        target_ms   = TIMEFRAME_MS[target_tf]
+        expected    = target_ms // source_ms
+
+        # Count how many source rows fall into each resampled bucket
+        counts = source_df.resample(freq).size()
+
+        # Keep only buckets that have exactly the right number of candles
+        complete_idx = counts[counts == expected].index
+        return resampled[resampled.index.isin(complete_idx)]
+
+    def _drop_incomplete_monthly(
+        self,
+        source_df: pd.DataFrame,
+        resampled: pd.DataFrame,
+        freq:      str,
+    ) -> pd.DataFrame:
+        """
+        For monthly targets, drop months that have fewer candles than the mode.
+
+        Why the mode and not a fixed number?
+        A daily → monthly conversion has 28–31 source candles per group
+        depending on the month.  Using the mode (most common count) means
+        February is still kept — only partially-collected months (the current
+        live month, or a partial month at the start of the data) are dropped.
+        """
+        counts = source_df.resample(freq).size()
+
+        if counts.empty:
+            return resampled
+
+        mode_count  = counts.mode().iloc[0]
+        # Accept months within ±1 candle of the mode to handle February / DST
+        tolerance   = 1
+        valid_idx   = counts[counts >= mode_count - tolerance].index
+
+        return resampled[resampled.index.isin(valid_idx)]
 
     def _resolve_filepath(self, source_tf, target_tf) -> str:
         # Build output path, same logic as Collector
