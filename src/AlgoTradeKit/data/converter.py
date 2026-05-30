@@ -142,7 +142,81 @@ class Converter:
     # -----------------------------------------------------------------------
 
     def convert(self) -> str:
-        ...
+        """
+        Run the full conversion pipeline and return the path to the saved CSV.
+
+        Steps
+        -----
+        1. Load the source data (CSV or DataFrame).
+        2. Detect the source timeframe from the timestamps.
+        3. Validate that the conversion is possible.
+        4. Resample the OHLCV data to the target timeframe.
+        5. Drop incomplete edge candles.
+        6. Save the result and print a summary.
+
+        Returns
+        -------
+        str
+            Absolute path of the saved CSV file.
+
+        Raises
+        ------
+        ValueError
+            If the source data is empty, the timeframe cannot be detected,
+            or the conversion is not mathematically valid.
+        FileNotFoundError
+            If ``source`` is a file path that does not exist.
+        """
+        # ---- Step 1: load ------------------------------------------------
+        df, source_name = self._load_source()
+
+        # ---- Step 2: detect source TF ------------------------------------
+        source_tf = self._detect_timeframe(df)
+
+        # If the user also supplied source_timeframe, confirm it matches
+        if self._source_tf_hint and self._source_tf_hint != source_tf:
+            raise ValueError(
+                f"The source_timeframe you provided ('{self._source_tf_hint}') "
+                f"does not match the detected timeframe ('{source_tf}'). "
+                f"Remove source_timeframe and let it be detected automatically, "
+                f"or correct the value."
+            )
+
+        # ---- Step 3: validate --------------------------------------------
+        self._validate_conversion(source_tf, self._target_tf)
+
+        # ---- Header ------------------------------------------------------
+        src_label = TIMEFRAME_LABELS.get(source_tf,       source_tf)
+        tgt_label = TIMEFRAME_LABELS.get(self._target_tf, self._target_tf)
+        filepath  = self._resolve_filepath(source_tf, self._target_tf, source_name)
+
+        print()
+        _print("─" * 56)
+        _print(f"Converting     : {src_label}  →  {tgt_label}  ({source_tf} → {self._target_tf})")
+        _print(f"Source         : {_fmt_n(len(df))} candles  "
+               f"({_fmt_dt(int(df['timestamp'].iloc[0]))} → "
+               f"{_fmt_dt(int(df['timestamp'].iloc[-1]))})")
+        _print(f"Output         : {filepath}")
+        _print("─" * 56)
+
+        # ---- Step 4 & 5: resample + drop incomplete ----------------------
+        result = self._resample(df, source_tf, self._target_tf)
+
+        if result.empty:
+            raise ValueError(
+                f"Resampling produced 0 complete candles. "
+                f"Your source data may be too short to form even one complete "
+                f"{self._target_tf} candle."
+            )
+
+        # ---- Step 6: save ------------------------------------------------
+        self._save(result, filepath)
+
+        _print(f"✓ Saved  {_fmt_n(len(result))} candles  →  {filepath}")
+        _print("─" * 56)
+        print()
+
+        return filepath
 
     def _detect_timeframe(self, df: pd.DataFrame) -> str:
         """
@@ -451,6 +525,61 @@ class Converter:
 
         return resampled[resampled.index.isin(valid_idx)]
 
-    def _resolve_filepath(self, source_tf, target_tf) -> str:
-        # Build output path, same logic as Collector
-        ...
+    def _resolve_filepath(
+        self,
+        source_tf:   str,
+        target_tf:   str,
+        source_name: str,
+    ) -> str:
+        """
+        Build the absolute path for the output CSV file.
+
+        If ``self.outputname`` is set → use it as-is (appends ``.csv`` if missing).
+
+        Otherwise auto-generate:
+        * ``converted_BTCUSDT_1h_to_4h.csv``  when symbol is found in the filename
+        * ``converted_1h_to_4h.csv``           fallback
+        """
+        if self.outputname:
+            name = self.outputname
+            if not name.lower().endswith(".csv"):
+                name += ".csv"
+        else:
+            symbol = self._extract_symbol(source_name)
+            if symbol:
+                name = f"converted_{symbol}_{source_tf}_to_{target_tf}.csv"
+            else:
+                name = f"converted_{source_tf}_to_{target_tf}.csv"
+
+        dest = self.destination or "./"
+        return os.path.abspath(os.path.join(dest, name))
+
+    @staticmethod
+    def _extract_symbol(filename: str) -> "str | None":
+        """
+        Try to extract the trading symbol from a Collector-generated filename.
+
+        Pattern:  ``<source>_<SYMBOL>_<timeframe>.csv``
+        Example:  ``binance-futures_BTCUSDT_1h.csv`` → ``"BTCUSDT"``
+        Returns ``None`` if the pattern does not match.
+        """
+        m = _FILENAME_SYMBOL_RE.match(os.path.basename(filename))
+        return m.group(1).upper() if m else None
+
+    def _save(self, df: pd.DataFrame, filepath: str) -> None:
+        """Write *df* to *filepath*, creating parent directories as needed."""
+        parent = os.path.dirname(filepath)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        df.to_csv(filepath, index=False)
+
+    def __repr__(self) -> str:
+        src = (
+            os.path.basename(self._source_input)
+            if isinstance(self._source_input, str)
+            else "<DataFrame>"
+        )
+        return (
+            f"<Converter source={src!r} "
+            f"target_timeframe={self._target_tf!r}>"
+        )
