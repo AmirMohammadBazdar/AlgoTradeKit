@@ -456,10 +456,14 @@ class Converter:
         # ---- Drop incomplete groups ------------------------------------
         resampled = self._drop_incomplete(df, resampled, source_tf, target_tf, freq)
 
-        # Convert datetime index back to millisecond timestamp
+        # Convert datetime index back to UTC millisecond timestamp.
+        # pandas 2.x changed internal resolution from ns → ms when unit="ms"
+        # is used, so `astype("int64") // 1_000_000` breaks there.
+        # Subtracting the UTC epoch and dividing by 1 ms works in all versions.
+        _epoch = pd.Timestamp("1970-01-01", tz="UTC")
         resampled["timestamp"] = (
-            resampled.index.astype("int64") // 1_000_000
-        )
+            (resampled.index - _epoch) / pd.Timedelta(milliseconds=1)
+        ).astype("int64")
         resampled = resampled.reset_index(drop=True)
 
         # Ensure correct column order, filling any missing optional columns with None
