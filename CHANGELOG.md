@@ -9,6 +9,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- `Converter` class in the `data` module for OHLCV timeframe resampling
+- Supports CSV file or pandas DataFrame as input
+- Automatic source timeframe detection from timestamp gaps
+- Validation: raises clear error if conversion is not mathematically possible
+- Correct OHLCV aggregation (open=first, high=max, low=min, close=last, volume=sum)
+- Incomplete edge candles are dropped from output
+- Same output options as `Collector` (destination, outputname)
+
 ---
 
 ## [0.1.0] — 2026-05-26

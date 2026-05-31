@@ -78,6 +78,23 @@ collector.endtime     = "2023/01/01"      # optional — defaults to now
 collector.collect()                        # returns path to the saved CSV
 ```
 
+### Convert timeframes
+
+```python
+from AlgoTradeKit.data import Converter
+
+# From a CSV file (timeframe is auto-detected)
+conv = Converter(source="data/binance-futures_BTCUSDT_1h.csv", target_timeframe="4h")
+conv.destination = "data/"
+conv.convert()
+
+# From a DataFrame
+conv = Converter(source=my_df, source_timeframe="1h", target_timeframe="1d")
+conv.convert()
+```
+
+Valid conversions: any timeframe where the target is a whole multiple of the source.
+
 ---
 
 ## Installation
