@@ -9,6 +9,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+---
+
+## [0.2.0] — 2026-05-31
+
 ### Added
 - `Converter` class in the `data` module for OHLCV timeframe resampling
 - Supports CSV file or pandas DataFrame as input
