@@ -1,0 +1,1308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>MythonChart</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;
+  --text:#e6edf3;--text2:#8b949e;--accent:#58a6ff;
+  --green:#3fb950;--red:#f85149;--yellow:#e3b341;
+  --hh:44px;--th:36px;--sb:22px;
+}
+body.light{--bg:#f0f2f5;--bg2:#ffffff;--bg3:#eaeef2;--border:#d0d7de;--text:#1f2328;--text2:#57606a}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);
+     height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── Header ──────────────────────────────────────────────────── */
+#hdr{height:var(--hh);background:var(--bg2);border-bottom:1px solid var(--border);
+     display:flex;align-items:center;padding:0 14px;gap:10px;flex-shrink:0;z-index:20}
+#logo{font-family:'Courier New',monospace;font-weight:900;font-size:13px;color:var(--accent);
+      letter-spacing:.1em;border:1px solid var(--accent)55;padding:2px 7px;border-radius:4px}
+#chart-title{font-size:13px;font-weight:600;flex:1}
+#ohlcv{font-family:'Courier New',monospace;font-size:11px;color:var(--text2);display:flex;gap:12px;flex-wrap:wrap}
+#ohlcv .up{color:var(--green)} #ohlcv .dn{color:var(--red)}
+
+/* ── Toolbar ─────────────────────────────────────────────────── */
+#tbar{height:var(--th);background:var(--bg2);border-bottom:1px solid var(--border);
+      display:flex;align-items:center;padding:0 8px;gap:2px;flex-shrink:0;overflow-x:auto}
+.tsep{width:1px;height:20px;background:var(--border);margin:0 5px;flex-shrink:0}
+.tb{height:26px;min-width:28px;padding:0 8px;border-radius:5px;border:none;
+    background:transparent;color:var(--text2);font-size:11px;cursor:pointer;
+    display:flex;align-items:center;gap:4px;transition:background .12s,color .12s;white-space:nowrap;flex-shrink:0}
+.tb:hover{background:var(--bg3);color:var(--text)}
+.tb.on{background:var(--accent)22;color:var(--accent);border:1px solid var(--accent)44}
+.tb svg{flex-shrink:0}
+#ml{margin-left:auto}
+
+/* ── Panes ───────────────────────────────────────────────────── */
+#panes{flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative}
+.pane-wrap{position:relative;overflow:hidden}
+.resize-handle{height:5px;background:transparent;cursor:row-resize;flex-shrink:0;
+               transition:background .2s;z-index:15;position:relative}
+.resize-handle:hover,.resize-handle.dragging{background:var(--accent)66}
+
+/* ── Sub-pane indicator legend (top-left of sub panes) ───────── */
+.pane-lbl{position:absolute;top:6px;left:10px;z-index:12;display:flex;gap:6px;flex-wrap:wrap;
+          pointer-events:auto}
+.ind-chip{font-size:10px;padding:1px 6px;border-radius:3px;font-family:'Courier New',monospace;
+          display:inline-flex;align-items:center;gap:4px}
+.ind-chip .iact{background:none;border:none;cursor:pointer;padding:0;line-height:1;
+                color:inherit;opacity:.6;font-size:10px;transition:opacity .15s}
+.ind-chip .iact:hover{opacity:1}
+.ind-chip.hidden-ind{opacity:.35;text-decoration:line-through}
+
+/* ── Main-pane indicator legend (top-right) ──────────────────── */
+#ind-legend{
+  position:absolute;top:8px;right:66px;   /* leave room for LWC price scale */
+  z-index:12;display:flex;flex-direction:column;gap:3px;
+  pointer-events:auto;
+}
+.il-row{
+  display:flex;align-items:center;gap:5px;
+  background:var(--bg2)cc;border:1px solid var(--border)88;
+  border-radius:5px;padding:2px 6px 2px 5px;
+  font-family:'Courier New',monospace;font-size:10px;
+  backdrop-filter:blur(4px);
+  transition:opacity .2s;
+}
+.il-row.hidden-ind{opacity:.3}
+.il-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.il-name{color:var(--text2);white-space:nowrap}
+.il-val{color:var(--text);font-weight:600;min-width:52px;text-align:right}
+.il-btn{background:none;border:none;cursor:pointer;padding:1px 2px;color:var(--text2);
+        font-size:10px;line-height:1;border-radius:3px;transition:background .12s,color .12s}
+.il-btn:hover{background:var(--bg3);color:var(--text)}
+.il-btn.remove:hover{color:var(--red)}
+
+/* ── Canvas overlays ─────────────────────────────────────────── */
+#draw-cv{position:absolute;inset:0;z-index:8;pointer-events:none}
+#ghost-cv{position:absolute;inset:0;pointer-events:none;z-index:9}
+
+/* ── Context menu ────────────────────────────────────────────── */
+#ctx-menu{position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;
+          padding:4px 0;z-index:300;box-shadow:0 8px 28px #000a;min-width:190px;display:none}
+#ctx-menu .mi{padding:6px 14px;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:8px;
+              transition:background .1s}
+#ctx-menu .mi:hover{background:var(--bg3)}
+#ctx-menu .mi.danger{color:var(--red)}
+#ctx-menu .mi.disabled{opacity:.4;pointer-events:none;cursor:default}
+#ctx-menu hr{border:none;border-top:1px solid var(--border);margin:3px 0}
+/* info row — not clickable, shows metadata */
+#ctx-menu .mi-info{padding:5px 14px;font-size:10px;color:var(--text2);
+                   display:flex;align-items:center;justify-content:space-between;
+                   cursor:default;user-select:none}
+#ctx-menu .mi-info .badge{
+  font-size:9px;padding:1px 6px;border-radius:10px;font-weight:700;
+  letter-spacing:.04em;text-transform:uppercase;
+}
+#ctx-menu .mi-info .badge.server{background:#58a6ff22;color:#58a6ff;border:1px solid #58a6ff44}
+#ctx-menu .mi-info .badge.user  {background:#3fb95022;color:#3fb950;border:1px solid #3fb95044}
+/* lock toggle row */
+#ctx-lock-row{padding:6px 14px;font-size:12px;cursor:pointer;
+              display:flex;align-items:center;gap:8px;transition:background .1s}
+#ctx-lock-row:hover{background:var(--bg3)}
+
+/* ── Status bar ──────────────────────────────────────────────── */
+#sb{height:var(--sb);background:var(--bg2);border-top:1px solid var(--border);
+    display:flex;align-items:center;padding:0 12px;gap:16px;flex-shrink:0;
+    font-family:'Courier New',monospace;font-size:10px;color:var(--text2)}
+#wsdot{width:7px;height:7px;border-radius:50%;background:#444;margin-right:5px;transition:background .3s}
+#wsdot.live{background:var(--green)} #wsdot.conn{background:var(--yellow);animation:blink 1s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+/* ── Settings panel ──────────────────────────────────────────── */
+#settings-overlay{
+  display:none;position:fixed;inset:0;z-index:400;
+  background:#0006;align-items:flex-start;justify-content:flex-end;
+  padding-top:52px;padding-right:12px;
+}
+#settings-overlay.open{display:flex}
+#settings-panel{
+  background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+  width:310px;padding:18px 20px 20px;box-shadow:0 12px 40px #0009;
+  display:flex;flex-direction:column;gap:14px;max-height:calc(100vh - 70px);overflow-y:auto;
+}
+#settings-panel h3{font-size:13px;font-weight:700;color:var(--text);
+  display:flex;align-items:center;justify-content:space-between;margin:0}
+#settings-panel h3 button{background:none;border:none;cursor:pointer;color:var(--text2);
+  font-size:16px;line-height:1;padding:0 2px;transition:color .15s}
+#settings-panel h3 button:hover{color:var(--text)}
+.srow{display:flex;flex-direction:column;gap:5px}
+.srow label{font-size:11px;font-weight:600;color:var(--text2);letter-spacing:.04em;text-transform:uppercase}
+.srow select,.srow input[type=range]{
+  background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+  color:var(--text);font-size:12px;padding:5px 8px;
+  cursor:pointer;outline:none;width:100%;transition:border-color .15s;
+}
+.srow select:hover{border-color:var(--accent)}
+.srow input[type=range]{padding:4px 0;accent-color:var(--accent)}
+.srow .hint{font-size:10px;color:var(--text2);margin-top:1px}
+.sval{font-size:11px;color:var(--accent);font-family:'Courier New',monospace}
+.sdivider{height:1px;background:var(--border);margin:0 -20px}
+.sapply{height:30px;background:var(--accent)22;border:1px solid var(--accent)55;
+  border-radius:6px;color:var(--accent);font-size:12px;font-weight:600;
+  cursor:pointer;transition:background .15s}
+.sapply:hover{background:var(--accent)44}
+.sgroup-title{font-size:10px;font-weight:700;color:var(--text2);letter-spacing:.08em;
+  text-transform:uppercase;padding:2px 0}
+
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
+</head>
+<body>
+
+<div id="hdr">
+  <span id="logo">⬡ MYTHON</span>
+  <span id="chart-title">Chart</span>
+  <div id="ohlcv">
+    <span id="oi-o"></span><span id="oi-h"></span>
+    <span id="oi-l"></span><span id="oi-c"></span><span id="oi-v"></span>
+  </div>
+</div>
+
+<div id="tbar">
+  <button class="tb on" id="ct-btn" onclick="toggleChartType()"
+          style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em">CANDLE</button>
+  <div class="tsep"></div>
+  <button class="tb on" id="tool-cursor" onclick="setTool('cursor')" title="Select / Move">
+    <svg width="13" height="13" viewBox="0 0 13 13"><path d="M1.5 1.5l9 4.5-4 1-1.5 4.5z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/></svg>
+  </button>
+  <button class="tb" id="tool-hline" onclick="setTool('hline')" title="Horizontal Line">
+    <svg width="14" height="12" viewBox="0 0 14 12"><line x1="0" y1="6" x2="14" y2="6" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3,2"/></svg>
+  </button>
+  <button class="tb" id="tool-tline" onclick="setTool('tline')" title="Trend Line">
+    <svg width="14" height="12" viewBox="0 0 14 12"><line x1="1" y1="11" x2="13" y2="1" stroke="currentColor" stroke-width="1.5"/><circle cx="1" cy="11" r="1.5" fill="currentColor"/><circle cx="13" cy="1" r="1.5" fill="currentColor"/></svg>
+  </button>
+  <button class="tb" id="tool-box" onclick="setTool('box')" title="Rectangle">
+    <svg width="14" height="12" viewBox="0 0 14 12"><rect x="1" y="1" width="12" height="10" rx="1" stroke="currentColor" stroke-width="1.3" fill="none"/></svg>
+  </button>
+  <button class="tb" id="tool-fib" onclick="setTool('fib')" title="Fibonacci">
+    <svg width="14" height="12" viewBox="0 0 14 12">
+      <line x1="0" y1="2"   x2="14" y2="2"   stroke="currentColor" stroke-width=".9"/>
+      <line x1="0" y1="5"   x2="14" y2="5"   stroke="currentColor" stroke-width=".9"/>
+      <line x1="0" y1="7.5" x2="14" y2="7.5" stroke="currentColor" stroke-width=".9"/>
+      <line x1="0" y1="10"  x2="14" y2="10"  stroke="currentColor" stroke-width=".9"/>
+      <line x1="0" y1="12"  x2="14" y2="12"  stroke="currentColor" stroke-width=".9"/>
+    </svg>
+  </button>
+  <button class="tb" id="tool-text" onclick="setTool('text')" title="Text Label">
+    <svg width="13" height="12" viewBox="0 0 13 12"><text x="2" y="10" font-size="10" fill="currentColor" font-family="serif" font-style="italic">T</text></svg>
+  </button>
+  <div class="tsep"></div>
+  <button class="tb" onclick="clearDrawings()">
+    <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.5"/></svg>
+    Clear
+  </button>
+  <button class="tb" onclick="fitAll()">
+    <svg width="13" height="12" viewBox="0 0 13 12"><rect x=".5" y=".5" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M4 4v4h4" stroke="currentColor" stroke-width="1" fill="none"/></svg>
+    Fit
+  </button>
+  <button class="tb" id="ml" onclick="toggleTheme()" title="Theme">
+    <svg width="13" height="13" viewBox="0 0 13 13">
+      <circle cx="6.5" cy="6.5" r="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+      <path d="M6.5 1v1.5M6.5 10.5V12M1 6.5h1.5M10.5 6.5H12M2.6 2.6l1 1M9.4 9.4l1 1M9.4 3.6l-1 1M3.6 9.4l-1 1" stroke="currentColor" stroke-width="1"/>
+    </svg>
+  </button>
+  <button class="tb" id="settings-btn" onclick="toggleSettings()" title="Settings">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <circle cx="7" cy="7" r="2.2" stroke="currentColor" stroke-width="1.3"/>
+      <path d="M7 1v1.8M7 11.2V13M1 7h1.8M11.2 7H13M2.9 2.9l1.3 1.3M9.8 9.8l1.3 1.3M11.1 2.9l-1.3 1.3M4.2 9.8l-1.3 1.3" stroke="currentColor" stroke-width="1.2"/>
+    </svg>
+  </button>
+</div>
+
+<!-- ── Settings overlay ───────────────────────────────────────── -->
+<div id="settings-overlay" onclick="onOverlayClick(event)">
+  <div id="settings-panel">
+    <h3>Settings <button onclick="closeSettings()">✕</button></h3>
+    <div class="sdivider"></div>
+
+    <div class="sgroup-title">Axis &amp; OHLC</div>
+
+    <div class="srow">
+      <label>Font Family</label>
+      <select id="sf-axis">
+        <option value="'Courier New',monospace">Courier New (mono)</option>
+        <option value="'JetBrains Mono',monospace">JetBrains Mono</option>
+        <option value="'Fira Code',monospace">Fira Code</option>
+        <option value="'Segoe UI',system-ui,sans-serif">Segoe UI</option>
+        <option value="'Inter',system-ui,sans-serif">Inter</option>
+        <option value="'Roboto',sans-serif">Roboto</option>
+        <option value="Arial,sans-serif">Arial</option>
+        <option value="Georgia,serif">Georgia</option>
+      </select>
+      <span class="hint">Price / time axis tick labels and OHLCV header.</span>
+    </div>
+
+    <div class="srow">
+      <label>Font Size — <span class="sval" id="sf-axis-size-val">12px</span></label>
+      <input type="range" id="sf-axis-size" min="8" max="18" value="12"
+             oninput="document.getElementById('sf-axis-size-val').textContent=this.value+'px'"/>
+    </div>
+
+    <div class="sdivider"></div>
+    <div class="sgroup-title">Chart Drawings</div>
+
+    <div class="srow">
+      <label>Font Family</label>
+      <select id="sf-drawing">
+        <option value="'Courier New',monospace">Courier New (mono)</option>
+        <option value="'JetBrains Mono',monospace">JetBrains Mono</option>
+        <option value="'Fira Code',monospace">Fira Code</option>
+        <option value="'Segoe UI',system-ui,sans-serif">Segoe UI</option>
+        <option value="'Inter',system-ui,sans-serif">Inter</option>
+        <option value="'Roboto',sans-serif">Roboto</option>
+        <option value="Arial,sans-serif">Arial</option>
+        <option value="Georgia,serif">Georgia</option>
+      </select>
+      <span class="hint">Labels and annotations drawn on chart canvas.</span>
+    </div>
+
+    <div class="srow">
+      <label>Font Size — <span class="sval" id="sf-size-val">11px</span></label>
+      <input type="range" id="sf-size" min="8" max="20" value="11"
+             oninput="document.getElementById('sf-size-val').textContent=this.value+'px'"/>
+    </div>
+
+    <div class="sdivider"></div>
+    <button class="sapply" onclick="applyFonts()">Apply &amp; Close</button>
+  </div>
+</div>
+
+<div id="panes">
+  <canvas id="draw-cv"></canvas>
+  <canvas id="ghost-cv"></canvas>
+</div>
+
+<div id="sb">
+  <span id="wsdot" class="conn"></span><span id="wslbl">Connecting…</span>
+  <span id="barcnt">—</span>
+  <span id="lupd"></span>
+</div>
+
+<div id="ctx-menu">
+  <!-- Row 1: metadata — source info -->
+  <div class="mi-info">
+    <span id="ctx-source-label">Created by</span>
+    <span id="ctx-source-badge" class="badge">—</span>
+  </div>
+  <hr/>
+  <!-- Row 2: lock / unlock toggle -->
+  <div id="ctx-lock-row" onclick="ctxToggleLock()">
+    <span id="ctx-lock-icon">🔒</span>
+    <span id="ctx-lock-label">Unlock</span>
+  </div>
+  <hr/>
+  <!-- Rows 3-4: edit actions — hidden when locked -->
+  <div class="mi" id="ctx-rename-row" onclick="ctxRename()">✏️ Rename label</div>
+  <div class="mi" id="ctx-color-row"  onclick="ctxEditColor()">🎨 Change color</div>
+  <hr/>
+  <!-- Row 5: delete — always available -->
+  <div class="mi danger" onclick="ctxDelete()">🗑 Delete</div>
+</div>
+
+<script>
+'use strict';
+// ═══════════════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════════════
+let theme='dark', chartType='candlestick', activeTool='cursor', volumeInMain=true;
+let allBars=[];
+
+const panes={};
+let mainChart=null, mainSeries=null, volumeSeries=null;
+
+const drawings={};
+// indMeta: name → {series, color, overlay, pane, hidden, seriesType, paneId}
+const indMeta={};
+
+let draftState=null, mousePos={x:0,y:0};
+let dragState=null, hoverId=null, selectedId=null, ctxTargetId=null;
+
+const drawCv  = document.getElementById('draw-cv');
+const ghostCv = document.getElementById('ghost-cv');
+const dCtx    = drawCv.getContext('2d');
+const gCtx    = ghostCv.getContext('2d');
+const ctxMenu = document.getElementById('ctx-menu');
+
+const HANDLE_R=5, HIT_R=9;
+
+// ── Font settings state ──
+let axisFont='\'Courier New\',monospace', axisFontSize=12;
+let drawingFont='\'Courier New\',monospace', drawingFontSize=11;
+
+// ═══════════════════════════════════════════════════════════════
+//  CANVAS POINTER-EVENTS
+// ═══════════════════════════════════════════════════════════════
+function setCanvasInteractive(on){
+  drawCv.style.pointerEvents=on?'auto':'none';
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  THEME
+// ═══════════════════════════════════════════════════════════════
+const DARK={layout:{background:{color:'#0d1117'},textColor:'#8b949e'},
+  grid:{vertLines:{color:'#1c2333'},horzLines:{color:'#1c2333'}},
+  crosshair:{mode:1,vertLine:{color:'#58a6ff44'},horzLine:{color:'#58a6ff44'}},
+  rightPriceScale:{borderColor:'#30363d'},
+  timeScale:{borderColor:'#30363d',timeVisible:true,secondsVisible:false}};
+const LIGHT={layout:{background:{color:'#ffffff'},textColor:'#57606a'},
+  grid:{vertLines:{color:'#eaeef2'},horzLines:{color:'#eaeef2'}},
+  crosshair:{mode:1},rightPriceScale:{borderColor:'#d0d7de'},
+  timeScale:{borderColor:'#d0d7de',timeVisible:true,secondsVisible:false}};
+const tOpts=()=>theme==='dark'?DARK:LIGHT;
+
+function toggleTheme(){
+  theme=theme==='dark'?'light':'dark';
+  document.body.classList.toggle('light',theme==='light');
+  Object.values(panes).forEach(p=>p.chart.applyOptions(tOpts()));
+  redrawAll();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PANE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
+function ensureOverlaysOnTop(){
+  const el=document.getElementById('panes');
+  el.appendChild(drawCv); el.appendChild(ghostCv);
+}
+
+function createPane(id,flex=3,label=''){
+  const panesEl=document.getElementById('panes');
+  if(Object.keys(panes).length>0){
+    const rh=document.createElement('div');
+    rh.className='resize-handle';
+    panesEl.insertBefore(rh,drawCv);
+    setupResize(rh);
+  }
+  const wrap=document.createElement('div');
+  wrap.className='pane-wrap'; wrap.id='pw-'+id;
+  wrap.style.flex=flex; wrap.style.minHeight='50px';
+  const inner=document.createElement('div');
+  inner.id='pc-'+id; inner.style.cssText='width:100%;height:100%';
+  wrap.appendChild(inner);
+
+  // Pane label (for sub-pane indicators)
+  const lbl=document.createElement('div');
+  lbl.className='pane-lbl'; lbl.id='pl-'+id;
+  if(label){
+    const c=document.createElement('span'); c.className='ind-chip';
+    c.style.cssText='background:#ffffff11;color:var(--text2)'; c.textContent=label;
+    lbl.appendChild(c);
+  }
+  wrap.appendChild(lbl);
+
+  // Indicator legend overlay (only for main pane)
+  if(id==='main'){
+    const leg=document.createElement('div');
+    leg.id='ind-legend'; wrap.appendChild(leg);
+  }
+
+  panesEl.insertBefore(wrap,drawCv);
+  ensureOverlaysOnTop();
+
+  const chart=LightweightCharts.createChart(inner,{
+    ...tOpts(),width:inner.clientWidth,height:wrap.clientHeight,
+    layout:{...tOpts().layout,fontFamily:axisFont,fontSize:axisFontSize},
+    handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true},
+    handleScale:{mouseWheel:true,pinch:true},
+  });
+  chart.timeScale().subscribeVisibleLogicalRangeChange(range=>{
+    if(!range) return;
+    Object.entries(panes).forEach(([oid,op])=>{
+      if(oid!==id) try{op.chart.timeScale().setVisibleLogicalRange(range);}catch{}
+    });
+  });
+  panes[id]={chart,seriesList:[],el:inner,paneWrap:wrap};
+
+  chart.subscribeCrosshairMove(param=>{
+    if(id==='main'){
+      updateOHLCV(param);
+      updateIndLegendValues(param);
+    }
+    syncCrosshair(id,param);
+    redrawAll();
+  });
+
+  new ResizeObserver(()=>{
+    chart.applyOptions({width:inner.clientWidth,height:wrap.clientHeight});
+    resizeOverlays(); redrawAll();
+  }).observe(wrap);
+  return panes[id];
+}
+
+function syncCrosshair(srcId,param){
+  if(!param.time) return;
+  Object.entries(panes).forEach(([id,p])=>{
+    if(id===srcId) return;
+    try{p.chart.setCrosshairPosition(param.point?.y||0,param.time,p.seriesList[0]);}catch{}
+  });
+}
+
+function setupResize(rh){
+  rh.addEventListener('mousedown',e=>{
+    e.preventDefault(); rh.classList.add('dragging');
+    const startY=e.clientY;
+    const before=rh.previousElementSibling, after=rh.nextElementSibling;
+    if(!before||!after) return;
+    const bf=parseFloat(before.style.flex)||1, af=parseFloat(after.style.flex)||1, tot=bf+af;
+    const onMove=ev=>{
+      const dy=ev.clientY-startY, h=document.getElementById('panes').clientHeight, d=dy/h*tot;
+      before.style.flex=Math.max(0.1,bf+d); after.style.flex=Math.max(0.1,af-d);
+    };
+    const onUp=()=>{rh.classList.remove('dragging');
+      document.removeEventListener('mousemove',onMove); document.removeEventListener('mouseup',onUp);};
+    document.addEventListener('mousemove',onMove);
+    document.addEventListener('mouseup',onUp);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  INIT MAIN + VOLUME
+// ═══════════════════════════════════════════════════════════════
+function initMain(){
+  if(panes.main) return;
+  createPane('main',3,'');
+  mainChart=panes.main.chart;
+  mainSeries=mainChart.addCandlestickSeries({
+    upColor:'#3fb950',downColor:'#f85149',
+    borderUpColor:'#3fb950',borderDownColor:'#f85149',
+    wickUpColor:'#3fb950',wickDownColor:'#f85149',
+  });
+  panes.main.seriesList=[mainSeries];
+  if(volumeInMain){
+    volumeSeries=mainChart.addHistogramSeries({priceScaleId:'vol',priceFormat:{type:'volume'}});
+    mainChart.priceScale('vol').applyOptions({scaleMargins:{top:0.82,bottom:0}});
+    panes.main.seriesList.push(volumeSeries);
+  } else {
+    createPane('vol',0.6,'Volume');
+    const vc=panes.vol.chart;
+    vc.applyOptions({rightPriceScale:{scaleMargins:{top:.1,bottom:0}}});
+    volumeSeries=vc.addHistogramSeries({color:'#58a6ff44',priceFormat:{type:'volume'}});
+    panes.vol.seriesList=[volumeSeries];
+  }
+}
+
+function setData(bars){
+  allBars=bars;
+  mainSeries.setData(bars);
+  if(volumeSeries) volumeSeries.setData(bars.map(b=>({
+    time:b.time,value:b.volume||0,
+    color:b.close>=b.open?'#3fb95055':'#f8514955',
+  })));
+  document.getElementById('barcnt').textContent=bars.length+' bars';
+}
+
+function streamBar(bar){
+  if(!mainSeries) return;
+  mainSeries.update(bar);
+  if(volumeSeries) volumeSeries.update({time:bar.time,value:bar.volume||0,
+    color:bar.close>=bar.open?'#3fb95055':'#f8514955'});
+  if(allBars.length&&allBars[allBars.length-1].time===bar.time) allBars[allBars.length-1]=bar;
+  else allBars.push(bar);
+  document.getElementById('barcnt').textContent=allBars.length+' bars';
+  document.getElementById('lupd').textContent='⟳ '+new Date().toLocaleTimeString();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  INDICATORS
+// ═══════════════════════════════════════════════════════════════
+function addIndicator(ind){
+  let p, paneId;
+  if(ind.overlay){
+    p=panes.main; paneId='main';
+  } else {
+    paneId='sub'+ind.pane;
+    if(!panes[paneId]) createPane(paneId,0.8,ind.name);
+    p=panes[paneId];
+  }
+
+  let series;
+  if(ind.seriesType==='histogram')
+    series=p.chart.addHistogramSeries({color:ind.color,lineWidth:ind.lineWidth});
+  else if(ind.seriesType==='area')
+    series=p.chart.addAreaSeries({topColor:ind.color+'55',bottomColor:ind.color+'00',
+                                   lineColor:ind.color,lineWidth:ind.lineWidth});
+  else
+    series=p.chart.addLineSeries({color:ind.color,lineWidth:ind.lineWidth,
+                                   lastValueVisible:false,priceLineVisible:false});
+  series.setData(ind.data);
+  p.seriesList.push(series);
+
+  // Register in indMeta
+  indMeta[ind.name]={series,color:ind.color,overlay:ind.overlay,pane:ind.pane,
+                     hidden:false,seriesType:ind.seriesType,paneId};
+
+  if(ind.overlay){
+    // Add row to main-pane legend (top-right)
+    addLegendRow(ind.name, ind.color);
+  } else {
+    // Add chip with hide/remove to sub-pane label
+    addSubPaneChip(ind.name, ind.color, paneId);
+  }
+}
+
+function streamIndicator(name,point){
+  const m=indMeta[name];
+  if(!m){ console.warn('streamIndicator: unknown',name); return; }
+  if(!m.hidden) m.series.update(point);
+}
+
+// ── Legend row (main pane, top-right) ─────────────────────────
+function addLegendRow(name,color){
+  const leg=document.getElementById('ind-legend');
+  if(!leg) return;
+  const row=document.createElement('div');
+  row.className='il-row'; row.id='ilrow-'+CSS.escape(name);
+  row.innerHTML=`
+    <span class="il-dot" style="background:${color}"></span>
+    <span class="il-name">${name}</span>
+    <span class="il-val" id="ilval-${CSS.escape(name)}">—</span>
+    <button class="il-btn" title="Hide/Show" onclick="toggleIndVisibility('${name.replace(/'/g,"\\'")}')">
+      <svg width="12" height="9" viewBox="0 0 12 9" id="ilvis-${CSS.escape(name)}">
+        <ellipse cx="6" cy="4.5" rx="5" ry="3.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+        <circle cx="6" cy="4.5" r="1.5" fill="currentColor"/>
+      </svg>
+    </button>
+    <button class="il-btn remove" title="Remove indicator"
+            onclick="removeIndicator('${name.replace(/'/g,"\\'")}')">✕</button>`;
+  leg.appendChild(row);
+}
+
+// ── Sub-pane chip with hide/remove ────────────────────────────
+function addSubPaneChip(name,color,paneId){
+  const lbl=document.getElementById('pl-'+paneId);
+  if(!lbl) return;
+  const chip=document.createElement('span');
+  chip.className='ind-chip'; chip.id='chip-'+CSS.escape(name);
+  chip.style.cssText=`background:${color}22;color:${color};border:1px solid ${color}44`;
+  chip.innerHTML=`${name}
+    <button class="iact" title="Hide/Show" onclick="toggleIndVisibility('${name.replace(/'/g,"\\'")}')">◉</button>
+    <button class="iact remove" title="Remove" style="color:var(--red)"
+            onclick="removeIndicator('${name.replace(/'/g,"\\'")}')">✕</button>`;
+  lbl.appendChild(chip);
+}
+
+// ── Toggle visibility (hide/show — no data removed) ───────────
+function toggleIndVisibility(name){
+  const m=indMeta[name]; if(!m) return;
+  m.hidden=!m.hidden;
+  m.series.applyOptions({visible:!m.hidden});
+
+  // Update legend row style
+  const row=document.getElementById('ilrow-'+CSS.escape(name));
+  if(row) row.classList.toggle('hidden-ind',m.hidden);
+
+  // Update sub-pane chip style
+  const chip=document.getElementById('chip-'+CSS.escape(name));
+  if(chip) chip.classList.toggle('hidden-ind',m.hidden);
+}
+
+// ── Remove indicator (frontend + notify Python) ───────────────
+function removeIndicator(name){
+  const m=indMeta[name]; if(!m) return;
+
+  // Remove LWC series from its pane
+  const paneObj=panes[m.paneId];
+  if(paneObj){
+    try{ paneObj.chart.removeSeries(m.series); }catch{}
+    paneObj.seriesList=paneObj.seriesList.filter(s=>s!==m.series);
+  }
+
+  // Remove legend row
+  const row=document.getElementById('ilrow-'+CSS.escape(name));
+  if(row) row.remove();
+
+  // Remove sub-pane chip
+  const chip=document.getElementById('chip-'+CSS.escape(name));
+  if(chip) chip.remove();
+
+  // If sub-pane has no more indicator series, collapse it
+  if(!m.overlay && paneObj && paneObj.seriesList.length===0){
+    const wrap=document.getElementById('pw-'+m.paneId);
+    if(wrap) wrap.style.display='none';
+  }
+
+  delete indMeta[name];
+
+  // Notify Python to stop generating this indicator
+  if(ws&&ws.readyState===1)
+    ws.send(JSON.stringify({type:'remove_indicator',name}));
+}
+
+// ── Update crosshair values in legend ─────────────────────────
+function updateIndLegendValues(param){
+  if(!param.seriesData) return;
+  Object.entries(indMeta).forEach(([name,m])=>{
+    if(!m.overlay) return;
+    const valEl=document.getElementById('ilval-'+CSS.escape(name));
+    if(!valEl) return;
+    const d=param.seriesData.get(m.series);
+    if(d!=null){
+      const v=typeof d==='object'?d.value:d;
+      valEl.textContent=v!=null?Number(v).toFixed(4):'—';
+      valEl.style.color=m.color;
+    } else {
+      valEl.textContent='—';
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CANVAS RESIZE
+// ═══════════════════════════════════════════════════════════════
+function resizeOverlays(){
+  const r=document.getElementById('panes').getBoundingClientRect();
+  [drawCv,ghostCv].forEach(cv=>{
+    cv.width=r.width*devicePixelRatio; cv.height=r.height*devicePixelRatio;
+    cv.style.width=r.width+'px'; cv.style.height=r.height+'px';
+  });
+  dCtx.scale(devicePixelRatio,devicePixelRatio);
+  gCtx.scale(devicePixelRatio,devicePixelRatio);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  COORDINATE HELPERS
+// ═══════════════════════════════════════════════════════════════
+function toXY(time,price){
+  if(!panes.main||!mainSeries) return null;
+  try{
+    const wR=panes.main.paneWrap.getBoundingClientRect();
+    const pR=document.getElementById('panes').getBoundingClientRect();
+    const x=mainChart.timeScale().timeToCoordinate(time);
+    const y=mainSeries.priceToCoordinate(price);
+    if(x==null||y==null) return null;
+    return{x,y:(wR.top-pR.top)+y};
+  }catch{return null;}
+}
+function fromXY(cx,cy){
+  if(!panes.main||!mainSeries) return null;
+  try{
+    const wR=panes.main.paneWrap.getBoundingClientRect();
+    const pR=document.getElementById('panes').getBoundingClientRect();
+    const price=mainSeries.coordinateToPrice(cy-(wR.top-pR.top));
+    const time=mainChart.timeScale().coordinateToTime(cx);
+    if(price==null||time==null) return null;
+    return{time,price};
+  }catch{return null;}
+}
+function toXYFromOrig(time,price){ return toXY(time,price); }
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDER ALL DRAWINGS
+// ═══════════════════════════════════════════════════════════════
+function redrawAll(){
+  if(!panes.main) return;
+  const W=drawCv.clientWidth, H=drawCv.clientHeight;
+  dCtx.clearRect(0,0,W,H);
+  Object.values(drawings).forEach(d=>renderOne(d,dCtx,W,H));
+}
+
+function renderOne(d,ctx,W,H){
+  const hl=(d.id===hoverId||d.id===selectedId)&&!d.locked;
+  ctx.save();
+  ctx.font=`${drawingFontSize}px ${drawingFont}`;
+
+  if(d.type==='hline'){
+    const xy=toXY(allBars.length?allBars[Math.floor(allBars.length/2)].time:0,d.price);
+    if(!xy){ctx.restore();return;}
+    ctx.beginPath(); ctx.strokeStyle=d.color;
+    ctx.lineWidth=hl?Math.max(d.lineWidth||1,2):(d.lineWidth||1);
+    setDash(ctx,d.lineStyle||0);
+    ctx.moveTo(0,xy.y); ctx.lineTo(W,xy.y); ctx.stroke(); ctx.setLineDash([]);
+    if(d.label){
+      ctx.fillStyle=d.color; ctx.textAlign='center';
+      ctx.fillText(d.label,W/2,xy.y-4); ctx.textAlign='left';
+    }
+    if(hl) drawHandle(ctx,W/2,xy.y,d.color,true);
+  }
+
+  else if(d.type==='trendline'){
+    const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+    if(!p1||!p2){ctx.restore();return;}
+    ctx.beginPath(); ctx.strokeStyle=d.color; ctx.setLineDash([]);
+    ctx.lineWidth=hl?Math.max(d.lineWidth||1,2):(d.lineWidth||1);
+    if(d.extend){
+      const dx=p2.x-p1.x,dy=p2.y-p1.y,len=Math.sqrt(dx*dx+dy*dy)||1;
+      ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x+dx/len*6000,p2.y+dy/len*6000);
+    } else { ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); }
+    ctx.stroke();
+    if(d.label){
+      const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+      ctx.fillStyle=d.color; ctx.textAlign='center';
+      ctx.fillText(d.label,mx,my-6); ctx.textAlign='left';
+    }
+    drawHandle(ctx,p1.x,p1.y,d.color,false);
+    drawHandle(ctx,p2.x,p2.y,d.color,false);
+    if(hl){
+      const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+      drawHandle(ctx,mx,my,d.color,true);
+    }
+  }
+
+  else if(d.type==='box'){
+    const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+    if(!p1||!p2){ctx.restore();return;}
+    const x=Math.min(p1.x,p2.x), y=Math.min(p1.y,p2.y);
+    const w=Math.abs(p2.x-p1.x), h=Math.abs(p2.y-p1.y);
+    const cx2=x+w/2, cy2=y+h/2;
+    ctx.globalAlpha=d.opacity||0.15; ctx.fillStyle=d.color; ctx.fillRect(x,y,w,h);
+    ctx.globalAlpha=1;
+    ctx.strokeStyle=d.borderColor||d.color;
+    ctx.lineWidth=hl?2:1; ctx.setLineDash([]); ctx.strokeRect(x,y,w,h);
+    if(d.label){
+      ctx.fillStyle=d.borderColor||d.color; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(d.label,cx2,cy2); ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    }
+    // No centre dot (issue 1 fix) — edge handles + interior move
+    if(hl){
+      [[x,y],[cx2,y],[x+w,y],[x+w,cy2],[x+w,y+h],[cx2,y+h],[x,y+h],[x,cy2]]
+        .forEach(([hx,hy])=>drawHandle(ctx,hx,hy,d.color,false));
+    }
+  }
+
+  else if(d.type==='fib'){
+    const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+    if(!p1||!p2){ctx.restore();return;}
+    const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
+    const range=d.price2-d.price1;
+    (d.levels||[0,.236,.382,.5,.618,.786,1]).forEach((lvl,i,arr)=>{
+      const price=d.price1+range*lvl;
+      const pt=toXY(d.time1,price); if(!pt) return;
+      const isEdge=(i===0||i===arr.length-1);
+      ctx.beginPath(); ctx.strokeStyle=d.color+(isEdge?'ff':'88');
+      ctx.lineWidth=isEdge?1.5:0.8; ctx.setLineDash([5,3]);
+      ctx.moveTo(xL,pt.y); ctx.lineTo(xR,pt.y); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle=d.color; ctx.textAlign='left';
+      ctx.fillText(`${(lvl*100).toFixed(1)}%  ${price.toFixed(2)}`,xR+4,pt.y+4);
+    });
+    if(d.label){
+      const midPt=toXY(d.time1,d.price1+range*0.5);
+      if(midPt){ ctx.fillStyle=d.color; ctx.textAlign='center';
+        ctx.fillText(d.label,(xL+xR)/2,midPt.y-8); ctx.textAlign='left'; }
+    }
+    drawHandle(ctx,p1.x,p1.y,d.color,false);
+    drawHandle(ctx,p2.x,p2.y,d.color,false);
+    if(hl){ const mx=(p1.x+p2.x)/2,my=(p1.y+p2.y)/2; drawHandle(ctx,mx,my,d.color,true); }
+  }
+
+  else if(d.type==='signal'){
+    const price=d.price||(d.side==='buy'?findBarLow(d.time):findBarHigh(d.time));
+    const pt=toXY(d.time,price); if(!pt){ctx.restore();return;}
+    const isBuy=d.side==='buy', col=d.color||(isBuy?'#3fb950':'#f85149'), sz=8;
+    ctx.beginPath();
+    if(isBuy){ ctx.moveTo(pt.x,pt.y+2); ctx.lineTo(pt.x-sz,pt.y+sz*1.7); ctx.lineTo(pt.x+sz,pt.y+sz*1.7); }
+    else      { ctx.moveTo(pt.x,pt.y-2); ctx.lineTo(pt.x-sz,pt.y-sz*1.7); ctx.lineTo(pt.x+sz,pt.y-sz*1.7); }
+    ctx.closePath(); ctx.fillStyle=col; ctx.fill();
+    if(d.label){
+      ctx.fillStyle=col; ctx.textAlign='center';
+      ctx.fillText(d.label,pt.x,isBuy?pt.y+sz*1.7+12:pt.y-sz*1.7-4);
+      ctx.textAlign='left';
+    }
+    if(hl) drawHandle(ctx,pt.x,pt.y+(isBuy?sz:-sz),col,true);
+  }
+
+  else if(d.type==='text'){
+    const pt=toXY(d.time,d.price); if(!pt){ctx.restore();return;}
+    const fs=d.fontSize||drawingFontSize;
+    ctx.font=`${fs}px ${drawingFont}`;
+    const tw=ctx.measureText(d.text).width;
+    if(hl){ ctx.fillStyle=d.color+'22'; ctx.fillRect(pt.x-2,pt.y-fs-2,tw+8,fs+6); }
+    ctx.fillStyle=d.color||'#e6edf3'; ctx.textBaseline='alphabetic';
+    ctx.fillText(d.text,pt.x+2,pt.y); ctx.textBaseline='alphabetic';
+    if(hl) drawHandle(ctx,pt.x+tw/2+2,pt.y-fs/2,d.color||'#58a6ff',true);
+  }
+
+  ctx.restore();
+}
+
+function drawHandle(ctx,x,y,color,filled){
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x,y,HANDLE_R,0,Math.PI*2);
+  ctx.strokeStyle=color; ctx.lineWidth=1.5;
+  ctx.fillStyle=filled?color:(theme==='dark'?'#0d1117':'#ffffff');
+  ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function setDash(ctx,s){
+  if(s===1) ctx.setLineDash([3,3]);
+  else if(s===2) ctx.setLineDash([8,4]);
+  else ctx.setLineDash([]);
+}
+function findBarLow(t){const b=allBars.find(b=>b.time===t);return b?b.low*0.998:0;}
+function findBarHigh(t){const b=allBars.find(b=>b.time===t);return b?b.high*1.002:0;}
+
+// ═══════════════════════════════════════════════════════════════
+//  HIT TEST
+//  locked=true  → skip drag hit-test (no move/resize)
+//  source=any   → still hittable for context menu (right-click)
+//  We therefore have two hit-test modes:
+//    hitTest(cx,cy)         — for drag; skips locked
+//    hitTestAny(cx,cy)      — for right-click; includes locked
+// ═══════════════════════════════════════════════════════════════
+function hitTest(cx,cy){ return _hitTest(cx,cy,false); }
+function hitTestAny(cx,cy){ return _hitTest(cx,cy,true); }
+
+function _hitTest(cx,cy,includeAll){
+  for(const d of Object.values(drawings).reverse()){
+    // For drag hit-test, skip locked drawings entirely
+    if(!includeAll && d.locked) continue;
+
+    if(d.type==='hline'){
+      const xy=toXY(allBars.length?allBars[Math.floor(allBars.length/2)].time:0,d.price);
+      if(!xy) continue;
+      if(Math.abs(cy-xy.y)<HIT_R) return{id:d.id,handle:'body'};
+    }
+    else if(d.type==='trendline'||d.type==='fib'){
+      const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+      if(!p1||!p2) continue;
+      if(dist(cx,cy,p1.x,p1.y)<HIT_R) return{id:d.id,handle:'p1'};
+      if(dist(cx,cy,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'p2'};
+      const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+      if(dist(cx,cy,mx,my)<HIT_R) return{id:d.id,handle:'body'};
+      if(d.type==='trendline'&&distToSeg(cx,cy,p1.x,p1.y,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'body'};
+      if(d.type==='fib'){
+        const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
+        const range=d.price2-d.price1;
+        for(const lvl of (d.levels||[])){
+          const pt=toXY(d.time1,d.price1+range*lvl); if(!pt) continue;
+          if(cx>=xL&&cx<=xR&&Math.abs(cy-pt.y)<HIT_R) return{id:d.id,handle:'body'};
+        }
+      }
+    }
+    else if(d.type==='box'){
+      const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+      if(!p1||!p2) continue;
+      const x=Math.min(p1.x,p2.x), y=Math.min(p1.y,p2.y);
+      const w=Math.abs(p2.x-p1.x), h=Math.abs(p2.y-p1.y), cx2=x+w/2, cy2=y+h/2;
+      const handles=[['tl',x,y],['tc',cx2,y],['tr',x+w,y],['rc',x+w,cy2],
+                     ['br',x+w,y+h],['bc',cx2,y+h],['bl',x,y+h],['lc',x,cy2]];
+      for(const [hname,hx,hy] of handles)
+        if(dist(cx,cy,hx,hy)<HIT_R) return{id:d.id,handle:hname};
+      const ez=HIT_R+2;
+      if(cx>x+ez&&cx<x+w-ez&&cy>y+ez&&cy<y+h-ez) return{id:d.id,handle:'interior'};
+    }
+    else if(d.type==='signal'){
+      const price=d.price||(d.side==='buy'?findBarLow(d.time):findBarHigh(d.time));
+      const pt=toXY(d.time,price); if(!pt) continue;
+      if(dist(cx,cy,pt.x,pt.y)<HIT_R+4) return{id:d.id,handle:'body'};
+    }
+    else if(d.type==='text'){
+      const pt=toXY(d.time,d.price); if(!pt) continue;
+      const fs=d.fontSize||drawingFontSize;
+      if(cx>=pt.x&&cx<=pt.x+d.text.length*fs*0.62&&cy>=pt.y-fs-2&&cy<=pt.y+4)
+        return{id:d.id,handle:'body'};
+    }
+  }
+  return null;
+}
+function dist(x1,y1,x2,y2){return Math.sqrt((x2-x1)**2+(y2-y1)**2);}
+function distToSeg(px,py,x1,y1,x2,y2){
+  const dx=x2-x1,dy=y2-y1,l2=dx*dx+dy*dy;
+  if(l2===0) return dist(px,py,x1,y1);
+  const t=Math.max(0,Math.min(1,((px-x1)*dx+(py-y1)*dy)/l2));
+  return dist(px,py,x1+t*dx,y1+t*dy);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  GHOST PREVIEW
+// ═══════════════════════════════════════════════════════════════
+function redrawGhost(){
+  const W=ghostCv.clientWidth, H=ghostCv.clientHeight;
+  gCtx.clearRect(0,0,W,H);
+  if(!draftState) return;
+  const p1=toXY(draftState.time1,draftState.price1);
+  if(!p1) return;
+  const p2=mousePos;
+  gCtx.save();
+  gCtx.strokeStyle='#58a6ffaa'; gCtx.lineWidth=1; gCtx.setLineDash([5,4]);
+  if(draftState.tool==='tline'||draftState.tool==='fib'){
+    gCtx.beginPath(); gCtx.moveTo(p1.x,p1.y); gCtx.lineTo(p2.x,p2.y); gCtx.stroke();
+  } else if(draftState.tool==='box'){
+    gCtx.strokeRect(Math.min(p1.x,p2.x),Math.min(p1.y,p2.y),Math.abs(p2.x-p1.x),Math.abs(p2.y-p1.y));
+  }
+  gCtx.setLineDash([]);
+  gCtx.beginPath(); gCtx.arc(p1.x,p1.y,4,0,Math.PI*2);
+  gCtx.fillStyle='#58a6ff'; gCtx.fill();
+  gCtx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  TOOL SELECTION
+// ═══════════════════════════════════════════════════════════════
+function setTool(t){
+  activeTool=t; draftState=null;
+  document.querySelectorAll('.tb[id^="tool-"]').forEach(b=>b.classList.remove('on'));
+  const btn=document.getElementById('tool-'+t); if(btn) btn.classList.add('on');
+  const isDrawTool=['hline','tline','box','fib','text'].includes(t);
+  setCanvasInteractive(isDrawTool);
+  document.getElementById('panes').style.cursor=isDrawTool?'crosshair':'default';
+  gCtx.clearRect(0,0,ghostCv.width,ghostCv.height);
+  selectedId=null; redrawAll();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MOUSE EVENTS
+// ═══════════════════════════════════════════════════════════════
+document.getElementById('panes').addEventListener('mousemove',e=>{
+  const r=document.getElementById('panes').getBoundingClientRect();
+  mousePos={x:e.clientX-r.left, y:e.clientY-r.top};
+  if(draftState){ redrawGhost(); return; }
+  if(activeTool==='cursor'){
+    const hit=hitTest(mousePos.x,mousePos.y);        // unlocked only — for drag
+    const hitAny=hitTestAny(mousePos.x,mousePos.y);  // all — for right-click + hover highlight
+    const newHover=hitAny?hitAny.id:null;
+    const changed=(newHover!==hoverId);
+    hoverId=newHover;
+    // Canvas must be interactive whenever any drawing is under cursor
+    // (for both drag on unlocked AND right-click on locked)
+    setCanvasInteractive(!!hitAny);
+    if(hit){
+      // Cursor style based on unlocked drawing handle
+      const h=hit.handle;
+      if(h==='body'||h==='interior') drawCv.style.cursor='move';
+      else if(h==='p1'||h==='p2')   drawCv.style.cursor='crosshair';
+      else if(h==='tl'||h==='br')   drawCv.style.cursor='nwse-resize';
+      else if(h==='tr'||h==='bl')   drawCv.style.cursor='nesw-resize';
+      else if(h==='tc'||h==='bc')   drawCv.style.cursor='ns-resize';
+      else if(h==='lc'||h==='rc')   drawCv.style.cursor='ew-resize';
+    } else if(hitAny){
+      // Locked drawing under cursor — show pointer so user knows they can right-click
+      drawCv.style.cursor='pointer';
+    } else {
+      drawCv.style.cursor='default';
+    }
+    if(changed) redrawAll();
+  }
+});
+
+drawCv.addEventListener('mousedown',e=>{
+  if(e.button!==0) return;
+  const r=document.getElementById('panes').getBoundingClientRect();
+  const cx=e.clientX-r.left, cy=e.clientY-r.top;
+  const hit=hitTest(cx,cy); if(!hit) return;
+  e.stopPropagation();
+  selectedId=hit.id; hoverId=hit.id;
+  dragState={id:hit.id,handle:hit.handle,startX:cx,startY:cy,
+             startCoord:fromXY(cx,cy),orig:JSON.parse(JSON.stringify(drawings[hit.id]))};
+  redrawAll();
+});
+
+document.addEventListener('mousemove',e=>{
+  if(!dragState) return;
+  const r=document.getElementById('panes').getBoundingClientRect();
+  onDragMove(e.clientX-r.left, e.clientY-r.top);
+});
+
+document.addEventListener('mouseup',()=>{
+  if(!dragState) return;
+  notifyDrawingChanged(drawings[dragState.id]);
+  dragState=null;
+});
+
+document.getElementById('panes').addEventListener('click',e=>{
+  if(activeTool==='cursor') return;
+  const r=document.getElementById('panes').getBoundingClientRect();
+  const cx=e.clientX-r.left, cy=e.clientY-r.top;
+  const coord=fromXY(cx,cy); if(!coord) return;
+  const{time,price}=coord;
+  if(activeTool==='hline'){
+    const id='hline_'+Date.now();
+    drawings[id]={type:'hline',id,price,color:'#ef5350',lineWidth:1,lineStyle:0,label:''};
+    redrawAll(); notifyDrawingChanged(drawings[id]); setTool('cursor'); return;
+  }
+  if(activeTool==='text'){
+    const txt=prompt('Label text:',''); if(!txt) return;
+    const id='txt_'+Date.now();
+    drawings[id]={type:'text',id,time,price,text:txt,color:'#e6edf3',fontSize:12};
+    redrawAll(); notifyDrawingChanged(drawings[id]); setTool('cursor'); return;
+  }
+  if(!draftState){ draftState={tool:activeTool,time1:time,price1:price}; redrawGhost(); return; }
+  const id=activeTool+'_'+Date.now(); let d=null;
+  if(activeTool==='tline')
+    d={type:'trendline',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
+       color:'#2196f3',lineWidth:1.5,extend:false,label:''};
+  else if(activeTool==='box')
+    d={type:'box',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
+       color:'#26a69a',opacity:.15,borderColor:'#26a69a',label:''};
+  else if(activeTool==='fib')
+    d={type:'fib',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
+       color:'#9c27b0',levels:[0,.236,.382,.5,.618,.786,1],label:''};
+  if(d){ drawings[d.id]=d; notifyDrawingChanged(d); }
+  draftState=null; gCtx.clearRect(0,0,ghostCv.width,ghostCv.height);
+  redrawAll(); setTool('cursor');
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  DRAG MOVE / RESIZE
+// ═══════════════════════════════════════════════════════════════
+function onDragMove(cx,cy){
+  const coord=fromXY(cx,cy); if(!coord) return;
+  const{time,price}=coord;
+  const d=drawings[dragState.id], o=dragState.orig, h=dragState.handle;
+  const isMove=(h==='body'||h==='interior');
+
+  if(d.type==='hline'){
+    d.price=price;
+  }
+  else if(d.type==='trendline'||d.type==='fib'){
+    if(h==='p1'){ d.time1=time; d.price1=price; }
+    else if(h==='p2'){ d.time2=time; d.price2=price; }
+    else if(isMove){
+      const sc=dragState.startCoord;
+      d.price1=o.price1+(price-sc.price); d.price2=o.price2+(price-sc.price);
+      d.time1=o.time1+(time-sc.time);     d.time2=o.time2+(time-sc.time);
+    }
+  }
+  else if(d.type==='box'){
+    if(isMove){
+      const sc=dragState.startCoord;
+      d.price1=o.price1+(price-sc.price); d.price2=o.price2+(price-sc.price);
+      d.time1=o.time1+(time-sc.time);     d.time2=o.time2+(time-sc.time);
+    } else {
+      const op1=toXYFromOrig(o.time1,o.price1);
+      const op2=toXYFromOrig(o.time2,o.price2);
+      if(!op1||!op2) return;
+      const origLeft=Math.min(op1.x,op2.x), origRight=Math.max(op1.x,op2.x);
+      const origTop=Math.min(op1.y,op2.y),  origBot=Math.max(op1.y,op2.y);
+      let newLeft=origLeft, newRight=origRight, newTop=origTop, newBot=origBot;
+      if(h==='tl'||h==='lc'||h==='bl') newLeft =Math.min(cx,origRight-10);
+      if(h==='tr'||h==='rc'||h==='br') newRight=Math.max(cx,origLeft+10);
+      if(h==='tl'||h==='tc'||h==='tr') newTop  =Math.min(cy,origBot-10);
+      if(h==='bl'||h==='bc'||h==='br') newBot  =Math.max(cy,origTop+10);
+      const tL=mainChart.timeScale().coordinateToTime(newLeft);
+      const tR=mainChart.timeScale().coordinateToTime(newRight);
+      const wR=panes.main.paneWrap.getBoundingClientRect();
+      const pR=document.getElementById('panes').getBoundingClientRect();
+      const offY=wR.top-pR.top;
+      const priceTop=mainSeries.coordinateToPrice(newTop-offY);
+      const priceBot=mainSeries.coordinateToPrice(newBot-offY);
+      if(tL==null||tR==null||priceTop==null||priceBot==null) return;
+      const t1WasLeft=(o.time1<=o.time2);
+      d.time1=t1WasLeft?tL:tR; d.time2=t1WasLeft?tR:tL;
+      const p1WasTop=(o.price1>=o.price2);
+      d.price1=p1WasTop?priceTop:priceBot; d.price2=p1WasTop?priceBot:priceTop;
+    }
+  }
+  else if(d.type==='signal'){ d.time=time; if(d.price!=null) d.price=price; }
+  else if(d.type==='text'){   d.time=time; d.price=price; }
+  redrawAll();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CONTEXT MENU — right-click on any drawing (locked or not)
+// ═══════════════════════════════════════════════════════════════
+drawCv.addEventListener('contextmenu',e=>{
+  e.preventDefault();
+  const r=document.getElementById('panes').getBoundingClientRect();
+  // hitTestAny includes locked drawings for right-click
+  const hit=hitTestAny(e.clientX-r.left, e.clientY-r.top);
+  if(!hit){ ctxMenu.style.display='none'; return; }
+
+  ctxTargetId=hit.id; selectedId=hit.id; redrawAll();
+  const d=drawings[hit.id];
+  const isServer=(d.source==='server');
+  const isLocked=!!d.locked;
+
+  // 1. Source badge
+  document.getElementById('ctx-source-badge').textContent = isServer ? 'Server' : 'User';
+  document.getElementById('ctx-source-badge').className   = 'badge '+(isServer?'server':'user');
+
+  // 2. Lock/unlock row
+  document.getElementById('ctx-lock-icon').textContent  = isLocked ? '🔒' : '🔓';
+  document.getElementById('ctx-lock-label').textContent = isLocked ? 'Unlock' : 'Lock';
+
+  // 3. Edit rows — greyed out when locked
+  document.getElementById('ctx-rename-row').classList.toggle('disabled', isLocked);
+  document.getElementById('ctx-color-row').classList.toggle('disabled',  isLocked);
+
+  ctxMenu.style.left=e.clientX+'px'; ctxMenu.style.top=e.clientY+'px';
+  ctxMenu.style.display='block';
+});
+document.addEventListener('click',()=>ctxMenu.style.display='none');
+
+function ctxToggleLock(){
+  const d=drawings[ctxTargetId]; if(!d) return;
+  d.locked=!d.locked;
+  // Update the menu while it may still be open
+  document.getElementById('ctx-lock-icon').textContent  = d.locked ? '🔒' : '🔓';
+  document.getElementById('ctx-lock-label').textContent = d.locked ? 'Unlock' : 'Lock';
+  document.getElementById('ctx-rename-row').classList.toggle('disabled', d.locked);
+  document.getElementById('ctx-color-row').classList.toggle('disabled',  d.locked);
+  // Notify Python
+  if(ws&&ws.readyState===1)
+    ws.send(JSON.stringify({type:'drawing_lock_changed',id:d.id,locked:d.locked}));
+  redrawAll();
+}
+
+function ctxRename(){
+  const d=drawings[ctxTargetId]; if(!d||d.locked) return;
+  const cur=d.type==='text'?d.text:(d.label||'');
+  const val=prompt('Label / text:',cur); if(val===null) return;
+  if(d.type==='text') d.text=val; else d.label=val;
+  redrawAll(); notifyDrawingChanged(d);
+}
+function ctxEditColor(){
+  const d=drawings[ctxTargetId]; if(!d||d.locked) return;
+  const val=prompt('Color (hex):',d.color); if(!val) return;
+  d.color=val; if(d.borderColor) d.borderColor=val;
+  redrawAll(); notifyDrawingChanged(d);
+}
+// Delete works regardless of lock state
+function ctxDelete(){
+  if(!ctxTargetId) return;
+  delete drawings[ctxTargetId];
+  if(selectedId===ctxTargetId) selectedId=null;
+  redrawAll();
+  if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'drawing_deleted',id:ctxTargetId}));
+  ctxTargetId=null;
+}
+// Clear toolbar — only removes UNLOCKED drawings
+function clearDrawings(){
+  Object.keys(drawings).forEach(k=>{ if(!drawings[k].locked) delete drawings[k]; });
+  selectedId=null; hoverId=null; redrawAll();
+}
+function notifyDrawingChanged(d){
+  if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'drawing_updated',drawing:d}));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  OHLCV
+// ═══════════════════════════════════════════════════════════════
+function updateOHLCV(param){
+  if(!param.seriesData||!mainSeries) return;
+  const b=param.seriesData.get(mainSeries); if(!b) return;
+  const up=b.close>=b.open, cl=up?'up':'dn';
+  const f=v=>v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  document.getElementById('oi-o').innerHTML=`<span style="color:var(--text2)">O</span> <span class="${cl}">${f(b.open)}</span>`;
+  document.getElementById('oi-h').innerHTML=`<span style="color:var(--text2)">H</span> <span class="up">${f(b.high)}</span>`;
+  document.getElementById('oi-l').innerHTML=`<span style="color:var(--text2)">L</span> <span class="dn">${f(b.low)}</span>`;
+  document.getElementById('oi-c').innerHTML=`<span style="color:var(--text2)">C</span> <span class="${cl}">${f(b.close)}</span>`;
+  if(b.volume!=null) document.getElementById('oi-v').innerHTML=`<span style="color:var(--text2)">V</span> <span>${fmtVol(b.volume)}</span>`;
+}
+function fmtVol(v){
+  if(v>=1e9) return(v/1e9).toFixed(2)+'B';
+  if(v>=1e6) return(v/1e6).toFixed(2)+'M';
+  if(v>=1e3) return(v/1e3).toFixed(1)+'K';
+  return v.toFixed(0);
+}
+
+function toggleChartType(){
+  chartType=chartType==='candlestick'?'heikinashi':'candlestick';
+  document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
+  if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'set_chart_type',chartType}));
+}
+function fitAll(){ Object.values(panes).forEach(p=>p.chart.timeScale().fitContent()); }
+
+// ═══════════════════════════════════════════════════════════════
+//  WEBSOCKET
+// ═══════════════════════════════════════════════════════════════
+let ws=null, retryTimer=null;
+
+function wsConnect(){
+  const dot=document.getElementById('wsdot'), lbl=document.getElementById('wslbl');
+  dot.className='conn'; lbl.textContent='Connecting…';
+  ws=new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen=()=>{ dot.className='live'; lbl.textContent='Live'; };
+  ws.onclose=()=>{ dot.className=''; lbl.textContent='Disconnected';
+    clearTimeout(retryTimer); retryTimer=setTimeout(wsConnect,2000); };
+  ws.onerror=()=>ws.close();
+  ws.onmessage=e=>{ try{ handleMsg(JSON.parse(e.data)); }catch(err){ console.error(err); } };
+}
+
+function handleMsg(msg){
+  switch(msg.type){
+    case 'init':{
+      document.getElementById('panes').innerHTML='';
+      document.getElementById('panes').appendChild(drawCv);
+      document.getElementById('panes').appendChild(ghostCv);
+      Object.keys(panes).forEach(k=>delete panes[k]);
+      Object.keys(drawings).forEach(k=>delete drawings[k]);
+      Object.keys(indMeta).forEach(k=>delete indMeta[k]);
+      mainSeries=null; mainChart=null; volumeSeries=null;
+      draftState=null; selectedId=null; hoverId=null;
+
+      theme=msg.theme||'dark';
+      document.body.classList.toggle('light',theme==='light');
+      chartType=msg.chartType||'candlestick';
+      volumeInMain=msg.volumeInMain!==false;
+      document.getElementById('chart-title').textContent=msg.title||'Chart';
+      document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
+
+      initMain(); resizeOverlays();
+      setData(msg.bars||[]);
+      (msg.indicators||[]).forEach(addIndicator);
+      (msg.drawings||[]).forEach(d=>{ drawings[d.id]=d; });
+      redrawAll(); fitAll();
+      setCanvasInteractive(false);
+      break;
+    }
+    case 'stream':           streamBar(msg.bar); redrawAll(); break;
+    case 'stream_indicator': streamIndicator(msg.name,msg.point); break;
+    case 'add_indicator':    addIndicator(msg.indicator); break;
+    case 'add_drawing':      drawings[msg.drawing.id]=msg.drawing; redrawAll(); break;
+    case 'remove_drawing':   delete drawings[msg.id]; if(selectedId===msg.id) selectedId=null; redrawAll(); break;
+    case 'clear_drawings':   clearDrawings(); break;
+    case 'update_drawing':
+      if(drawings[msg.drawing.id]) Object.assign(drawings[msg.drawing.id],msg.drawing);
+      redrawAll(); break;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SETTINGS — FONTS
+// ═══════════════════════════════════════════════════════════════
+function toggleSettings(){
+  const ov=document.getElementById('settings-overlay');
+  if(ov.classList.contains('open')){ closeSettings(); return; }
+  document.getElementById('sf-axis').value    = axisFont;
+  document.getElementById('sf-axis-size').value = axisFontSize;
+  document.getElementById('sf-axis-size-val').textContent = axisFontSize+'px';
+  document.getElementById('sf-drawing').value = drawingFont;
+  document.getElementById('sf-size').value    = drawingFontSize;
+  document.getElementById('sf-size-val').textContent = drawingFontSize+'px';
+  ov.classList.add('open');
+  document.getElementById('settings-btn').classList.add('on');
+}
+function closeSettings(){
+  document.getElementById('settings-overlay').classList.remove('open');
+  document.getElementById('settings-btn').classList.remove('on');
+}
+function onOverlayClick(e){ if(e.target.id==='settings-overlay') closeSettings(); }
+
+function applyFonts(){
+  axisFont        = document.getElementById('sf-axis').value;
+  axisFontSize    = parseInt(document.getElementById('sf-axis-size').value,10);
+  drawingFont     = document.getElementById('sf-drawing').value;
+  drawingFontSize = parseInt(document.getElementById('sf-size').value,10);
+
+  // Apply to all LWC charts (axis labels)
+  Object.values(panes).forEach(p=>p.chart.applyOptions({
+    layout:{...tOpts().layout, fontFamily:axisFont, fontSize:axisFontSize}
+  }));
+  // Apply to OHLCV header
+  document.getElementById('ohlcv').style.fontFamily=axisFont;
+  document.getElementById('ohlcv').style.fontSize=axisFontSize+'px';
+  // Indicator legend uses CSS font — update via CSS var equivalent
+  document.querySelectorAll('.il-row,.il-val,.il-name').forEach(el=>{
+    el.style.fontFamily=axisFont; el.style.fontSize=axisFontSize+'px';
+  });
+
+  redrawAll();
+  closeSettings();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  BOOT
+// ═══════════════════════════════════════════════════════════════
+window.addEventListener('resize',()=>{ resizeOverlays(); redrawAll(); });
+initMain(); resizeOverlays(); wsConnect(); setTool('cursor');
+setInterval(()=>{ if(Object.keys(drawings).length) redrawAll(); },50);
+</script>
+</body>
+</html>
