@@ -24,6 +24,10 @@ log = logging.getLogger("algotradekit.visual.server")
 # Path is relative to THIS file — always resolves correctly regardless of cwd
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Ports assigned to a ChartServer that hasn't started its thread yet.
+# Prevents two Chart() calls from getting the same port number.
+_reserved_ports: set[int] = set()
+
 
 # ---------------------------------------------------------------------------
 # Port helper
@@ -32,9 +36,12 @@ STATIC_DIR = Path(__file__).parent / "static"
 def _find_free_port(start: int = 8700) -> int:
     """Find a free TCP port starting from *start* (scans up to start+200)."""
     for port in range(start, start + 200):
+        if port in _reserved_ports:       # already claimed by another Chart()
+            continue
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(("127.0.0.1", port))
+                _reserved_ports.add(port) # claim it immediately
                 return port
             except OSError:
                 continue
@@ -166,6 +173,7 @@ class ChartServer:
         log.info("ChartServer started → http://127.0.0.1:%d", self.port)
 
     def stop(self) -> None:
+        _reserved_ports.discard(self.port)
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
 
