@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "AlgoTradeKit"
-version = "0.2.0"
+version = "0.3.0"
 description = "Algorithmic Trading Toolkit — data collection, indicators, strategy, simulation, and live trading"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -7,7 +7,19 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [Unreleased]
+## [0.3.0] — 2026-06-05
+
+### Added
+- `visual` module: `Chart` class for interactive candlestick visualization
+- Served via FastAPI + WebSocket with TradingView lightweight-charts frontend
+- `Chart.from_csv()` — load directly from AlgoTradeKit Collector CSV files
+- `Chart.set_data()` — accepts AlgoTradeKit `timestamp` (ms) column natively
+- `Chart.stream_from_atk()` — bridge for future live exchange feeds
+- `Chart.add_indicator_from_atk()` — bridge for future indicator/strategy output
+- Drawing tools: HorizontalLine, TrendLine, Box, Signal, TextLabel, FibRetracement
+- Candlestick + Heikin-Ashi chart types, dark/light themes
+- Live streaming: `stream()` and `stream_indicator()` for real-time updates
+- Layout save/load to JSON
 
 ---
 
