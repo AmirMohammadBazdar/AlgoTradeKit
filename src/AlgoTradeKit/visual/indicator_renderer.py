@@ -48,6 +48,8 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from .models import RawIndicator
+
 if TYPE_CHECKING:  # pragma: no cover
     from AlgoTradeKit.visual.chart import Chart
     from AlgoTradeKit.indicator.rsi import RSI
@@ -106,8 +108,17 @@ def _series_to_hist(
 
 
 def _next_pane(chart: "Chart") -> int:
-    """Return the next free pane index (0 = price pane)."""
-    used = {ind.get("pane", 0) for ind in getattr(chart, "_indicators", [])}
+    """Return the next free pane index (0 = price pane).
+
+    Works with both IndicatorSeries objects (have a .pane attribute) and
+    RawIndicator objects (have a .payload dict with a 'pane' key).
+    """
+    used = set()
+    for ind in getattr(chart, "_indicators", []):
+        if isinstance(ind, RawIndicator):
+            used.add(ind.payload.get("pane", 0))
+        else:
+            used.add(getattr(ind, "pane", 0))
     p = 1
     while p in used:
         p += 1
@@ -159,40 +170,44 @@ def add_ma(
         if key.startswith("upper_") or key.startswith("lower_"):
             continue
 
-        entry = {
-            "id": f"ma_{name}_{key}_{id(ma_obj)}",
-            "type": "line",
-            "pane": 0,  # price pane
-            "data": _series_to_tv(series, timestamps),
-            "options": {
-                "color": line_color,
-                "lineWidth": line_width,
-                "title": title or auto_title,
-                "priceScaleId": "right",
+        chart._indicators.append(RawIndicator(
+            name=title or auto_title,
+            payload={
+                "id": f"ma_{name}_{key}_{id(ma_obj)}",
+                "type": "line",
+                "pane": 0,  # price pane
+                "data": _series_to_tv(series, timestamps),
+                "options": {
+                    "color": line_color,
+                    "lineWidth": line_width,
+                    "title": title or auto_title,
+                    "priceScaleId": "right",
+                },
             },
-        }
-        chart._indicators.append(entry)
+        ))
 
     # VWAP bands
     for b in [1, 2, 3]:
         uk = f"upper_{b}"
         lk = f"lower_{b}"
         if uk in result and lk in result:
-            band_color = line_color.replace(")", ", 0.3)").replace("rgb", "rgba") if "rgb" in line_color else line_color
             for side_key, side_label in [(uk, f"VWAP +{b}σ"), (lk, f"VWAP -{b}σ")]:
-                chart._indicators.append({
-                    "id": f"vwap_band_{b}_{side_key}_{id(ma_obj)}",
-                    "type": "line",
-                    "pane": 0,
-                    "data": _series_to_tv(result[side_key], timestamps),
-                    "options": {
-                        "color": line_color,
-                        "lineWidth": 1,
-                        "lineStyle": 2,  # dashed
-                        "title": side_label,
-                        "priceScaleId": "right",
+                chart._indicators.append(RawIndicator(
+                    name=side_label,
+                    payload={
+                        "id": f"vwap_band_{b}_{side_key}_{id(ma_obj)}",
+                        "type": "line",
+                        "pane": 0,
+                        "data": _series_to_tv(result[side_key], timestamps),
+                        "options": {
+                            "color": line_color,
+                            "lineWidth": 1,
+                            "lineStyle": 2,  # dashed
+                            "title": side_label,
+                            "priceScaleId": "right",
+                        },
                     },
-                })
+                ))
 
 
 def add_rsi(
@@ -215,43 +230,49 @@ def add_rsi(
     pane = _next_pane(chart)
 
     # --- RSI line ---
-    chart._indicators.append({
-        "id": f"rsi_line_{id(rsi)}",
-        "type": "line",
-        "pane": pane,
-        "data": _series_to_tv(rsi.rsi, timestamps),
-        "options": {
-            "color": rsi.COLOR_RSI,
-            "lineWidth": 1,
-            "title": f"RSI({rsi.length})",
-            "priceScaleId": f"pane{pane}",
+    chart._indicators.append(RawIndicator(
+        name=f"RSI({rsi.length})",
+        payload={
+            "id": f"rsi_line_{id(rsi)}",
+            "type": "line",
+            "pane": pane,
+            "data": _series_to_tv(rsi.rsi, timestamps),
+            "options": {
+                "color": rsi.COLOR_RSI,
+                "lineWidth": 1,
+                "title": f"RSI({rsi.length})",
+                "priceScaleId": f"pane{pane}",
+            },
+            "scale": {"min": 0, "max": 100},
+            "levels": [
+                {"value": rsi.overbought, "color": rsi.COLOR_OB, "style": "dashed", "label": str(rsi.overbought)},
+                {"value": rsi.oversold,   "color": rsi.COLOR_OS, "style": "dashed", "label": str(rsi.oversold)},
+                {"value": 50,             "color": "#787B86",    "style": "dotted"},
+            ],
+            "zones": [
+                {"upper": 100,           "lower": rsi.overbought, "color": rsi.COLOR_OB_FILL},
+                {"upper": rsi.oversold,  "lower": 0,              "color": rsi.COLOR_OS_FILL},
+            ],
         },
-        "scale": {"min": 0, "max": 100},
-        "levels": [
-            {"value": rsi.overbought, "color": rsi.COLOR_OB, "style": "dashed", "label": str(rsi.overbought)},
-            {"value": rsi.oversold, "color": rsi.COLOR_OS, "style": "dashed", "label": str(rsi.oversold)},
-            {"value": 50, "color": "#787B86", "style": "dotted"},
-        ],
-        "zones": [
-            {"upper": 100, "lower": rsi.overbought, "color": rsi.COLOR_OB_FILL},
-            {"upper": rsi.oversold, "lower": 0, "color": rsi.COLOR_OS_FILL},
-        ],
-    })
+    ))
 
     # --- Optional MA on RSI ---
     if "rsi_ma" in rsi.result:
-        chart._indicators.append({
-            "id": f"rsi_ma_{id(rsi)}",
-            "type": "line",
-            "pane": pane,
-            "data": _series_to_tv(rsi.rsi_ma, timestamps),
-            "options": {
-                "color": rsi.COLOR_MA,
-                "lineWidth": 1,
-                "title": f"{rsi.ma_type}({rsi.ma_length})",
-                "priceScaleId": f"pane{pane}",
+        chart._indicators.append(RawIndicator(
+            name=f"{rsi.ma_type}({rsi.ma_length})",
+            payload={
+                "id": f"rsi_ma_{id(rsi)}",
+                "type": "line",
+                "pane": pane,
+                "data": _series_to_tv(rsi.rsi_ma, timestamps),
+                "options": {
+                    "color": rsi.COLOR_MA,
+                    "lineWidth": 1,
+                    "title": f"{rsi.ma_type}({rsi.ma_length})",
+                    "priceScaleId": f"pane{pane}",
+                },
             },
-        })
+        ))
 
 
 def add_macd(
@@ -274,49 +295,60 @@ def add_macd(
     pane = _next_pane(chart)
     colors = macd.histogram_colors()
 
+    macd_title = f"MACD({macd.fast_length},{macd.slow_length},{macd.signal_length})"
+
     # --- Histogram ---
-    chart._indicators.append({
-        "id": f"macd_hist_{id(macd)}",
-        "type": "histogram",
-        "pane": pane,
-        "data": _series_to_hist(macd.histogram, colors, timestamps),
-        "options": {
-            "color": macd.COLOR_HIST_POS_GROW,  # default; overridden per-bar
-            "title": "Histogram",
-            "priceScaleId": f"pane{pane}",
+    chart._indicators.append(RawIndicator(
+        name="Histogram",
+        payload={
+            "id": f"macd_hist_{id(macd)}",
+            "type": "histogram",
+            "pane": pane,
+            "data": _series_to_hist(macd.histogram, colors, timestamps),
+            "options": {
+                "color": macd.COLOR_HIST_POS_GROW,  # default; overridden per-bar
+                "title": "Histogram",
+                "priceScaleId": f"pane{pane}",
+            },
+            "levels": [
+                {"value": 0, "color": "#787B86", "style": "solid"},
+            ],
         },
-        "levels": [
-            {"value": 0, "color": "#787B86", "style": "solid"},
-        ],
-    })
+    ))
 
     # --- MACD line ---
-    chart._indicators.append({
-        "id": f"macd_line_{id(macd)}",
-        "type": "line",
-        "pane": pane,
-        "data": _series_to_tv(macd.macd, timestamps),
-        "options": {
-            "color": macd.COLOR_MACD,
-            "lineWidth": 1,
-            "title": f"MACD({macd.fast_length},{macd.slow_length},{macd.signal_length})",
-            "priceScaleId": f"pane{pane}",
+    chart._indicators.append(RawIndicator(
+        name=macd_title,
+        payload={
+            "id": f"macd_line_{id(macd)}",
+            "type": "line",
+            "pane": pane,
+            "data": _series_to_tv(macd.macd, timestamps),
+            "options": {
+                "color": macd.COLOR_MACD,
+                "lineWidth": 1,
+                "title": macd_title,
+                "priceScaleId": f"pane{pane}",
+            },
         },
-    })
+    ))
 
     # --- Signal line ---
-    chart._indicators.append({
-        "id": f"macd_signal_{id(macd)}",
-        "type": "line",
-        "pane": pane,
-        "data": _series_to_tv(macd.signal, timestamps),
-        "options": {
-            "color": macd.COLOR_SIGNAL,
-            "lineWidth": 1,
-            "title": f"Signal({macd.signal_length})",
-            "priceScaleId": f"pane{pane}",
+    chart._indicators.append(RawIndicator(
+        name=f"Signal({macd.signal_length})",
+        payload={
+            "id": f"macd_signal_{id(macd)}",
+            "type": "line",
+            "pane": pane,
+            "data": _series_to_tv(macd.signal, timestamps),
+            "options": {
+                "color": macd.COLOR_SIGNAL,
+                "lineWidth": 1,
+                "title": f"Signal({macd.signal_length})",
+                "priceScaleId": f"pane{pane}",
+            },
         },
-    })
+    ))
 
 
 def add_ichimoku(
@@ -366,97 +398,109 @@ def add_ichimoku(
         ts_chikou = ts
 
     # ---- Tenkan ----
-    chart._indicators.append({
-        "id": f"ichi_tenkan_{id(ichi)}",
-        "type": "line",
-        "pane": 0,
-        "data": _series_to_tv(ichi.tenkan, ts),
-        "options": {
-            "color": ichi.COLOR_TENKAN,
-            "lineWidth": 1,
-            "title": f"Tenkan({ichi.tenkan_period})",
-            "priceScaleId": "right",
+    chart._indicators.append(RawIndicator(
+        name=f"Tenkan({ichi.tenkan_period})",
+        payload={
+            "id": f"ichi_tenkan_{id(ichi)}",
+            "type": "line",
+            "pane": 0,
+            "data": _series_to_tv(ichi.tenkan, ts),
+            "options": {
+                "color": ichi.COLOR_TENKAN,
+                "lineWidth": 1,
+                "title": f"Tenkan({ichi.tenkan_period})",
+                "priceScaleId": "right",
+            },
         },
-    })
+    ))
 
     # ---- Kijun ----
-    chart._indicators.append({
-        "id": f"ichi_kijun_{id(ichi)}",
-        "type": "line",
-        "pane": 0,
-        "data": _series_to_tv(ichi.kijun, ts),
-        "options": {
-            "color": ichi.COLOR_KIJUN,
-            "lineWidth": 1,
-            "title": f"Kijun({ichi.kijun_period})",
-            "priceScaleId": "right",
+    chart._indicators.append(RawIndicator(
+        name=f"Kijun({ichi.kijun_period})",
+        payload={
+            "id": f"ichi_kijun_{id(ichi)}",
+            "type": "line",
+            "pane": 0,
+            "data": _series_to_tv(ichi.kijun, ts),
+            "options": {
+                "color": ichi.COLOR_KIJUN,
+                "lineWidth": 1,
+                "title": f"Kijun({ichi.kijun_period})",
+                "priceScaleId": "right",
+            },
         },
-    })
+    ))
 
     # ---- Chikou Span (plotted disp bars in the PAST) ----
-    # ichi.chikou[i] = close[i] shifted -disp, so chikou data appears
-    # at the timestamp of bar i (which is disp bars before current close).
-    chart._indicators.append({
-        "id": f"ichi_chikou_{id(ichi)}",
-        "type": "line",
-        "pane": 0,
-        "data": _series_to_tv(ichi.chikou, ts_chikou),
-        "options": {
-            "color": ichi.COLOR_CHIKOU,
-            "lineWidth": 1,
-            "title": "Chikou",
-            "priceScaleId": "right",
+    chart._indicators.append(RawIndicator(
+        name="Chikou",
+        payload={
+            "id": f"ichi_chikou_{id(ichi)}",
+            "type": "line",
+            "pane": 0,
+            "data": _series_to_tv(ichi.chikou, ts_chikou),
+            "options": {
+                "color": ichi.COLOR_CHIKOU,
+                "lineWidth": 1,
+                "title": "Chikou",
+                "priceScaleId": "right",
+            },
         },
-    })
+    ))
 
     # ---- Senkou Span A (forward-shifted) ----
-    # ichi.senkou_a already has the first `disp` bars as NaN (warm-up).
-    # We append the cloud_future_a extension so the line extends past last candle.
     sa_full = pd.concat([ichi.senkou_a, ichi.result["cloud_future_a"]]).reset_index(drop=True)
-    chart._indicators.append({
-        "id": f"ichi_span_a_{id(ichi)}",
-        "type": "line",
-        "pane": 0,
-        "data": _series_to_tv(sa_full, ts_shifted_fwd),
-        "options": {
-            "color": ichi.COLOR_SENKOU_A,
-            "lineWidth": 1,
-            "title": "Span A",
-            "priceScaleId": "right",
+    chart._indicators.append(RawIndicator(
+        name="Span A",
+        payload={
+            "id": f"ichi_span_a_{id(ichi)}",
+            "type": "line",
+            "pane": 0,
+            "data": _series_to_tv(sa_full, ts_shifted_fwd),
+            "options": {
+                "color": ichi.COLOR_SENKOU_A,
+                "lineWidth": 1,
+                "title": "Span A",
+                "priceScaleId": "right",
+            },
         },
-    })
+    ))
 
     # ---- Senkou Span B (forward-shifted) ----
     sb_full = pd.concat([ichi.senkou_b, ichi.result["cloud_future_b"]]).reset_index(drop=True)
-    chart._indicators.append({
-        "id": f"ichi_span_b_{id(ichi)}",
-        "type": "line",
-        "pane": 0,
-        "data": _series_to_tv(sb_full, ts_shifted_fwd),
-        "options": {
-            "color": ichi.COLOR_SENKOU_B,
-            "lineWidth": 1,
-            "title": f"Span B({ichi.senkou_b_period})",
-            "priceScaleId": "right",
+    chart._indicators.append(RawIndicator(
+        name=f"Span B({ichi.senkou_b_period})",
+        payload={
+            "id": f"ichi_span_b_{id(ichi)}",
+            "type": "line",
+            "pane": 0,
+            "data": _series_to_tv(sb_full, ts_shifted_fwd),
+            "options": {
+                "color": ichi.COLOR_SENKOU_B,
+                "lineWidth": 1,
+                "title": f"Span B({ichi.senkou_b_period})",
+                "priceScaleId": "right",
+            },
         },
-    })
+    ))
 
     # ---- Cloud fill ----
-    # Two cloud series: one for bullish (A > B) and one for bearish (B > A).
-    # lightweight-charts renders the fill between two area series.
     cloud_data_a = _series_to_tv(sa_full, ts_shifted_fwd)
     cloud_data_b = _series_to_tv(sb_full, ts_shifted_fwd)
 
-    chart._indicators.append({
-        "id": f"ichi_cloud_{id(ichi)}",
-        "type": "cloud",
-        "pane": 0,
-        "data_upper": cloud_data_a,
-        "data_lower": cloud_data_b,
-        "color_up": ichi.COLOR_CLOUD_UP,
-        "color_down": ichi.COLOR_CLOUD_DOWN,
-        "options": {
-            "title": "Ichimoku Cloud",
-            "priceScaleId": "right",
+    chart._indicators.append(RawIndicator(
+        name="Ichimoku Cloud",
+        payload={
+            "id": f"ichi_cloud_{id(ichi)}",
+            "type": "cloud",
+            "pane": 0,
+            "data_upper": cloud_data_a,
+            "data_lower": cloud_data_b,
+            "color_up": ichi.COLOR_CLOUD_UP,
+            "color_down": ichi.COLOR_CLOUD_DOWN,
+            "options": {
+                "title": "Ichimoku Cloud",
+                "priceScaleId": "right",
+            },
         },
-    })
+    ))
