@@ -210,6 +210,23 @@ class TextLabel:
 
 
 @dataclass
+class RawIndicator:
+    """
+    Thin wrapper that lets the indicator_renderer push arbitrary dict payloads
+    into ``chart._indicators`` while still satisfying the ``.name`` and
+    ``.to_dict()`` interface that ``chart.py`` expects everywhere.
+
+    Used internally by ``add_rsi``, ``add_macd``, ``add_ma``, and
+    ``add_ichimoku``; not intended to be constructed by end-users.
+    """
+    name:    str
+    payload: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return self.payload
+
+
+@dataclass
 class FibRetracement:
     """Fibonacci retracement levels between two swing points."""
     time1:  int
