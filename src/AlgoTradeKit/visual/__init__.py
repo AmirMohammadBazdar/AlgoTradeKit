@@ -1,5 +1,5 @@
 """
-algotradekit.visual
+AlgoTradeKit.visual
 ===================
 
 Interactive candlestick charting module.
@@ -27,11 +27,27 @@ Streaming (live data)
     # For AlgoTradeKit exchange dicts with 'timestamp' in ms:
     c.stream_from_atk(candle_dict)
 
+Indicators (v0.4.0)
+-------------------
+    from AlgoTradeKit.visual import add_rsi, add_macd, add_ma, add_ichimoku
+    from AlgoTradeKit.indicator import RSI, MACD, EMA, Ichimoku
+
+    rsi  = RSI(chart.df["close"], length=14)
+    add_rsi(chart, rsi, timestamps=chart.df["timestamp"])
+
+    macd = MACD(chart.df["close"])
+    add_macd(chart, macd, timestamps=chart.df["timestamp"])
+
+    ema20 = EMA(chart.df["close"], length=20)
+    add_ma(chart, ema20, timestamps=chart.df["timestamp"])
+
+    ichi = Ichimoku(chart.df["high"], chart.df["low"], chart.df["close"])
+    add_ichimoku(chart, ichi, timestamps=chart.df["timestamp"])
+
+    chart.show()
+
 Future integration
 ------------------
-    # indicator module (v0.4.0):
-    c.add_indicator_from_atk(indicator_df, name="RSI 14", overlay=False, pane=1)
-
     # strategy module (v0.5.0):
     for signal in strategy.signals:
         c.add_signal(signal.time, signal.side, price=signal.price)
@@ -48,8 +64,10 @@ from .models import (
     TextLabel,
     TrendLine,
 )
+from .indicator_renderer import add_ichimoku, add_ma, add_macd, add_rsi
 
 __all__ = [
+    # Chart
     "Chart",
     # Models
     "Bar",
@@ -60,4 +78,9 @@ __all__ = [
     "Signal",
     "TextLabel",
     "TrendLine",
+    # Indicator renderer helpers
+    "add_rsi",
+    "add_macd",
+    "add_ma",
+    "add_ichimoku",
 ]
