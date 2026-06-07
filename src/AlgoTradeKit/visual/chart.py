@@ -84,6 +84,7 @@ class Chart:
         self._bars:       list[dict]          = []
         self._indicators: list[IndicatorSeries] = []
         self._drawings:   list                = []
+        self.df:          pd.DataFrame        = pd.DataFrame()  # raw OHLCV kept for indicator use
 
         self._server = ChartServer(title=title, port=port)
         self._server.on_message = self._handle_browser_message
@@ -169,6 +170,11 @@ class Chart:
         """
         df = df.copy()
         df.columns = [c.lower() for c in df.columns]
+
+        # Keep the original (pre-mutation) DataFrame available for the
+        # indicator module.  Store before any renaming/conversion so that
+        # column names match what the user expects (e.g. 'timestamp' intact).
+        self.df = df.copy()
 
         # ── AlgoTradeKit compatibility ─────────────────────────────────────
         # Collector CSVs use 'timestamp' (ms). Rename it so the rest of
