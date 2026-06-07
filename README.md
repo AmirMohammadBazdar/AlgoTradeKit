@@ -1,8 +1,8 @@
 # AlgoTradeKit
 
-**Algorithmic Trading Toolkit** — collect market data, convert timeframes, visualize charts, build indicators and strategies, backtest, and trade live.
+**Algorithmic Trading Toolkit** — collect market data, build indicators and strategies, backtest, and trade live.
 
-```bash
+```
 pip install AlgoTradeKit
 ```
 
@@ -10,20 +10,20 @@ pip install AlgoTradeKit
 
 ## Modules
 
-| Module | Status | Description |
-|---|---|---|
-| `data` | ✅ v0.1.0 | Collect and convert OHLCV candles from exchanges |
-| `visual` | ✅ v0.3.0 | Interactive candlestick charts in your browser |
-| `indicator` | 🔜 planned | RSI, EMA, MACD, Bollinger Bands, and custom indicators |
-| `strategy` | 🔜 planned | Build and combine trading strategies |
-| `simulate` | 🔜 planned | Backtest strategies on historical data |
-| `trade` | 🔜 planned | Live trading via exchange API or MT5 |
+| Module      | Status      | Description                                            |
+| ----------- | ----------- | ------------------------------------------------------ |
+| `data`      | ✅ v0.1.0   | Collect OHLCV candles from exchanges                   |
+| `indicator` | ✅ v0.4.0   | RSI, MACD, MA family, Ichimoku — TradingView-compatible|
+| `visual`    | ✅ v0.3.0   | Candlestick charts, indicators, live streaming         |
+| `strategy`  | 🔜 planned  | Build and combine trading strategies                   |
+| `simulate`  | 🔜 planned  | Backtest strategies on historical data                 |
+| `trade`     | 🔜 planned  | Live trading via exchange API or MT5                   |
 
 ---
 
 ## Quick Start
 
-### 1 — Collect candle data
+### Collect candle data
 
 ```python
 from AlgoTradeKit.data import Collector
@@ -34,227 +34,187 @@ collector.starttime   = "2020/01/01"
 collector.collect()
 ```
 
-Output:
-```
-[AlgoTradeKit] Symbol     : BTCUSDT
-[AlgoTradeKit] Source     : binance-futures
-[AlgoTradeKit] Timeframe  : 1 Day  (1d)
-[AlgoTradeKit] Range      : 2020-01-01 → 2026-05-26
-[AlgoTradeKit] Existing file : none — starting fresh
-[AlgoTradeKit] Found 1 gap(s) to fill
-    [██████████████████████████████]  2,338 candles fetched
-[AlgoTradeKit] ✓ Saved  2,338 candles  →  data/binance-futures_BTCUSDT_1d.csv
-```
-
-Run it again — it only fetches what is missing:
-```
-[AlgoTradeKit] ✓ Everything is up to date — nothing to download.
-```
-
-#### Collector options
+### Compute indicators
 
 ```python
-collector = Collector(source="binance-spot", symbol="ETHUSDT", timeframe="4h")
+import pandas as pd
+from AlgoTradeKit.indicator import RSI, MACD, EMA, SMA, Ichimoku
 
-collector.destination = "data/"           # folder to save CSV  (default: ./)
-collector.outputname  = "eth_4h.csv"      # custom filename     (auto-generated if not set)
-collector.starttime   = "2021/01/01"      # required — YYYY/MM/DD or YYYY-MM-DD
-collector.endtime     = "2023/01/01"      # optional — defaults to now
+df = pd.read_csv("data/binance-futures_BTCUSDT_1d.csv")
 
-collector.collect()                        # returns path to the saved CSV
+# RSI (default: length=14, OB=70, OS=30)
+rsi = RSI(df["close"])
+print(rsi.rsi.tail())
+
+# RSI with MA overlay
+rsi_ma = RSI(df["close"], length=14, show_ma=True, ma_type="EMA", ma_length=9)
+
+# MACD (default: 12, 26, 9)
+macd = MACD(df["close"])
+print(macd.macd.tail(), macd.signal.tail(), macd.histogram.tail())
+
+# EMA
+ema20 = EMA(df["close"], length=20)
+
+# Ichimoku (all default TradingView settings)
+ichi = Ichimoku(df["high"], df["low"], df["close"])
+print(ichi.tenkan.tail())
+print(ichi.cloud_df().tail(30))  # includes 26 future bars
 ```
 
-#### Supported sources
+### Visualise with indicators
 
-| Source key | Market |
-|---|---|
-| `"binance-spot"` | Binance Spot |
-| `"binance-futures"` | Binance USD-M Futures |
+```python
+from AlgoTradeKit.visual import Chart, add_rsi, add_macd, add_ma, add_ichimoku
+from AlgoTradeKit.indicator import RSI, MACD, EMA, Ichimoku
 
-#### Supported timeframes
+chart = Chart.from_csv("data/binance-futures_BTCUSDT_1d.csv")
+
+rsi  = RSI(chart.df["close"])
+macd = MACD(chart.df["close"])
+ema  = EMA(chart.df["close"], length=20)
+ichi = Ichimoku(chart.df["high"], chart.df["low"], chart.df["close"])
+
+add_ma(chart,       ema,  timestamps=chart.df["timestamp"])
+add_ichimoku(chart, ichi, timestamps=chart.df["timestamp"])
+add_rsi(chart,      rsi,  timestamps=chart.df["timestamp"])
+add_macd(chart,     macd, timestamps=chart.df["timestamp"])
+
+chart.show()   # opens browser at http://localhost:9000
+```
+
+---
+
+## Data Module
+
+### Collect candle data
+
+```python
+from AlgoTradeKit.data import Collector
+
+collector = Collector(source="binance-spot", symbol="ETHUSDT", timeframe="4h")
+collector.destination = "data/"
+collector.starttime   = "2021/01/01"
+collector.endtime     = "2023/01/01"   # optional — defaults to now
+collector.collect()                     # returns path to saved CSV
+```
+
+### Resample timeframes
+
+```python
+from AlgoTradeKit.data import Converter
+
+conv = Converter(source="data/binance-futures_BTCUSDT_1h.csv", target_timeframe="4h")
+conv.destination = "data/"
+conv.convert()
+```
+
+### Supported sources
+
+| Source key            | Market                |
+| --------------------- | --------------------- |
+| `"binance-spot"`      | Binance Spot          |
+| `"binance-futures"`   | Binance USD-M Futures |
+
+### Supported timeframes
 
 `1m` `3m` `5m` `15m` `30m` `1h` `2h` `4h` `6h` `8h` `12h` `1d` `3d` `1w` `1M`
 
 ---
 
-### 2 — Convert timeframes
+## Indicator Reference
+
+### MA Family
+
+All Moving Averages accept `source` (price series) and `length` (period).
+
+| Class    | Formula                              | TV Default | TV Colour  |
+| -------- | ------------------------------------ | ---------- | ---------- |
+| `SMA`    | Rolling mean                         | 9          | `#2962FF`  |
+| `EMA`    | α = 2/(n+1)                          | 9          | `#FF6D00`  |
+| `WMA`    | Linear weights                       | 9          | `#00BCD4`  |
+| `SMMA`   | Wilder RMA, α = 1/n                  | 9          | `#4CAF50`  |
+| `DEMA`   | 2·EMA − EMA(EMA)                     | 9          | `#F44336`  |
+| `TEMA`   | 3·EMA − 3·EMA(EMA) + EMA(EMA(EMA))  | 9          | `#FF9800`  |
+| `HullMA` | WMA(2·WMA(n/2)−WMA(n), √n)          | 9          | `#9C27B0`  |
+| `VWMA`   | Σ(price·vol) / Σ(vol)                | 20         | `#E040FB`  |
+| `VWAP`   | Cumulative PV/V with σ bands         | —          | `#2962FF`  |
 
 ```python
-from AlgoTradeKit.data import Converter
+from AlgoTradeKit.indicator import SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, VWAP
 
-# From a CSV file — timeframe is auto-detected from timestamps
-conv = Converter(source="data/binance-futures_BTCUSDT_1h.csv", target_timeframe="4h")
-conv.destination = "data/"
-conv.convert()
-
-# From a pandas DataFrame
-conv = Converter(source=df, target_timeframe="1d")
-conv.destination = "data/"
-conv.outputname  = "btc_daily.csv"
-conv.convert()
+sma  = SMA(close, length=20)
+ema  = EMA(close, length=20)
+wma  = WMA(close, length=20)
+vwma = VWMA(close, volume, length=20)
+smma = SMMA(close, length=20)
+dema = DEMA(close, length=20)
+tema = TEMA(close, length=20)
+hma  = HullMA(close, length=20)
+vwap = VWAP(high, low, close, volume, anchor="none", bands=[1, 2])
 ```
 
-Valid conversions — target must be a whole multiple of the source:
-
-```
-1h  → 4h, 6h, 12h, 1d, 1w, 1M   ✓
-15m → 1h, 4h, 1d                  ✓
-4h  → 1h                          ✗  (cannot go down)
-1h  → 3h                          ✗  (3h is not a supported timeframe)
-```
-
----
-
-### 3 — Visualize
+### RSI
 
 ```python
-from AlgoTradeKit.visual import Chart
-
-# Load a Collector CSV directly — one line
-c = Chart.from_csv("data/binance-futures_BTCUSDT_1d.csv")
-c.show(block=True)
-```
-
-Or with the full data pipeline:
-
-```python
-from AlgoTradeKit.data   import Collector
-from AlgoTradeKit.visual import Chart
-
-# Step 1: collect
-collector = Collector("binance-futures", "BTCUSDT", "1d")
-collector.destination = "data/"
-collector.starttime   = "2024/01/01"
-collector.collect()
-
-# Step 2: visualize
-c = Chart(title="BTCUSDT 1D — Binance Futures")
-c.set_data("data/binance-futures_BTCUSDT_1d.csv")
-c.show(block=True)
-```
-
-#### Add indicators
-
-```python
-import pandas as pd
-
-df    = pd.read_csv("data/binance-futures_BTCUSDT_1d.csv")
-ema20 = df.assign(value=df["close"].ewm(span=20).mean())[["timestamp", "value"]]
-ema50 = df.assign(value=df["close"].ewm(span=50).mean())[["timestamp", "value"]]
-
-c = Chart.from_csv("data/binance-futures_BTCUSDT_1d.csv", title="BTCUSDT 1D")
-c.add_indicator_from_atk(ema20, name="EMA 20", color="#f0c040", overlay=True)
-c.add_indicator_from_atk(ema50, name="EMA 50", color="#58a6ff", overlay=True)
-c.show(block=True)
-```
-
-#### Add drawings
-
-```python
-c = Chart.from_csv("data/binance-futures_BTCUSDT_1d.csv")
-
-# Horizontal price levels
-c.add_hline(95000, color="#ef5350", label="Resistance", line_style=2)
-c.add_hline(60000, color="#3fb950", label="Support",    line_style=2)
-
-# Trend line between two price/time points
-c.add_trendline(time1=1704067200, price1=42000,
-                time2=1706745600, price2=48000, color="#2196f3")
-
-# Price box (range highlight)
-c.add_box(time1=1704067200, price1=40000,
-          time2=1709251200, price2=50000, color="#26a69a", opacity=0.15)
-
-# Buy / sell signals
-c.add_signal(time=1704067200, side="buy",  price=42000, label="Entry")
-c.add_signal(time=1709251200, side="sell", price=67000, label="Exit")
-
-# Fibonacci retracement
-c.add_fib(time1=1704067200, price1=38000,
-          time2=1709251200, price2=69000, color="#9c27b0")
-
-# Text annotation
-c.add_text(time=1704067200, price=72000, text="ATH Zone", color="#ffa500")
-
-c.show(block=True)
-```
-
-#### Live streaming
-
-```python
-import time
-
-c = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv", title="BTCUSDT Live")
-c.show()
-
-# Stream candles in real time — 'time' in seconds (standard format)
-for bar in my_live_feed():
-    c.stream(bar)
-    c.stream_indicator("EMA 20", bar["time"], updated_ema)
-    time.sleep(0.1)
-
-# Stream from an AlgoTradeKit exchange source — 'timestamp' in ms
-for candle in exchange.live_feed("BTCUSDT", "1m"):
-    c.stream_from_atk(candle)
-```
-
-#### Save and restore layout
-
-```python
-# Save all indicators and drawings to JSON
-c.save_layout("layouts/btcusdt_1d.json")
-
-# Restore later — load data first, then apply the saved layout
-c2 = Chart.from_csv("data/binance-futures_BTCUSDT_1d.csv")
-c2.load_layout("layouts/btcusdt_1d.json")
-c2.show(block=True)
-```
-
-#### Chart options
-
-```python
-c = Chart(
-    title          = "BTCUSDT 1D",
-    chart_type     = "heikinashi",   # "candlestick" (default) or "heikinashi"
-    theme          = "dark",         # "dark" (default) or "light"
-    volume_in_main = True,           # show volume bars in the main price pane
-    port           = 0,              # 0 = auto-select a free port
+rsi = RSI(
+    source      = df["close"],
+    length      = 14,          # period (TV default)
+    overbought  = 70,          # upper level (TV default)
+    oversold    = 30,          # lower level (TV default)
+    show_ma     = False,       # add MA on RSI line
+    ma_type     = "EMA",       # EMA | SMA | SMMA | WMA
+    ma_length   = 14,
 )
+
+rsi.rsi                    # RSI series
+rsi.is_overbought()        # bool series
+rsi.is_oversold()          # bool series
+rsi.crossover_ob()         # entered overbought
+rsi.crossunder_os()        # exited oversold (bullish signal)
 ```
 
----
-
-## Full pipeline example
+### MACD
 
 ```python
-from AlgoTradeKit.data   import Collector, Converter
-from AlgoTradeKit.visual import Chart
-import pandas as pd
+macd = MACD(
+    source        = df["close"],
+    fast_length   = 12,        # TV default
+    slow_length   = 26,        # TV default
+    signal_length = 9,         # TV default
+    oscillator_ma = "EMA",     # EMA | SMA | SMMA | WMA
+    signal_ma     = "EMA",     # EMA | SMA | SMMA | WMA
+)
 
-# 1. Collect 1h candles
-col = Collector("binance-futures", "BTCUSDT", "1h")
-col.destination = "data/"
-col.starttime   = "2024/01/01"
-col.collect()
+macd.macd                  # MACD line
+macd.signal                # Signal line
+macd.histogram             # MACD − Signal
+macd.histogram_colors()    # per-bar TV 4-colour Series
+macd.crossover()           # bullish MACD/signal cross
+macd.zero_crossover()      # MACD crosses above zero
+```
 
-# 2. Convert to 4h
-conv = Converter("data/binance-futures_BTCUSDT_1h.csv", target_timeframe="4h")
-conv.destination = "data/"
-conv.convert()
+### Ichimoku
 
-# 3. Load and add indicators
-df    = pd.read_csv("data/converted_BTCUSDT_1h_to_4h.csv")
-ema20 = df.assign(value=df["close"].ewm(span=20).mean())[["timestamp", "value"]]
-ema50 = df.assign(value=df["close"].ewm(span=50).mean())[["timestamp", "value"]]
+```python
+ichi = Ichimoku(
+    high            = df["high"],
+    low             = df["low"],
+    close           = df["close"],
+    tenkan_period   = 9,        # TV default
+    kijun_period    = 26,       # TV default
+    senkou_b_period = 52,       # TV default
+    displacement    = 26,       # TV default
+)
 
-# 4. Visualize
-chart = Chart(title="BTCUSDT 4H")
-chart.set_data(df)
-chart.add_indicator_from_atk(ema20, name="EMA 20", color="#f0c040")
-chart.add_indicator_from_atk(ema50, name="EMA 50", color="#58a6ff")
-chart.add_hline(95000, color="#ef5350", label="Resistance")
-chart.add_signal(time=1704067200, side="buy", price=42000, label="Entry")
-chart.show(block=True)
+ichi.tenkan                # Conversion Line
+ichi.kijun                 # Base Line
+ichi.senkou_a              # Leading Span A  (26 bars forward)
+ichi.senkou_b              # Leading Span B  (26 bars forward)
+ichi.chikou                # Lagging Span    (26 bars back)
+ichi.cloud_df()            # DataFrame with full cloud + 26 future bars
+ichi.tk_cross_bullish()    # Tenkan crosses above Kijun
+ichi.price_above_cloud()   # Close above both Span A and B
 ```
 
 ---
@@ -263,13 +223,13 @@ chart.show(block=True)
 
 Requires Python 3.10+
 
-```bash
+```
 pip install AlgoTradeKit
 ```
 
 For development:
 
-```bash
+```
 git clone https://github.com/AmirMohammadBazdar/AlgoTradeKit.git
 cd AlgoTradeKit
 python -m venv .venv && source .venv/bin/activate
@@ -280,33 +240,25 @@ pip install -e ".[dev]"
 
 ## Requirements
 
-| Package | Version | Used by |
-|---|---|---|
-| `pandas` | >= 2.0 | `data`, `visual` |
-| `requests` | >= 2.28 | `data` |
-| `fastapi` | >= 0.110.0 | `visual` |
-| `uvicorn[standard]` | >= 0.29.0 | `visual` |
-| `websockets` | >= 12.0 | `visual` |
+- `pandas >= 2.0`
+- `requests >= 2.28`
+- `fastapi >= 0.110.0` *(visual module)*
+- `uvicorn >= 0.29.0` *(visual module)*
+- `websockets >= 12.0` *(visual module)*
 
 ---
 
 ## Roadmap
 
-### Data
-- [ ] MEXC Spot & Futures
-- [ ] MetaTrader 5 (MT5)
-- [ ] Bybit, OKX
-
-### Visual
-- [ ] Live exchange WebSocket feed (real-time candlestick stream)
-- [ ] Multi-chart layout (side-by-side panels)
-- [ ] Screenshot / export to PNG
-
-### Upcoming modules
-- [ ] `indicator` — RSI, EMA, MACD, Bollinger Bands, ATR, VWAP
-- [ ] `strategy` — entry/exit logic builder, signal generation
-- [ ] `simulate` — backtesting engine with full performance report
-- [ ] `trade` — live order execution via exchange API / MT5
+- [x] `data` module — Collector (Binance Spot & Futures)
+- [x] `data` module — Converter (timeframe resampling)
+- [x] `visual` module — interactive candlestick chart
+- [x] `indicator` module — RSI, MACD, MA family, Ichimoku
+- [ ] `indicator` — Bollinger Bands, ATR, Stochastic, VWAP session anchor
+- [ ] `strategy` module — strategy builder with entry/exit logic
+- [ ] `simulate` module — backtesting engine with full report
+- [ ] `trade` module — live trading via exchange API / MT5
+- [ ] MEXC, Bybit, OKX data sources
 
 ---
 
