@@ -176,6 +176,19 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .sapply:hover{background:var(--accent)44}
 .sgroup-title{font-size:10px;font-weight:700;color:var(--text2);letter-spacing:.08em;
   text-transform:uppercase;padding:2px 0}
+/* Toggle switch for settings */
+.stoggle-row{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:3px 0}
+.stoggle-row label.slabel{font-size:12px;color:var(--text);flex:1;line-height:1.4}
+.stoggle-row label.slabel small{display:block;font-size:10px;color:var(--text2);margin-top:1px}
+.stog{position:relative;width:36px;height:20px;flex-shrink:0}
+.stog input{opacity:0;width:0;height:0;position:absolute}
+.stog-slider{position:absolute;cursor:pointer;inset:0;background:#444;border-radius:20px;
+  transition:.25s}
+.stog-slider::before{content:'';position:absolute;width:14px;height:14px;left:3px;
+  bottom:3px;background:#fff;border-radius:50%;transition:.25s}
+.stog input:checked+.stog-slider{background:var(--accent)}
+.stog input:checked+.stog-slider::before{transform:translateX(16px)}
 
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
@@ -294,6 +307,33 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
       <label>Font Size — <span class="sval" id="sf-size-val">11px</span></label>
       <input type="range" id="sf-size" min="8" max="20" value="11"
              oninput="document.getElementById('sf-size-val').textContent=this.value+'px'"/>
+    </div>
+
+    <div class="sdivider"></div>
+    <div class="sgroup-title">Price Axis Labels</div>
+
+    <div class="stoggle-row">
+      <label class="slabel" for="stog-last-close">
+        Highlight last candle close on right axis
+        <small>Shows the last candle's close price label on the price axis</small>
+      </label>
+      <label class="stog">
+        <input type="checkbox" id="stog-last-close" checked
+               onchange="applyAxisLabelSettings()">
+        <span class="stog-slider"></span>
+      </label>
+    </div>
+
+    <div class="stoggle-row">
+      <label class="slabel" for="stog-ind-prices">
+        Show indicator last prices on right axis
+        <small>Main-chart overlay indicators only; sub-chart indicators always show</small>
+      </label>
+      <label class="stog">
+        <input type="checkbox" id="stog-ind-prices"
+               onchange="applyAxisLabelSettings()">
+        <span class="stog-slider"></span>
+      </label>
     </div>
 
     <div class="sdivider"></div>
@@ -504,6 +544,8 @@ function initMain(){
     borderUpColor:'#3fb950',borderDownColor:'#f85149',
     wickUpColor:'#3fb950',wickDownColor:'#f85149',
   });
+  // Apply initial axis label settings
+  mainSeries.applyOptions({ lastValueVisible: showLastClose });
   panes.main.seriesList=[mainSeries];
   if(volumeInMain){
     volumeSeries=mainChart.addHistogramSeries({priceScaleId:'vol',priceFormat:{type:'volume'}});
@@ -576,9 +618,11 @@ function addIndicator(ind){
   else if(ind.seriesType==='area')
     series=p.chart.addAreaSeries({topColor:ind.color+'55',bottomColor:ind.color+'00',
                                    lineColor:ind.color,lineWidth:ind.lineWidth});
-  else
+  else {
+    const showLabel = ind.overlay ? showIndLastPrices : true; // sub-chart always shows
     series=p.chart.addLineSeries({color:ind.color,lineWidth:ind.lineWidth,
-                                   lastValueVisible:false,priceLineVisible:false});
+                                  lastValueVisible:showLabel,priceLineVisible:false});
+  }
   series.setData(ind.data);
   p.seriesList.push(series);
 
@@ -1516,6 +1560,8 @@ function toggleSettings(){
   document.getElementById('sf-size-val').textContent = drawingFontSize+'px';
   ov.classList.add('open');
   document.getElementById('settings-btn').classList.add('on');
+  document.getElementById('stog-last-close').checked  = showLastClose;
+  document.getElementById('stog-ind-prices').checked  = showIndLastPrices;
 }
 function closeSettings(){
   document.getElementById('settings-overlay').classList.remove('open');
@@ -1543,6 +1589,31 @@ function applyFonts(){
 
   redrawAll();
   closeSettings();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  AXIS LABEL SETTINGS
+// ═══════════════════════════════════════════════════════════════
+let showLastClose     = true;   // toggle-last-close default ON
+let showIndLastPrices = false;  // toggle-ind-prices  default OFF
+
+function applyAxisLabelSettings(){
+  showLastClose     = document.getElementById('stog-last-close').checked;
+  showIndLastPrices = document.getElementById('stog-ind-prices').checked;
+
+  // Apply to main candle series
+  if(mainSeries){
+    mainSeries.applyOptions({ lastValueVisible: showLastClose });
+  }
+
+  // Apply to all overlay indicator series
+  Object.values(indMeta).forEach(m => {
+    if(!m.overlay) return;               // sub-chart handles own axis
+    if(m.seriesType==='histogram') return; // histograms don't have a price label
+    try{
+      m.series.applyOptions({ lastValueVisible: showIndLastPrices });
+    } catch{}
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
