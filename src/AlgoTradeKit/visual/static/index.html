@@ -55,11 +55,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .ind-chip .iact:hover{opacity:1}
 .ind-chip.hidden-ind{opacity:.35;text-decoration:line-through}
 
-/* ── Main-pane indicator legend (top-right) ──────────────────── */
+/* ── Main-pane indicator legend (top-left) ───────────────────── */
 #ind-legend{
-  position:absolute;top:8px;right:66px;   /* leave room for LWC price scale */
+  position:absolute;top:8px;left:10px;    /* moved from right to left */
   z-index:12;display:flex;flex-direction:column;gap:3px;
-  pointer-events:auto;
+  pointer-events:auto;max-width:220px;
 }
 .il-row{
   display:flex;align-items:center;gap:5px;
