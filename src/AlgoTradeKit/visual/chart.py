@@ -265,6 +265,7 @@ class Chart:
         pane:        int  = 1,
         line_width:  int  = 1,
         series_type: Literal["line", "histogram", "area"] = "line",
+        group:       str  = "",
     ) -> "Chart":
         """
         Add an indicator series.
@@ -305,6 +306,7 @@ class Chart:
             name=name, data=data, color=color,
             overlay=overlay, pane=pane,
             line_width=line_width, series_type=series_type,
+            group=group or name,
         )
         self._indicators.append(ind)
 
@@ -322,6 +324,7 @@ class Chart:
         pane:        int  = 1,
         line_width:  int  = 1,
         series_type: Literal["line", "histogram", "area"] = "line",
+        group:       str  = "",
     ) -> "Chart":
         """
         Add an indicator from an AlgoTradeKit-format DataFrame.
@@ -351,6 +354,7 @@ class Chart:
             df, name=name, color=color,
             overlay=overlay, pane=pane,
             line_width=line_width, series_type=series_type,
+            group=group,
         )
 
     # -----------------------------------------------------------------------

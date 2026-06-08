@@ -50,6 +50,7 @@ class IndicatorSeries:
     pane:        int   = 1
     line_width:  int   = 1
     series_type: Literal["line", "histogram", "area"] = "line"
+    group:       str   = ""
 
     def to_dict(self) -> dict:
         return {
@@ -60,6 +61,7 @@ class IndicatorSeries:
             "pane":       self.pane,
             "lineWidth":  self.line_width,
             "seriesType": self.series_type,
+            "group":      self.group,
         }
 
 

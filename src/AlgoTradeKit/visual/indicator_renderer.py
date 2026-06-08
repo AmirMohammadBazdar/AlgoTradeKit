@@ -177,6 +177,7 @@ def add_ma(
             "pane":       0,
             "lineWidth":  line_width,
             "seriesType": "line",
+            "group":      label,
         })
 
     # VWAP ±σ bands as dashed lines
@@ -192,6 +193,7 @@ def add_ma(
                     "pane":       0,
                     "lineWidth":  1,
                     "seriesType": "line",
+                    "group":      label,
                 })
 
 
@@ -209,6 +211,7 @@ def add_rsi(
     """
     pane = _next_pane(chart)
     rsi_label = f"RSI({rsi.length})"
+    rsi_group = f"RSI({rsi.length})"
 
     _push(chart, rsi_label, {
         "name":       rsi_label,
@@ -218,6 +221,7 @@ def add_rsi(
         "pane":       pane,
         "lineWidth":  1,
         "seriesType": "line",
+        "group":      rsi_group,
     })
 
     if "rsi_ma" in rsi.result:
@@ -230,6 +234,7 @@ def add_rsi(
             "pane":       pane,
             "lineWidth":  1,
             "seriesType": "line",
+            "group":      rsi_group,
         })
 
 
@@ -250,6 +255,7 @@ def add_macd(
     colors = macd.histogram_colors()
     macd_label = f"MACD({macd.fast_length},{macd.slow_length},{macd.signal_length})"
     sig_label  = f"Signal({macd.signal_length})"
+    macd_group = f"MACD({macd.fast_length},{macd.slow_length},{macd.signal_length})"
 
     # Histogram first so it renders behind the lines
     _push(chart, "Histogram", {
@@ -260,6 +266,7 @@ def add_macd(
         "pane":       pane,
         "lineWidth":  1,
         "seriesType": "histogram",
+        "group":      macd_group,
     })
 
     _push(chart, macd_label, {
@@ -270,6 +277,7 @@ def add_macd(
         "pane":       pane,
         "lineWidth":  1,
         "seriesType": "line",
+        "group":      macd_group,
     })
 
     _push(chart, sig_label, {
@@ -280,6 +288,7 @@ def add_macd(
         "pane":       pane,
         "lineWidth":  1,
         "seriesType": "line",
+        "group":      macd_group,
     })
 
 
@@ -300,8 +309,9 @@ def add_ichimoku(
     - Cloud fill   (two area series back-to-back, green A>B / red B>A)
       — extends PAST the last candle
     """
-    n    = len(ichi.close)
-    disp = ichi.displacement
+    n          = len(ichi.close)
+    disp       = ichi.displacement
+    ichi_group = f"Ichimoku({ichi.tenkan_period},{ichi.kijun_period},{ichi.senkou_b_period})"
 
     # ── Timestamp arrays ──────────────────────────────────────────────────
     if timestamps is not None:
@@ -327,6 +337,7 @@ def add_ichimoku(
         "pane":       0,
         "lineWidth":  1,
         "seriesType": "line",
+        "group":      ichi_group,
     })
 
     # Kijun
@@ -338,6 +349,7 @@ def add_ichimoku(
         "pane":       0,
         "lineWidth":  1,
         "seriesType": "line",
+        "group":      ichi_group,
     })
 
     # Chikou — uses original timestamps; data series is already shifted back
@@ -349,6 +361,7 @@ def add_ichimoku(
         "pane":       0,
         "lineWidth":  1,
         "seriesType": "line",
+        "group":      ichi_group,
     })
 
     # Senkou Span A — forward-shifted timestamps, includes future extension
@@ -362,6 +375,7 @@ def add_ichimoku(
         "pane":       0,
         "lineWidth":  1,
         "seriesType": "line",
+        "group":      ichi_group,
     })
 
     # Senkou Span B — forward-shifted timestamps, includes future extension
@@ -375,6 +389,7 @@ def add_ichimoku(
         "pane":       0,
         "lineWidth":  1,
         "seriesType": "line",
+        "group":      ichi_group,
     })
 
     # ── Cloud fill ────────────────────────────────────────────────────────
@@ -399,6 +414,7 @@ def add_ichimoku(
         "pane":       0,
         "lineWidth":  0,
         "seriesType": "area",
+        "group":      ichi_group,
     })
 
     # Bearish cloud — Span B as area (red), zero-opacity bottom
@@ -410,4 +426,5 @@ def add_ichimoku(
         "pane":       0,
         "lineWidth":  0,
         "seriesType": "area",
+        "group":      ichi_group,
     })
