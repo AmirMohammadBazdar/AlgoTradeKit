@@ -512,7 +512,25 @@ function streamBar(bar){
 // ═══════════════════════════════════════════════════════════════
 //  INDICATORS
 // ═══════════════════════════════════════════════════════════════
+// ichimokuCloud: {spanA:[{time,value}], spanB:[{time,value}], colorUp, colorDown}
+// stored separately; drawn by redrawAll() via canvas, not as LWC series.
+let ichimokuCloud = null;
+
 function addIndicator(ind){
+  // ── Ichimoku cloud fill: canvas-drawn, no LWC series ─────────────────
+  if(ind.name==='Cloud (Bull)'){
+    if(!ichimokuCloud) ichimokuCloud={spanA:[],spanB:[],colorUp:'rgba(38,166,154,0.15)',colorDown:'rgba(239,83,80,0.15)'};
+    ichimokuCloud.spanA = ind.data;
+    ichimokuCloud.colorUp = ind.color;
+    return; // don't create an LWC series
+  }
+  if(ind.name==='Cloud (Bear)'){
+    if(!ichimokuCloud) ichimokuCloud={spanA:[],spanB:[],colorUp:'rgba(38,166,154,0.15)',colorDown:'rgba(239,83,80,0.15)'};
+    ichimokuCloud.spanB = ind.data;
+    ichimokuCloud.colorDown = ind.color;
+    return; // don't create an LWC series
+  }
+
   let p, paneId;
   if(ind.overlay){
     p=panes.main; paneId='main';
@@ -534,15 +552,12 @@ function addIndicator(ind){
   series.setData(ind.data);
   p.seriesList.push(series);
 
-  // Register in indMeta
   indMeta[ind.name]={series,color:ind.color,overlay:ind.overlay,pane:ind.pane,
                      hidden:false,seriesType:ind.seriesType,paneId};
 
   if(ind.overlay){
-    // Add row to main-pane legend (top-right)
     addLegendRow(ind.name, ind.color);
   } else {
-    // Add chip with hide/remove to sub-pane label
     addSubPaneChip(ind.name, ind.color, paneId);
   }
 }
@@ -605,6 +620,10 @@ function toggleIndVisibility(name){
 
 // ── Remove indicator (frontend + notify Python) ───────────────
 function removeIndicator(name){
+  // Cloud series are canvas-only — clear the cloud state
+  if(name==='Cloud (Bull)' || name==='Cloud (Bear)'){
+    ichimokuCloud=null; redrawAll(); return;
+  }
   const m=indMeta[name]; if(!m) return;
 
   // Remove LWC series from its pane
@@ -700,7 +719,103 @@ function redrawAll(){
   if(!panes.main) return;
   const W=drawCv.clientWidth, H=drawCv.clientHeight;
   dCtx.clearRect(0,0,W,H);
+  drawIchimokuCloud(dCtx,W,H);          // ← cloud fill BEHIND user drawings
   Object.values(drawings).forEach(d=>renderOne(d,dCtx,W,H));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ICHIMOKU CLOUD FILL
+//  Draws the filled band between Span A and Span B on the canvas.
+//  Must be called every redrawAll() because the chart may pan/zoom.
+// ═══════════════════════════════════════════════════════════════
+function drawIchimokuCloud(ctx, W, H){
+  if(!ichimokuCloud || !panes.main || !mainSeries) return;
+  const {spanA, spanB, colorUp, colorDown} = ichimokuCloud;
+  if(!spanA.length || !spanB.length) return;
+
+  // Build a map of time → {a, b} for quick lookup
+  const bMap = {};
+  spanB.forEach(p=>{ bMap[p.time]=p.value; });
+
+  // Find all times that have both A and B
+  const pts = spanA
+    .filter(p => bMap[p.time]!=null)
+    .map(p => ({time:p.time, a:p.value, b:bMap[p.time]}));
+
+  if(pts.length < 2) return;
+
+  const wR = panes.main.paneWrap.getBoundingClientRect();
+  const pR = document.getElementById('panes').getBoundingClientRect();
+  const offsetY = wR.top - pR.top;
+
+  // Convert to pixel coordinates
+  const coords = pts.map(p => {
+    const x  = mainChart.timeScale().timeToCoordinate(p.time);
+    const ya = mainSeries.priceToCoordinate(p.a);
+    const yb = mainSeries.priceToCoordinate(p.b);
+    if(x==null || ya==null || yb==null) return null;
+    return {x, ya: ya+offsetY, yb: yb+offsetY};
+  }).filter(Boolean);
+
+  if(coords.length < 2) return;
+
+  // Split into bullish (A above B, ya < yb in pixel coords) and
+  // bearish (B above A) segments and fill each with its colour.
+  ctx.save();
+  ctx.globalAlpha = 1; // colours already have built-in alpha
+
+  // Walk segment by segment
+  for(let i=0; i<coords.length-1; i++){
+    const c0=coords[i], c1=coords[i+1];
+    const bullish0 = c0.ya < c0.yb; // smaller y = higher on screen
+    const bullish1 = c1.ya < c1.yb;
+
+    if(bullish0 === bullish1){
+      // Same colour for the whole segment
+      const col = bullish0 ? colorUp : colorDown;
+      ctx.beginPath();
+      ctx.moveTo(c0.x, c0.ya);
+      ctx.lineTo(c1.x, c1.ya);
+      ctx.lineTo(c1.x, c1.yb);
+      ctx.lineTo(c0.x, c0.yb);
+      ctx.closePath();
+      ctx.fillStyle = col;
+      ctx.fill();
+    } else {
+      // Colour changes within this segment — find crossover x
+      // Linear interpolation: ya0+(ya1-ya0)*t = yb0+(yb1-yb0)*t
+      // (ya0-yb0) = t*((yb1-ya1)-(yb0-ya0))
+      const d0 = c0.ya - c0.yb;
+      const d1 = c1.ya - c1.yb;
+      const t  = d0 / (d0 - d1);
+      const cx_ = c0.x + (c1.x - c0.x) * t;
+      const cya = c0.ya + (c1.ya - c0.ya) * t;
+      const cyb = c0.yb + (c1.yb - c0.yb) * t;
+
+      // First half
+      const col0 = bullish0 ? colorUp : colorDown;
+      ctx.beginPath();
+      ctx.moveTo(c0.x, c0.ya);
+      ctx.lineTo(cx_, cya);
+      ctx.lineTo(cx_, cyb);
+      ctx.lineTo(c0.x, c0.yb);
+      ctx.closePath();
+      ctx.fillStyle = col0;
+      ctx.fill();
+
+      // Second half
+      const col1 = bullish1 ? colorUp : colorDown;
+      ctx.beginPath();
+      ctx.moveTo(cx_, cya);
+      ctx.lineTo(c1.x, c1.ya);
+      ctx.lineTo(c1.x, c1.yb);
+      ctx.lineTo(cx_, cyb);
+      ctx.closePath();
+      ctx.fillStyle = col1;
+      ctx.fill();
+    }
+  }
+  ctx.restore();
 }
 
 function renderOne(d,ctx,W,H){
@@ -1224,6 +1339,7 @@ function handleMsg(msg){
       Object.keys(panes).forEach(k=>delete panes[k]);
       Object.keys(drawings).forEach(k=>delete drawings[k]);
       Object.keys(indMeta).forEach(k=>delete indMeta[k]);
+      ichimokuCloud = null;
       mainSeries=null; mainChart=null; volumeSeries=null;
       draftState=null; selectedId=null; hoverId=null;
 
