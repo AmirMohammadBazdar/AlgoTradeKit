@@ -625,23 +625,28 @@ function streamBar(bar){
 // ═══════════════════════════════════════════════════════════════
 //  INDICATORS
 // ═══════════════════════════════════════════════════════════════
-// ichimokuCloud: {spanA:[{time,value}], spanB:[{time,value}], colorUp, colorDown}
+// ichimokuCloud: {spanA, spanB, colorUp, colorDown, hiddenA, hiddenB}
 // stored separately; drawn by redrawAll() via canvas, not as LWC series.
 let ichimokuCloud = null;
 
 function addIndicator(ind){
   // ── Ichimoku cloud fill: canvas-drawn, no LWC series ─────────────────
   if(ind.name==='Cloud (Bull)'){
-    if(!ichimokuCloud) ichimokuCloud={spanA:[],spanB:[],colorUp:'rgba(38,166,154,0.15)',colorDown:'rgba(239,83,80,0.15)'};
+    if(!ichimokuCloud) ichimokuCloud={spanA:[],spanB:[],colorUp:'rgba(38,166,154,0.15)',colorDown:'rgba(239,83,80,0.15)',hiddenA:false,hiddenB:false};
     ichimokuCloud.spanA = ind.data;
     ichimokuCloud.colorUp = ind.color;
-    return; // don't create an LWC series
+    // Add a legend row for this cloud line inside its group
+    const grpName = ind.group || ind.name;
+    _addCloudLegendRow('Cloud (Bull)', ind.color, grpName);
+    return;
   }
   if(ind.name==='Cloud (Bear)'){
-    if(!ichimokuCloud) ichimokuCloud={spanA:[],spanB:[],colorUp:'rgba(38,166,154,0.15)',colorDown:'rgba(239,83,80,0.15)'};
+    if(!ichimokuCloud) ichimokuCloud={spanA:[],spanB:[],colorUp:'rgba(38,166,154,0.15)',colorDown:'rgba(239,83,80,0.15)',hiddenA:false,hiddenB:false};
     ichimokuCloud.spanB = ind.data;
     ichimokuCloud.colorDown = ind.color;
-    return; // don't create an LWC series
+    const grpName = ind.group || ind.name;
+    _addCloudLegendRow('Cloud (Bear)', ind.color, grpName);
+    return;
   }
 
   let p, paneId;
@@ -678,6 +683,101 @@ function addIndicator(ind){
   } else {
     addSubPaneChip(ind.name, ind.color, paneId);
   }
+}
+
+// ── Add a hide/remove row for a canvas-only cloud series ─────
+function _addCloudLegendRow(name, color, grpName){
+  // Only add the row if the group already exists (Ichimoku lines came first)
+  // OR create it if this is the first. The row goes into the group children.
+  const leg = document.getElementById('ind-legend');
+  if(!leg) return;
+
+  // If group not yet created (cloud arrived before line series — unlikely but safe)
+  if(!indGroups[grpName]){
+    indGroups[grpName] = {names:[], collapsed:false, hidden:false};
+    const grpDiv = document.createElement('div');
+    grpDiv.className = 'il-group';
+    grpDiv.id = 'ilgrp-'+CSS.escape(grpName);
+    grpDiv.innerHTML = `
+      <div class="il-group-hdr">
+        <span class="il-group-arrow" id="ilgrparr-${CSS.escape(grpName)}"
+              onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
+        <span class="il-dot" style="background:${color}"></span>
+        <span class="il-group-name">${grpName}</span>
+        <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
+                onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
+          <svg width="12" height="9" viewBox="0 0 12 9">
+            <ellipse cx="6" cy="4.5" rx="5" ry="3.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+            <circle cx="6" cy="4.5" r="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <button class="il-btn remove" title="Remove indicator"
+                onclick="removeIndicatorGroup('${grpName.replace(/'/g,"\\'")}')">✕</button>
+      </div>
+      <div class="il-group-children" id="ilgrpch-${CSS.escape(grpName)}"></div>`;
+    leg.appendChild(grpDiv);
+  }
+
+  // Cloud names are tracked in a separate namespace so group ops can reach them
+  indGroups[grpName].names.push(name);
+  const childrenEl = document.getElementById('ilgrpch-'+CSS.escape(grpName));
+  if(!childrenEl) return;
+
+  const row = document.createElement('div');
+  row.className = 'il-row';
+  row.id = 'ilrow-'+CSS.escape(name);
+  row.innerHTML = `
+    <span class="il-dot" style="background:${color}"></span>
+    <span class="il-name">${name}</span>
+    <span class="il-val" id="ilval-${CSS.escape(name)}"></span>
+    <button class="il-btn" title="Hide/Show"
+            onclick="toggleCloudVisibility('${name.replace(/'/g,"\\'")}')">
+      <svg width="12" height="9" viewBox="0 0 12 9" id="ilvis-${CSS.escape(name)}">
+        <ellipse cx="6" cy="4.5" rx="5" ry="3.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+        <circle cx="6" cy="4.5" r="1.5" fill="currentColor"/>
+      </svg>
+    </button>
+    <button class="il-btn remove" title="Remove"
+            onclick="removeCloudSeries('${name.replace(/'/g,"\\'")}')">✕</button>`;
+  childrenEl.appendChild(row);
+}
+
+function toggleCloudVisibility(name){
+  if(!ichimokuCloud) return;
+  if(name==='Cloud (Bull)'){
+    ichimokuCloud.hiddenA = !ichimokuCloud.hiddenA;
+    const row = document.getElementById('ilrow-'+CSS.escape(name));
+    if(row) row.classList.toggle('hidden-ind', ichimokuCloud.hiddenA);
+  } else {
+    ichimokuCloud.hiddenB = !ichimokuCloud.hiddenB;
+    const row = document.getElementById('ilrow-'+CSS.escape(name));
+    if(row) row.classList.toggle('hidden-ind', ichimokuCloud.hiddenB);
+  }
+  redrawAll();
+}
+
+function removeCloudSeries(name){
+  if(!ichimokuCloud) return;
+  if(name==='Cloud (Bull)'){
+    ichimokuCloud.spanA = [];
+    ichimokuCloud.hiddenA = true;
+  } else {
+    ichimokuCloud.spanB = [];
+    ichimokuCloud.hiddenB = true;
+  }
+  // Remove from group tracking
+  const grpName = Object.keys(indGroups).find(g => indGroups[g].names.includes(name));
+  if(grpName){
+    indGroups[grpName].names = indGroups[grpName].names.filter(n=>n!==name);
+    if(indGroups[grpName].names.length === 0){
+      const grpDiv = document.getElementById('ilgrp-'+CSS.escape(grpName));
+      if(grpDiv) grpDiv.remove();
+      delete indGroups[grpName];
+    }
+  }
+  const row = document.getElementById('ilrow-'+CSS.escape(name));
+  if(row) row.remove();
+  redrawAll();
 }
 
 function streamIndicator(name,point){
@@ -776,30 +876,52 @@ function toggleGroupCollapse(grpName){
 function toggleGroupVisibility(grpName){
   const g = indGroups[grpName]; if(!g) return;
   g.hidden = !g.hidden;
+  const cloudNames = ['Cloud (Bull)', 'Cloud (Bear)'];
   g.names.forEach(n => {
+    // Cloud series are canvas-only — no indMeta entry
+    if(cloudNames.includes(n)){
+      if(ichimokuCloud){
+        if(n==='Cloud (Bull)') ichimokuCloud.hiddenA = g.hidden;
+        else                   ichimokuCloud.hiddenB = g.hidden;
+      }
+      const row = document.getElementById('ilrow-'+CSS.escape(n));
+      if(row) row.classList.toggle('hidden-ind', g.hidden);
+      return;
+    }
     const m = indMeta[n]; if(!m) return;
     m.hidden = g.hidden;
     m.series.applyOptions({visible:!m.hidden});
     const row = document.getElementById('ilrow-'+CSS.escape(n));
     if(row) row.classList.toggle('hidden-ind', m.hidden);
   });
-  // Also hide cloud canvas fill
-  if(grpName.startsWith('Ichimoku')){
-    if(ichimokuCloud) ichimokuCloud._hidden = g.hidden;
-    redrawAll();
-  }
   const grpDiv = document.getElementById('ilgrp-'+CSS.escape(grpName));
   if(grpDiv) grpDiv.classList.toggle('hidden-ind', g.hidden);
+  redrawAll();
 }
 
 function removeIndicatorGroup(grpName){
   const g = indGroups[grpName]; if(!g) return;
-  // Remove all individual series
-  [...g.names].forEach(n => removeIndicator(n));
+  // If this group owns cloud series, clear them from canvas too
+  if(grpName.startsWith('Ichimoku') || g.names.some(n=>n==='Cloud (Bull)'||n==='Cloud (Bear)')){
+    ichimokuCloud = null;
+  }
+  // Remove all individual series (line series via removeIndicator,
+  // cloud rows via removeCloudSeries — filter them apart)
+  const cloudNames = ['Cloud (Bull)', 'Cloud (Bear)'];
+  const lineNames  = g.names.filter(n => !cloudNames.includes(n));
+  const cloudNamesInGroup = g.names.filter(n => cloudNames.includes(n));
+  // Remove cloud DOM rows directly (they're not in indMeta)
+  cloudNamesInGroup.forEach(n => {
+    const row = document.getElementById('ilrow-'+CSS.escape(n));
+    if(row) row.remove();
+  });
+  // Remove line series
+  [...lineNames].forEach(n => removeIndicator(n));
   // Remove group DOM wrapper if still present
   const grpDiv = document.getElementById('ilgrp-'+CSS.escape(grpName));
   if(grpDiv) grpDiv.remove();
   delete indGroups[grpName];
+  redrawAll();
 }
 
 // ── Sub-pane chip with hide/remove ────────────────────────────
@@ -946,7 +1068,10 @@ function redrawAll(){
 // ═══════════════════════════════════════════════════════════════
 function drawIchimokuCloud(ctx, W, H){
   if(!ichimokuCloud || !panes.main || !mainSeries) return;
-  const {spanA, spanB, colorUp, colorDown} = ichimokuCloud;
+  const {spanA, spanB, colorUp, colorDown, hiddenA, hiddenB} = ichimokuCloud;
+
+  // If both clouds are hidden, skip all canvas work entirely (performance)
+  if(hiddenA && hiddenB) return;
   if(!spanA.length || !spanB.length) return;
 
   // Build a map of time → {a, b} for quick lookup
@@ -975,20 +1100,21 @@ function drawIchimokuCloud(ctx, W, H){
 
   if(coords.length < 2) return;
 
-  // Split into bullish (A above B, ya < yb in pixel coords) and
-  // bearish (B above A) segments and fill each with its colour.
   ctx.save();
-  ctx.globalAlpha = 1; // colours already have built-in alpha
+  ctx.globalAlpha = 1;
 
-  // Walk segment by segment
   for(let i=0; i<coords.length-1; i++){
     const c0=coords[i], c1=coords[i+1];
-    const bullish0 = c0.ya < c0.yb; // smaller y = higher on screen
+    const bullish0 = c0.ya < c0.yb;
     const bullish1 = c1.ya < c1.yb;
 
     if(bullish0 === bullish1){
-      // Same colour for the whole segment
-      const col = bullish0 ? colorUp : colorDown;
+      // Determine which cloud this segment belongs to and skip if hidden
+      const isBullSegment = bullish0;
+      if(isBullSegment && hiddenA) continue;
+      if(!isBullSegment && hiddenB) continue;
+
+      const col = isBullSegment ? colorUp : colorDown;
       ctx.beginPath();
       ctx.moveTo(c0.x, c0.ya);
       ctx.lineTo(c1.x, c1.ya);
@@ -998,9 +1124,7 @@ function drawIchimokuCloud(ctx, W, H){
       ctx.fillStyle = col;
       ctx.fill();
     } else {
-      // Colour changes within this segment — find crossover x
-      // Linear interpolation: ya0+(ya1-ya0)*t = yb0+(yb1-yb0)*t
-      // (ya0-yb0) = t*((yb1-ya1)-(yb0-ya0))
+      // Colour changes — find crossover
       const d0 = c0.ya - c0.yb;
       const d1 = c1.ya - c1.yb;
       const t  = d0 / (d0 - d1);
@@ -1009,26 +1133,30 @@ function drawIchimokuCloud(ctx, W, H){
       const cyb = c0.yb + (c1.yb - c0.yb) * t;
 
       // First half
-      const col0 = bullish0 ? colorUp : colorDown;
-      ctx.beginPath();
-      ctx.moveTo(c0.x, c0.ya);
-      ctx.lineTo(cx_, cya);
-      ctx.lineTo(cx_, cyb);
-      ctx.lineTo(c0.x, c0.yb);
-      ctx.closePath();
-      ctx.fillStyle = col0;
-      ctx.fill();
+      if(!(bullish0 ? hiddenA : hiddenB)){
+        const col0 = bullish0 ? colorUp : colorDown;
+        ctx.beginPath();
+        ctx.moveTo(c0.x, c0.ya);
+        ctx.lineTo(cx_, cya);
+        ctx.lineTo(cx_, cyb);
+        ctx.lineTo(c0.x, c0.yb);
+        ctx.closePath();
+        ctx.fillStyle = col0;
+        ctx.fill();
+      }
 
       // Second half
-      const col1 = bullish1 ? colorUp : colorDown;
-      ctx.beginPath();
-      ctx.moveTo(cx_, cya);
-      ctx.lineTo(c1.x, c1.ya);
-      ctx.lineTo(c1.x, c1.yb);
-      ctx.lineTo(cx_, cyb);
-      ctx.closePath();
-      ctx.fillStyle = col1;
-      ctx.fill();
+      if(!(bullish1 ? hiddenA : hiddenB)){
+        const col1 = bullish1 ? colorUp : colorDown;
+        ctx.beginPath();
+        ctx.moveTo(cx_, cya);
+        ctx.lineTo(c1.x, c1.ya);
+        ctx.lineTo(c1.x, c1.yb);
+        ctx.lineTo(cx_, cyb);
+        ctx.closePath();
+        ctx.fillStyle = col1;
+        ctx.fill();
+      }
     }
   }
   ctx.restore();
@@ -1667,7 +1795,15 @@ function applyAxisLabelSettings(){
 // ═══════════════════════════════════════════════════════════════
 window.addEventListener('resize',()=>{ resizeOverlays(); redrawAll(); });
 initMain(); resizeOverlays(); wsConnect(); setTool('cursor');
-setInterval(()=>{ if(Object.keys(drawings).length) redrawAll(); },50);
+// Only run the periodic redraw when there are visible drawings or a visible cloud
+// (keeps the chart smooth when no canvas work is needed)
+setInterval(()=>{
+  const hasDrawings = Object.keys(drawings).length > 0;
+  const hasCloud = ichimokuCloud &&
+    ((!ichimokuCloud.hiddenA && ichimokuCloud.spanA.length > 0) ||
+     (!ichimokuCloud.hiddenB && ichimokuCloud.spanB.length > 0));
+  if(hasDrawings || hasCloud) redrawAll();
+}, 50);
 </script>
 </body>
 </html>
