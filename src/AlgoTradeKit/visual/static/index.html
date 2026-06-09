@@ -494,6 +494,7 @@ function createPane(id,flex=3,label=''){
     if(id==='main'){
       updateOHLCV(param);
       updateIndLegendValues(param);
+      updateCursorAxisLabel(param);
     }
     syncCrosshair(id,param);
     redrawAll();
@@ -532,6 +533,36 @@ function setupResize(rh){
   });
 }
 
+// ── Right-axis cursor label — always shows candle close ──────
+let _cursorPriceLine = null;
+
+function updateCursorAxisLabel(param){
+  // Remove previous cursor price line
+  if(_cursorPriceLine){
+    try{ mainSeries.removePriceLine(_cursorPriceLine); }catch{}
+    _cursorPriceLine = null;
+  }
+
+  if(!param || !param.time || !mainSeries) return;
+
+  // Get the candle data at this time from the main series
+  const barData = param.seriesData && param.seriesData.get(mainSeries);
+  if(!barData) return;
+
+  const closePrice = barData.close;
+  if(closePrice == null || isNaN(closePrice)) return;
+
+  // Create a price line at candle close — this shows a label on the right axis
+  _cursorPriceLine = mainSeries.createPriceLine({
+    price:            closePrice,
+    color:            theme==='dark' ? '#58a6ff' : '#0550ae',
+    lineWidth:        1,
+    lineStyle:        LightweightCharts.LineStyle.Dashed,
+    axisLabelVisible: true,
+    title:            '',
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  INIT MAIN + VOLUME
 // ═══════════════════════════════════════════════════════════════
@@ -539,6 +570,16 @@ function initMain(){
   if(panes.main) return;
   createPane('main',3,'');
   mainChart=panes.main.chart;
+  // Disable built-in crosshair price label — we draw our own from candle close
+  mainChart.applyOptions({
+    crosshair:{
+      ...tOpts().crosshair,
+      horzLine:{
+        ...( (tOpts().crosshair||{}).horzLine || {} ),
+        labelVisible: false,   // hide the raw-price crosshair label
+      }
+    }
+  });
   mainSeries=mainChart.addCandlestickSeries({
     upColor:'#3fb950',downColor:'#f85149',
     borderUpColor:'#3fb950',borderDownColor:'#f85149',
@@ -1508,6 +1549,11 @@ function wsConnect(){
 function handleMsg(msg){
   switch(msg.type){
     case 'init':{
+      if(_cursorPriceLine){
+        try{ mainSeries && mainSeries.removePriceLine(_cursorPriceLine); }catch{}
+        _cursorPriceLine=null;
+      }
+
       document.getElementById('panes').innerHTML='';
       document.getElementById('panes').appendChild(drawCv);
       document.getElementById('panes').appendChild(ghostCv);
