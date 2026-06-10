@@ -7,6 +7,42 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.4.1] — 2026-06-10
+
+### Fixed
+- **visual**: Ichimoku cloud fill now renders correctly between Span A and
+  Span B — canvas polygon with bullish/bearish colour segments and
+  crossover interpolation
+- **visual**: Right-axis cursor crosshair label always shows candle close —
+  LWC's raw horzLine label disabled and replaced with a PriceLine at
+  exact candle close on hover
+- **visual**: Single-line indicators (EMA, SMA, RSI) render as flat legend
+  rows with no group wrapper or collapse arrow
+- **visual**: Group wrappers built lazily — created on second line arrival,
+  downgraded back to flat row when only one line remains
+- **visual**: `toggleGroupVisibility` and `removeIndicatorGroup` no longer
+  error on single-line groups with no wrapper DOM element
+- **visual**: `subPaneGroups` resets correctly on chart re-init
+
+### Added
+- **visual**: Cloud (Bull) and Cloud (Bear) have independent hide and
+  remove buttons inside the Ichimoku group; removing the group clears
+  the canvas fill immediately
+- **visual**: Multi-line sub-chart indicators (MACD) show a collapsible
+  group chip with unified hide-all and remove-all controls
+- **visual**: Main-chart indicator legend moved from top-right to top-left
+- **visual**: Two new Settings toggles under "Price Axis Labels" —
+  "Highlight last candle close on right axis" (default ON) and
+  "Show indicator last prices on right axis" (default OFF)
+
+### Performance
+- **visual**: Hidden indicators skip all rendering — `visible:false` for
+  LWC series, segment skips in the cloud canvas loop
+- **visual**: 50 ms redraw interval skips `redrawAll()` when no drawings
+  and no visible cloud spans exist
+
+---
+
 ## [0.4.0] — 2026-06-07
 
 ### Added

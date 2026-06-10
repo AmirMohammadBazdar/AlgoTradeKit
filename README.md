@@ -83,6 +83,14 @@ add_macd(chart,     macd, timestamps=chart.df["timestamp"])
 chart.show()   # opens browser at http://localhost:9000
 ```
 
+| Feature            | Details                                                                     |
+|--------------------|-----------------------------------------------------------------------------|
+| Ichimoku cloud     | Canvas-drawn fill between Span A/B — bullish teal / bearish red             |
+| Indicator grouping | Multi-line indicators grouped with collapsible header, hide-all, remove-all |
+| Legend position    | Top-left of chart pane                                                      |
+| Settings ⚙         | Font, axis label toggles (last close / indicator prices on right axis)      |
+| Cursor axis label  | Always shows candle close price, never indicator values                     |
+
 ---
 
 ## Data Module
