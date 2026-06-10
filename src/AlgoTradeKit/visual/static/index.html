@@ -54,6 +54,28 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
                 color:inherit;opacity:.6;font-size:10px;transition:opacity .15s}
 .ind-chip .iact:hover{opacity:1}
 .ind-chip.hidden-ind{opacity:.35;text-decoration:line-through}
+/* ── Sub-pane group chip ─────────────────────────────────────── */
+.ind-chip-group{
+  display:inline-flex;flex-direction:column;
+  border-radius:4px;font-family:'Courier New',monospace;font-size:10px;
+  overflow:hidden;
+}
+.ind-chip-group-hdr{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:1px 6px;font-weight:700;cursor:default;
+}
+.ind-chip-group-hdr .iact{background:none;border:none;cursor:pointer;padding:0;
+  line-height:1;color:inherit;opacity:.6;font-size:10px;transition:opacity .15s}
+.ind-chip-group-hdr .iact:hover{opacity:1}
+.ind-chip-group-children{
+  display:none;flex-direction:column;
+  padding:0 4px 2px 12px;gap:2px;
+}
+.ind-chip-group-children.open{display:flex}
+.ind-chip-group-children .ind-chip{
+  background:none!important;border:none!important;
+  padding:1px 2px;
+}
 
 /* ── Main-pane indicator legend (top-left) ───────────────────── */
 #ind-legend{
@@ -401,6 +423,8 @@ const HANDLE_R=5, HIT_R=9;
 
 // indGroups: groupName → {names: [str], collapsed: bool, hidden: bool}
 const indGroups = {};
+// subPaneGroups: paneId → {groupName → {names, collapsed, hidden}}
+const subPaneGroups = {};
 
 // ── Font settings state ──
 let axisFont='\'Courier New\',monospace', axisFontSize=12;
@@ -460,11 +484,6 @@ function createPane(id,flex=3,label=''){
   // Pane label (for sub-pane indicators)
   const lbl=document.createElement('div');
   lbl.className='pane-lbl'; lbl.id='pl-'+id;
-  if(label){
-    const c=document.createElement('span'); c.className='ind-chip';
-    c.style.cssText='background:#ffffff11;color:var(--text2)'; c.textContent=label;
-    lbl.appendChild(c);
-  }
   wrap.appendChild(lbl);
 
   // Indicator legend overlay (only for main pane)
@@ -493,6 +512,7 @@ function createPane(id,flex=3,label=''){
   chart.subscribeCrosshairMove(param=>{
     if(id==='main'){
       updateOHLCV(param);
+      _updateLastVals(param.seriesData);
       updateIndLegendValues(param);
       updateCursorAxisLabel(param);
     }
@@ -543,16 +563,21 @@ function updateCursorAxisLabel(param){
     _cursorPriceLine = null;
   }
 
-  if(!param || !param.time || !mainSeries) return;
+  if(!mainSeries) return;
 
-  // Get the candle data at this time from the main series
-  const barData = param.seriesData && param.seriesData.get(mainSeries);
-  if(!barData) return;
+  let closePrice = null;
 
-  const closePrice = barData.close;
+  if(param && param.time){
+    // Cursor is on a bar — use that bar's close
+    const barData = param.seriesData && param.seriesData.get(mainSeries);
+    if(barData) closePrice = barData.close ?? null;
+  } else {
+    // Cursor off-chart or after all candles — show last bar close
+    if(allBars.length > 0) closePrice = allBars[allBars.length-1].close ?? null;
+  }
+
   if(closePrice == null || isNaN(closePrice)) return;
 
-  // Create a price line at candle close — this shows a label on the right axis
   _cursorPriceLine = mainSeries.createPriceLine({
     price:            closePrice,
     color:            theme==='dark' ? '#58a6ff' : '#0550ae',
@@ -609,6 +634,8 @@ function setData(bars){
     color:b.close>=b.open?'#3fb95055':'#f8514955',
   })));
   document.getElementById('barcnt').textContent=bars.length+' bars';
+  // Show last-close label on right axis immediately (cursor not yet on chart)
+  updateCursorAxisLabel(null);
 }
 
 function streamBar(bar){
@@ -620,6 +647,8 @@ function streamBar(bar){
   else allBars.push(bar);
   document.getElementById('barcnt').textContent=allBars.length+' bars';
   document.getElementById('lupd').textContent='⟳ '+new Date().toLocaleTimeString();
+  // Keep last-close axis label current
+  updateCursorAxisLabel(null);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -676,12 +705,17 @@ function addIndicator(ind){
     series,color:ind.color,overlay:ind.overlay,pane:ind.pane,
     hidden:false,seriesType:ind.seriesType,paneId,
     group: ind.group || ind.name,
+    lastVal: (() => {
+      if(!ind.data || !ind.data.length) return null;
+      const last = ind.data[ind.data.length-1];
+      return last ? (last.value ?? null) : null;
+    })(),
   };
 
   if(ind.overlay){
     addLegendRow(ind.name, ind.color, ind.group || ind.name);
   } else {
-    addSubPaneChip(ind.name, ind.color, paneId);
+    addSubPaneChip(ind.name, ind.color, paneId, ind.group || ind.name);
   }
 }
 
@@ -784,64 +818,74 @@ function streamIndicator(name,point){
   const m=indMeta[name];
   if(!m){ console.warn('streamIndicator: unknown',name); return; }
   if(!m.hidden) m.series.update(point);
+  // Cache last value for off-chart display
+  if(point && point.value != null) m.lastVal = point.value;
 }
 
-// ── Legend row (main pane, top-right) ─────────────────────────
+// ── Legend row (main pane, top-left) ──────────────────────────
+// Single-line: flat .il-row, no group wrapper.
+// Multi-line: .il-group with collapsible header, built lazily when
+// the second line of a group arrives.
 function addLegendRow(name, color, group){
   const leg=document.getElementById('ind-legend');
   if(!leg) return;
+  const grpName = group || name;
 
-  const grpName = group || name;  // fallback: group = own name
+  if(indGroups[grpName]){
+    const g = indGroups[grpName];
 
-  // ── Multi-line: group already exists → add child row ─────────
-  if(indGroups[grpName] && indGroups[grpName].names.length > 0){
-    indGroups[grpName].names.push(name);
-    const childrenEl = document.getElementById('ilgrpch-'+CSS.escape(grpName));
-    if(childrenEl){
-      const row = _makeIndRow(name, color, true);
-      childrenEl.appendChild(row);
+    if(g.names.length === 1){
+      // ── Upgrade flat row → group wrapper ─────────────────────
+      const existingRow = document.getElementById('ilrow-'+CSS.escape(g.names[0]));
+      const existingColor = indMeta[g.names[0]] ? indMeta[g.names[0]].color : color;
+      if(existingRow) existingRow.remove();
+
+      const grpDiv = document.createElement('div');
+      grpDiv.className = 'il-group';
+      grpDiv.id = 'ilgrp-'+CSS.escape(grpName);
+
+      const hdr = document.createElement('div');
+      hdr.className = 'il-group-hdr';
+      hdr.innerHTML = `
+        <span class="il-group-arrow" id="ilgrparr-${CSS.escape(grpName)}"
+              onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
+        <span class="il-dot" style="background:${existingColor}"></span>
+        <span class="il-group-name">${grpName}</span>
+        <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
+                onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
+          <svg width="12" height="9" viewBox="0 0 12 9">
+            <ellipse cx="6" cy="4.5" rx="5" ry="3.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
+            <circle cx="6" cy="4.5" r="1.5" fill="currentColor"/>
+          </svg>
+        </button>
+        <button class="il-btn remove" title="Remove indicator"
+                onclick="removeIndicatorGroup('${grpName.replace(/'/g,"\\'")}')">✕</button>`;
+      grpDiv.appendChild(hdr);
+
+      const ch = document.createElement('div');
+      ch.className = 'il-group-children';
+      ch.id = 'ilgrpch-'+CSS.escape(grpName);
+      grpDiv.appendChild(ch);
+
+      ch.appendChild(_makeIndRow(g.names[0], existingColor, true));
+      g.names.push(name);
+      ch.appendChild(_makeIndRow(name, color, true));
+      leg.appendChild(grpDiv);
+      return;
     }
+
+    // ── Already ≥2 members — append child ────────────────────
+    g.names.push(name);
+    const ch = document.getElementById('ilgrpch-'+CSS.escape(grpName));
+    if(ch) ch.appendChild(_makeIndRow(name, color, true));
     return;
   }
 
-  // ── First line of a group: decide whether to create a group wrapper ─
-  // We create a wrapper now. If it ends up being single-line, it just
-  // looks like a normal row (group header IS the only row).
+  // ── First line — flat row (no group wrapper yet) ──────────
   indGroups[grpName] = {names:[name], collapsed:false, hidden:false};
-
-  const grpDiv = document.createElement('div');
-  grpDiv.className = 'il-group';
-  grpDiv.id = 'ilgrp-'+CSS.escape(grpName);
-
-  // Group header
-  const hdr = document.createElement('div');
-  hdr.className = 'il-group-hdr';
-  hdr.innerHTML = `
-    <span class="il-group-arrow" id="ilgrparr-${CSS.escape(grpName)}"
-          onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
-    <span class="il-dot" style="background:${color}"></span>
-    <span class="il-group-name">${grpName}</span>
-    <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
-            onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
-      <svg width="12" height="9" viewBox="0 0 12 9">
-        <ellipse cx="6" cy="4.5" rx="5" ry="3.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
-        <circle cx="6" cy="4.5" r="1.5" fill="currentColor"/>
-      </svg>
-    </button>
-    <button class="il-btn remove" title="Remove indicator"
-            onclick="removeIndicatorGroup('${grpName.replace(/'/g,"\\'")}')">✕</button>`;
-  grpDiv.appendChild(hdr);
-
-  // Children container
-  const ch = document.createElement('div');
-  ch.className = 'il-group-children';
-  ch.id = 'ilgrpch-'+CSS.escape(grpName);
-  grpDiv.appendChild(ch);
-
-  // First child row
-  ch.appendChild(_makeIndRow(name, color, true));
-
-  leg.appendChild(grpDiv);
+  const flat = _makeIndRow(name, color, false);
+  flat.dataset.group = grpName;
+  leg.appendChild(flat);
 }
 
 function _makeIndRow(name, color, isChild){
@@ -866,10 +910,11 @@ function _makeIndRow(name, color, isChild){
 
 function toggleGroupCollapse(grpName){
   const g = indGroups[grpName]; if(!g) return;
+  const ch = document.getElementById('ilgrpch-'+CSS.escape(grpName));
+  if(!ch) return; // single-line group — nothing to collapse
   g.collapsed = !g.collapsed;
-  const ch  = document.getElementById('ilgrpch-'+CSS.escape(grpName));
   const arr = document.getElementById('ilgrparr-'+CSS.escape(grpName));
-  if(ch)  ch.classList.toggle('open', !g.collapsed);
+  ch.classList.toggle('open', !g.collapsed);
   if(arr) arr.classList.toggle('open', !g.collapsed);
 }
 
@@ -878,7 +923,6 @@ function toggleGroupVisibility(grpName){
   g.hidden = !g.hidden;
   const cloudNames = ['Cloud (Bull)', 'Cloud (Bear)'];
   g.names.forEach(n => {
-    // Cloud series are canvas-only — no indMeta entry
     if(cloudNames.includes(n)){
       if(ichimokuCloud){
         if(n==='Cloud (Bull)') ichimokuCloud.hiddenA = g.hidden;
@@ -893,49 +937,137 @@ function toggleGroupVisibility(grpName){
     m.series.applyOptions({visible:!m.hidden});
     const row = document.getElementById('ilrow-'+CSS.escape(n));
     if(row) row.classList.toggle('hidden-ind', m.hidden);
+    const chip = document.getElementById('chip-'+CSS.escape(n));
+    if(chip) chip.classList.toggle('hidden-ind', m.hidden);
   });
+  // Dim wrapper (multi-line) or flat row (single-line)
   const grpDiv = document.getElementById('ilgrp-'+CSS.escape(grpName));
-  if(grpDiv) grpDiv.classList.toggle('hidden-ind', g.hidden);
+  if(grpDiv){
+    grpDiv.classList.toggle('hidden-ind', g.hidden);
+  } else if(g.names.length === 1){
+    const flatRow = document.getElementById('ilrow-'+CSS.escape(g.names[0]));
+    if(flatRow) flatRow.classList.toggle('hidden-ind', g.hidden);
+  }
   redrawAll();
 }
 
 function removeIndicatorGroup(grpName){
   const g = indGroups[grpName]; if(!g) return;
-  // If this group owns cloud series, clear them from canvas too
   if(grpName.startsWith('Ichimoku') || g.names.some(n=>n==='Cloud (Bull)'||n==='Cloud (Bear)')){
     ichimokuCloud = null;
   }
-  // Remove all individual series (line series via removeIndicator,
-  // cloud rows via removeCloudSeries — filter them apart)
   const cloudNames = ['Cloud (Bull)', 'Cloud (Bear)'];
-  const lineNames  = g.names.filter(n => !cloudNames.includes(n));
-  const cloudNamesInGroup = g.names.filter(n => cloudNames.includes(n));
-  // Remove cloud DOM rows directly (they're not in indMeta)
-  cloudNamesInGroup.forEach(n => {
-    const row = document.getElementById('ilrow-'+CSS.escape(n));
-    if(row) row.remove();
+  g.names.filter(n=>cloudNames.includes(n)).forEach(n=>{
+    const row=document.getElementById('ilrow-'+CSS.escape(n)); if(row) row.remove();
   });
-  // Remove line series
-  [...lineNames].forEach(n => removeIndicator(n));
-  // Remove group DOM wrapper if still present
+  [...g.names.filter(n=>!cloudNames.includes(n))].forEach(n=>removeIndicator(n));
+  // Remove group wrapper (multi-line) or flat row (single-line)
   const grpDiv = document.getElementById('ilgrp-'+CSS.escape(grpName));
   if(grpDiv) grpDiv.remove();
   delete indGroups[grpName];
   redrawAll();
 }
 
-// ── Sub-pane chip with hide/remove ────────────────────────────
-function addSubPaneChip(name,color,paneId){
-  const lbl=document.getElementById('pl-'+paneId);
+// ── Sub-pane chip — flat for single-line, group for multi-line ─
+function addSubPaneChip(name, color, paneId, group){
+  const lbl = document.getElementById('pl-'+paneId);
   if(!lbl) return;
-  const chip=document.createElement('span');
-  chip.className='ind-chip'; chip.id='chip-'+CSS.escape(name);
-  chip.style.cssText=`background:${color}22;color:${color};border:1px solid ${color}44`;
-  chip.innerHTML=`${name}
-    <button class="iact" title="Hide/Show" onclick="toggleIndVisibility('${name.replace(/'/g,"\\'")}')">◉</button>
-    <button class="iact remove" title="Remove" style="color:var(--red)"
+  const grpName = group || name;
+  if(!subPaneGroups[paneId]) subPaneGroups[paneId] = {};
+  const paneGrps = subPaneGroups[paneId];
+
+  if(paneGrps[grpName]){
+    const g = paneGrps[grpName];
+
+    if(g.names.length === 1){
+      // Upgrade flat chip → group chip
+      const existingChip = document.getElementById('chip-'+CSS.escape(g.names[0]));
+      const existingColor = indMeta[g.names[0]] ? indMeta[g.names[0]].color : color;
+      if(existingChip) existingChip.remove();
+
+      const grpChip = document.createElement('span');
+      grpChip.className = 'ind-chip-group';
+      grpChip.id = 'chipgrp-'+CSS.escape(paneId+'-'+grpName);
+      grpChip.style.cssText = `background:${existingColor}22;border:1px solid ${existingColor}44;color:${existingColor}`;
+
+      const hdr = document.createElement('span');
+      hdr.className = 'ind-chip-group-hdr';
+      hdr.innerHTML = `
+        <span style="font-size:9px;cursor:pointer"
+              onclick="toggleSubGrpCollapse('${paneId}','${grpName.replace(/'/g,"\\'")}')">▶</span>
+        <span>${grpName}</span>
+        <button class="iact" title="Hide/Show all"
+                onclick="toggleSubGrpVisibility('${paneId}','${grpName.replace(/'/g,"\\'")}')">◉</button>
+        <button class="iact" title="Remove all" style="color:var(--red)"
+                onclick="removeSubGrp('${paneId}','${grpName.replace(/'/g,"\\'")}')">✕</button>`;
+      grpChip.appendChild(hdr);
+
+      const children = document.createElement('span');
+      children.className = 'ind-chip-group-children';
+      children.id = 'chipgrpch-'+CSS.escape(paneId+'-'+grpName);
+      children.appendChild(_makeSubChip(g.names[0], existingColor));
+      children.appendChild(_makeSubChip(name, color));
+      grpChip.appendChild(children);
+
+      g.names.push(name);
+      lbl.appendChild(grpChip);
+      return;
+    }
+
+    // Already ≥2 — add child chip
+    g.names.push(name);
+    const ch = document.getElementById('chipgrpch-'+CSS.escape(paneId+'-'+grpName));
+    if(ch) ch.appendChild(_makeSubChip(name, color));
+    return;
+  }
+
+  // First line — flat chip
+  paneGrps[grpName] = {names:[name], collapsed:false, hidden:false};
+  lbl.appendChild(_makeSubChip(name, color));
+}
+
+function _makeSubChip(name, color){
+  const chip = document.createElement('span');
+  chip.className = 'ind-chip';
+  chip.id = 'chip-'+CSS.escape(name);
+  chip.style.cssText = `background:${color}22;color:${color};border:1px solid ${color}44`;
+  chip.innerHTML = `${name}
+    <button class="iact" title="Hide/Show"
+            onclick="toggleIndVisibility('${name.replace(/'/g,"\\'")}')">◉</button>
+    <button class="iact" title="Remove" style="color:var(--red)"
             onclick="removeIndicator('${name.replace(/'/g,"\\'")}')">✕</button>`;
-  lbl.appendChild(chip);
+  return chip;
+}
+
+function toggleSubGrpCollapse(paneId, grpName){
+  const g = subPaneGroups[paneId]?.[grpName]; if(!g) return;
+  g.collapsed = !g.collapsed;
+  const ch = document.getElementById('chipgrpch-'+CSS.escape(paneId+'-'+grpName));
+  const arr = document.querySelector(`#chipgrp-${CSS.escape(paneId+'-'+grpName)} span[onclick*="toggleSubGrpCollapse"]`);
+  if(ch) ch.classList.toggle('open', !g.collapsed);
+  if(arr) arr.textContent = g.collapsed ? '▶' : '▾';
+}
+
+function toggleSubGrpVisibility(paneId, grpName){
+  const g = subPaneGroups[paneId]?.[grpName]; if(!g) return;
+  g.hidden = !g.hidden;
+  g.names.forEach(n=>{
+    const m = indMeta[n]; if(!m) return;
+    m.hidden = g.hidden;
+    m.series.applyOptions({visible:!m.hidden});
+    const chip = document.getElementById('chip-'+CSS.escape(n));
+    if(chip) chip.classList.toggle('hidden-ind', m.hidden);
+  });
+  const grpChip = document.getElementById('chipgrp-'+CSS.escape(paneId+'-'+grpName));
+  if(grpChip) grpChip.style.opacity = g.hidden ? '0.35' : '1';
+}
+
+function removeSubGrp(paneId, grpName){
+  const g = subPaneGroups[paneId]?.[grpName]; if(!g) return;
+  [...g.names].forEach(n=>removeIndicator(n));
+  const grpChip = document.getElementById('chipgrp-'+CSS.escape(paneId+'-'+grpName));
+  if(grpChip) grpChip.remove();
+  delete subPaneGroups[paneId][grpName];
 }
 
 // ── Toggle visibility (hide/show — no data removed) ───────────
@@ -955,13 +1087,11 @@ function toggleIndVisibility(name){
 
 // ── Remove indicator (frontend + notify Python) ───────────────
 function removeIndicator(name){
-  // Cloud series are canvas-only — clear the cloud state
   if(name==='Cloud (Bull)' || name==='Cloud (Bear)'){
     ichimokuCloud=null; redrawAll(); return;
   }
   const m=indMeta[name]; if(!m) return;
 
-  // Remove from group tracking
   const grpName = m.group || name;
   const g = indGroups[grpName];
   if(g){
@@ -970,14 +1100,46 @@ function removeIndicator(name){
       const grpDiv = document.getElementById('ilgrp-'+CSS.escape(grpName));
       if(grpDiv) grpDiv.remove();
       delete indGroups[grpName];
+    } else if(g.names.length === 1){
+      // Downgrade: group wrapper → flat row for the remaining line
+      const grpDiv = document.getElementById('ilgrp-'+CSS.escape(grpName));
+      if(grpDiv){
+        const remainingName = g.names[0];
+        const remainingColor = indMeta[remainingName] ? indMeta[remainingName].color : '#fff';
+        const flat = _makeIndRow(remainingName, remainingColor, false);
+        flat.dataset.group = grpName;
+        grpDiv.replaceWith(flat);
+      }
     }
+    // else ≥2 lines remain — wrapper stays, child row removed below
   }
 
-  // Remove LWC series
   const paneObj=panes[m.paneId];
   if(paneObj){
     try{ paneObj.chart.removeSeries(m.series); }catch{}
     paneObj.seriesList=paneObj.seriesList.filter(s=>s!==m.series);
+  }
+  // Clean up subPaneGroups for non-overlay series
+  if(!m.overlay && subPaneGroups[m.paneId]){
+    const pg = subPaneGroups[m.paneId];
+    Object.entries(pg).forEach(([gn, sg])=>{
+      if(!sg.names.includes(name)) return;
+      sg.names = sg.names.filter(n=>n!==name);
+      if(sg.names.length === 0){
+        const grpChip = document.getElementById('chipgrp-'+CSS.escape(m.paneId+'-'+gn));
+        if(grpChip) grpChip.remove();
+        delete pg[gn];
+      } else if(sg.names.length === 1){
+        // Downgrade group chip → flat chip
+        const grpChip = document.getElementById('chipgrp-'+CSS.escape(m.paneId+'-'+gn));
+        if(grpChip){
+          const rName = sg.names[0];
+          const rColor = indMeta[rName] ? indMeta[rName].color : '#fff';
+          grpChip.replaceWith(_makeSubChip(rName, rColor));
+        }
+        delete pg[gn];
+      }
+    });
   }
   const row=document.getElementById('ilrow-'+CSS.escape(name));
   if(row) row.remove();
@@ -994,18 +1156,63 @@ function removeIndicator(name){
 
 // ── Update crosshair values in legend ─────────────────────────
 function updateIndLegendValues(param){
-  if(!param.seriesData) return;
+  const hasData = param && param.seriesData && param.time;
   Object.entries(indMeta).forEach(([name,m])=>{
     if(!m.overlay) return;
     const valEl=document.getElementById('ilval-'+CSS.escape(name));
     if(!valEl) return;
-    const d=param.seriesData.get(m.series);
-    if(d!=null){
-      const v=typeof d==='object'?d.value:d;
-      valEl.textContent=v!=null?Number(v).toFixed(4):'—';
-      valEl.style.color=m.color;
+
+    if(hasData){
+      const d=param.seriesData.get(m.series);
+      if(d!=null){
+        const v=typeof d==='object'?d.value:d;
+        valEl.textContent=v!=null?Number(v).toFixed(4):'—';
+        valEl.style.color=m.color;
+        return;
+      }
+    }
+
+    // Cursor off-chart or after all candles — show last bar value
+    // Only show if the group is expanded (children visible) or it's a flat row
+    const grpName = m.group || name;
+    const g = indGroups[grpName];
+    const isFlat = !document.getElementById('ilgrp-'+CSS.escape(grpName));
+    const isExpanded = !isFlat && !g?.collapsed;
+    if(isFlat || isExpanded){
+      const data = m.series.data ? m.series.data() : null;
+      // LWC 4.x exposes series data via dataByIndex; fall back to allBars length
+      let lastVal = null;
+      try{
+        // Try LWC internal: series has no public .data(), use a price at last bar time
+        if(allBars.length > 0){
+          const lastTime = allBars[allBars.length-1].time;
+          // seriesData isn't available off-hover, read from the series via a trick:
+          // store last streamed value in indMeta
+          lastVal = m.lastVal ?? null;
+        }
+      }catch{}
+      if(lastVal != null){
+        valEl.textContent = Number(lastVal).toFixed(4);
+        valEl.style.color = m.color;
+      } else {
+        valEl.textContent = '—';
+      }
     } else {
-      valEl.textContent='—';
+      // Group is collapsed — hide value
+      valEl.textContent = '';
+    }
+  });
+}
+
+// ── Keep last value in indMeta updated on every stream/setData ─
+function _updateLastVals(seriesData){
+  if(!seriesData) return;
+  Object.entries(indMeta).forEach(([name,m])=>{
+    if(!m.overlay) return;
+    const d = seriesData.get(m.series);
+    if(d!=null){
+      const v = typeof d==='object' ? d.value : d;
+      if(v!=null) m.lastVal = v;
     }
   });
 }
@@ -1689,6 +1896,7 @@ function handleMsg(msg){
       Object.keys(drawings).forEach(k=>delete drawings[k]);
       Object.keys(indMeta).forEach(k=>delete indMeta[k]);
       Object.keys(indGroups).forEach(k=>delete indGroups[k]);
+      Object.keys(subPaneGroups).forEach(k=>delete subPaneGroups[k]);
       ichimokuCloud = null;
       mainSeries=null; mainChart=null; volumeSeries=null;
       draftState=null; selectedId=null; hoverId=null;
