@@ -7,6 +7,37 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.5.0] — 2026-06-12
+
+### Added
+
+- **`strategy` module** — framework for building, running, and combining trading strategies
+  - `BaseStrategy` abstract class with a clear four-method lifecycle:
+    - `prepare_indicators(data)` — compute all indicator columns once before the loop
+    - `generate_signals(candle_index, data)` — per-candle entry detection (main loop)
+    - `setup(data)` — optional one-time state initialisation (called before the loop)
+    - `detect_exit_signals(candle_index, data)` — optional per-candle exit detection
+  - `run(data, mode)` framework entry point — not overridable; handles the full lifecycle
+  - `StrategyMode.BACKTEST` — processes all candles, returns all signals
+  - `StrategyMode.LIVE` — processes all candles for correct state building, returns only last-candle signals (compatible with the upcoming `trade` module and WebSocket feeds)
+  - `Signal` dataclass — entry signal with `direction`, `entry_price`, `stop_loss`, `take_profit`, `timestamp`, `candle_index`, `timeframe`, `metadata`; includes `sl_distance` and `risk_reward` properties
+  - `ExitSignal` dataclass — exit condition with `reason`, `exit_price`, `timestamp`, `candle_index`, `metadata`
+  - `StrategyResult` dataclass — full output with `signals`, `exit_signals`, `data` (enriched), `mode`; includes `long_signals`, `short_signals`, `has_signal`, `signal_count` helpers
+  - Multi-timeframe support via `dict[str, pd.DataFrame]` input; plain DataFrames are auto-wrapped
+  - Three built-in helper methods on `BaseStrategy`: `get_candle()`, `latest_candle_at()`, `history()`
+  - `warmup_period` class attribute to skip early candles where indicators are NaN
+  - Input validation: checks required OHLCV columns, primary timeframe presence, empty DataFrames
+- **`strategy.builtin.MACDCrossoverStrategy`** — first built-in strategy
+  - Entry: MACD line crosses above/below signal line (bullish/bearish crossover)
+  - Stop-loss: swing low/high over a configurable `sl_lookback` window (default 10 candles)
+  - Take-profit: `None` (managed dynamically by simulate/trade)
+  - Exit: `ExitSignal(reason="macd_reversal")` when histogram changes sign
+  - Configurable: `fast_length`, `slow_length`, `signal_length`, `sl_lookback`, `timeframe`
+  - MACD computed via the existing `indicator.MACD` class (no duplicate code)
+- 99 unit tests covering all types, BaseStrategy lifecycle, modes, helpers, validation, MACDCrossoverStrategy indicators, signals, SL, exits, live mode, and edge cases
+
+---
+
 ## [0.4.1] — 2026-06-10
 
 ### Fixed
