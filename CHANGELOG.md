@@ -7,6 +7,60 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.6.0] — 2026-06-15
+
+### Added
+
+- **`simulate` module** — full backtesting engine for Exchange and MetaTrader instruments
+  - `SimulateConfig` dataclass — single unified configuration object for every simulation parameter:
+    - **Wallet**: `initial_balance`, `symbol`, `exchange_type` (`"exchange"` / `"metatrader"`), `leverage`
+    - **Trading costs**: `spread` (bid-ask spread in price units), `commission_type` (`"percentage"` / `"per_lot"` / `"fixed"`), `commission`
+    - **Position sizing**: `position_sizing` (`"risk_percent"` / `"fixed_amount"` / `"fixed_lot"`), `risk_per_trade`, `fixed_amount`, `fixed_lot`, `compound` (size off current balance)
+    - **Position limits**: `max_long_positions`, `max_short_positions`, `max_positions`
+    - **Take-profit**: `tp_mode` (`"signal"` / `"fixed_rr"` / `"multi_rr"` / `"none"`), `tp_rr`, `tp_levels`
+    - **Stop-loss**: `sl_mode` (`"signal"` / `"trailing"`), `trailing_sl_percent`
+    - **Risk-free**: `risk_free_enabled`, `risk_free_at_rr` — moves SL to break-even when profit ≥ N×R
+    - **Force close**: `force_close_on_exit_signal` — close on `ExitSignal` from strategy
+    - **Report options**: `drawdown_threshold`, `primary_timeframe`, `config_id`
+    - Supports dict-unpacking construction (`SimulateConfig(**cfg_dict)`) for batch sweeps
+  - `Simulate` engine class — candle-by-candle simulation loop with full position lifecycle:
+    - **Spread**: applied at fill (long = entry + spread; short = entry − spread)
+    - **Leverage**: exchange margin model (`margin = size × entry / leverage`); MT5 simplified
+    - **SL/TP**: gap-open detection, intra-candle priority via candle direction tiebreaker
+    - **Multi-RR TP** (`tp_mode="multi_rr"`): SL trails to previous level after each TP hit; final level closes position
+    - **Trailing SL** (`sl_mode="trailing"`): SL follows peak price at configurable % distance
+    - **Risk-free / break-even**: SL moves to entry when position reaches `risk_free_at_rr × R` profit
+    - **Force close**: positions closed at `ExitSignal.exit_price` (or candle close if None)
+    - **EOD close**: all open positions closed at final candle close (`close_reason="end_of_data"`)
+    - MT5 lot sizing via `calculate_mt5_lot()` for `"risk_percent"` and `"fixed_amount"` modes
+    - Position limits enforced per direction and globally per candle
+  - `ClosedTrade` frozen dataclass — immutable record with: `entry_price`, `exit_price`, `stop_loss`, `take_profit`, `size`, `margin_amount`, `risk_amount`, `gross_pnl`, `commission`, `net_pnl`, `pnl_r`, `close_reason`, `rr_levels_hit`, `max_favourable_excursion`, `max_adverse_excursion`, `leverage`, `spread_paid`, `signal_candle_index`
+  - `SimulateReport` dataclass — fully pre-computed report (report module performs no maths):
+    - **P&L summary**: `initial_balance`, `final_balance`, `total_pnl`, `total_pnl_percent`
+    - **Trade counts**: total, long/short split, win/loss/break-even split, by close reason (sl/tp/rf/fc/eod)
+    - **Win/loss metrics**: `win_rate`, `loss_rate`, `avg_win`, `avg_loss`, `largest_win`, `largest_loss`, `avg_pnl_r`
+    - **Streaks**: `max_consecutive_wins`, `max_consecutive_losses`
+    - **Risk metrics**: `profit_factor`, `expectancy`, `sharpe_ratio`, `sortino_ratio`, `calmar_ratio`, `recovery_factor`
+    - **Drawdown**: `max_drawdown` (`DrawdownPeriod`), `significant_drawdowns` above configurable threshold
+    - **Time analysis**: `weekday_stats` (Mon–Sun), `monthly_stats` (YYYY-MM), `session_stats` (London, New York, Tokyo, Sydney, off-hours)
+    - **Balance history**: one `{timestamp, wallet, equity}` dict per primary-TF candle for the balance chart
+    - **Trade markers**: per-trade dicts with all data needed for the visual report (chart dots, hover tooltips, click-to-chart links via `signal_candle_index`)
+    - **Cost summary**: `total_commission`, `total_spread_cost`, `avg_mae`, `avg_mfe`
+  - `run_batch(strategy, data, configs)` — run one strategy against N configs in parallel (`ThreadPoolExecutor`); strategy signals computed once, results returned in input order
+  - `run_multi(pairs, initial_balance)` — shared-wallet portfolio simulation; multiple (strategy, data, config) pairs compete for the same capital, combined `SimulateReport` returned
+  - `_lot` sub-module — MT5 lot-size calculation for 50+ instruments:
+    - Forex: USD-quote, JPY, CHF, CAD, AUD, NZD, GBP, HKD, exotic, Eastern European, Scandinavian pairs
+    - Metals: XAUUSD, XAGUSD, XPTUSD, XPDUSD
+    - Crypto: BTC, ETH, XRP, LTC, BCH, ADA, DOT, SOL, BNB, MATIC, LINK
+    - Indices: US30, US100, US500, GER40, UK100, FRA40, ESP35, JP225, HK50, AUS200
+    - Oil & gas: WTI, Brent, Natural Gas
+    - `round_lot(lot, step, min_lot, max_lot)` — broker lot-step rounding
+    - `get_mt5_pip_info(symbol, price)` — returns `(pip_size, pip_value_per_lot)` for fixed-lot sizing
+  - `_session` sub-module — Forex trading session detection (Sydney, Tokyo, London, New York) from UTC timestamps; weekday and YYYY-MM month key helpers
+- 72 unit tests covering: `SimulateConfig` validation, MT5 lot maths, session detection, position helpers, engine SL/TP/multi-RR/trailing/risk-free/force-close/EOD/leverage/spread/commission/position-limits/MT5 sizing, report statistics (win rate, profit factor, streaks, drawdown, session/weekday/monthly breakdown, markers), `run_batch` ordering and empty input, `run_multi` combined portfolio
+
+---
+
 ## [0.5.0] — 2026-06-12
 
 ### Added

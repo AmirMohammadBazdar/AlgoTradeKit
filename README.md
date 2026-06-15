@@ -1,6 +1,6 @@
 # AlgoTradeKit
 
-**Algorithmic Trading Toolkit** — collect market data, build indicators and strategies, backtest, and trade live.
+**Algorithmic Trading Toolkit** — collect market data, build indicators and strategies, backtest with a full trading simulation, and trade live.
 
 ```
 pip install AlgoTradeKit
@@ -10,397 +10,173 @@ pip install AlgoTradeKit
 
 ## Modules
 
-| Module      | Status      | Description                                            |
-| ----------- | ----------- | ------------------------------------------------------ |
-| `data`      | ✅ v0.1.0   | Collect OHLCV candles from exchanges                   |
-| `indicator` | ✅ v0.4.0   | RSI, MACD, MA family, Ichimoku — TradingView-compatible|
-| `visual`    | ✅ v0.3.0   | Candlestick charts, indicators, live streaming         |
-| `strategy`  | ✅ v0.5.0   | Build and combine trading strategies                   |
-| `simulate`  | 🔜 planned  | Backtest strategies on historical data                 |
-| `trade`     | 🔜 planned  | Live trading via exchange API or MT5                   |
+| Module      | Status     | Description                                              |
+|-------------|------------|----------------------------------------------------------|
+| `data`      | ✅ v0.1.0  | Collect OHLCV candles from exchanges                     |
+| `indicator` | ✅ v0.4.0  | RSI, EMA/SMA/WMA/VWAP, MACD, Ichimoku (no TA-lib)        |
+| `strategy`  | ✅ v0.5.0  | Build and combine trading strategies                     |
+| `simulate`  | ✅ v0.6.0  | Backtest strategies with realistic cost and TP/SL models |
+| `visual`    | ✅ v0.3.0  | Interactive candlestick charts via FastAPI + WebSocket   |
+| `trade`     | 🔜 planned | Live trading via exchange API or MT5                     |
 
 ---
 
 ## Quick Start
 
-### Collect candle data
+### 1 · Collect candle data
 
 ```python
 from AlgoTradeKit.data import Collector
 
-collector = Collector(source="binance-futures", symbol="BTCUSDT", timeframe="1d")
+collector = Collector(source="binance-futures", symbol="BTCUSDT", timeframe="1h")
 collector.destination = "data/"
-collector.starttime   = "2020/01/01"
+collector.starttime   = "2022/01/01"
 collector.collect()
 ```
 
-### Compute indicators
+### 2 · Compute indicators
 
 ```python
 import pandas as pd
-from AlgoTradeKit.indicator import RSI, MACD, EMA, Ichimoku
+from AlgoTradeKit.indicator import EMA, RSI, MACD, Ichimoku
 
-df = pd.read_csv("data/binance-futures_BTCUSDT_1d.csv")
-
-rsi  = RSI(df["close"])
-macd = MACD(df["close"])
-ema  = EMA(df["close"], length=20)
-ichi = Ichimoku(df["high"], df["low"], df["close"])
+df  = pd.read_csv("data/binance-futures_BTCUSDT_1h.csv")
+ema = EMA(length=50).calculate(df)
+rsi = RSI(length=14).calculate(df)
 ```
 
-### Run a built-in strategy
-
-```python
-import pandas as pd
-from AlgoTradeKit.strategy import MACDCrossoverStrategy, StrategyMode
-
-df = pd.read_csv("data/binance-futures_BTCUSDT_4h.csv")
-
-strategy = MACDCrossoverStrategy(timeframe="4h")
-
-# Backtest — get all signals across all candles
-result = strategy.run(df)
-print(f"Found {result.signal_count} signals ({len(result.long_signals)} long, {len(result.short_signals)} short)")
-for sig in result.signals:
-    print(sig)
-
-# Live — only the last candle's signal (for the trade module)
-result_live = strategy.run(df, mode=StrategyMode.LIVE)
-if result_live.has_signal:
-    print("LIVE signal:", result_live.signals[0])
-```
-
-### Write your own strategy
+### 3 · Build a strategy
 
 ```python
 from AlgoTradeKit.strategy import BaseStrategy, Signal
-from AlgoTradeKit.indicator import MACD, RSI
 
-class MyMACDRSIStrategy(BaseStrategy):
-    primary_timeframe = "4h"
+class MyStrategy(BaseStrategy):
+    primary_timeframe = "1h"
+    warmup_period     = 50
 
     def prepare_indicators(self, data):
-        df = data["4h"].copy()
-        macd = MACD(df["close"])
-        rsi  = RSI(df["close"])
-        df["_macd"]   = macd.macd.values
-        df["_sig"]    = macd.signal.values
-        df["_rsi"]    = rsi.rsi.values
-        data["4h"] = df
+        data["1h"]["ema50"] = EMA(50).calculate(data["1h"])["ema50"]
         return data
 
-    def generate_signals(self, i, data):
-        if i < 1:
-            return []
-        df   = data["4h"]
-        curr = df.iloc[i]
-        prev = df.iloc[i - 1]
-
-        import pandas as pd
-        if any(pd.isna(v) for v in [curr["_macd"], curr["_sig"], curr["_rsi"]]):
-            return []
-
-        # Long: bullish MACD crossover + RSI in healthy zone
-        if prev["_macd"] < prev["_sig"] and curr["_macd"] >= curr["_sig"] \
-                and 50 < curr["_rsi"] < 70:
-            sl = float(df.iloc[max(0, i-10): i+1]["low"].min())
+    def generate_signals(self, candle_index, data):
+        df  = data["1h"]
+        row = df.iloc[candle_index]
+        if row["close"] > row["ema50"]:
             return [Signal(
                 direction="long",
-                entry_price=float(curr["close"]),
-                stop_loss=sl,
+                entry_price=row["close"],
+                stop_loss=row["close"] * 0.98,
                 take_profit=None,
-                timestamp=int(curr["timestamp"]),
-                candle_index=i,
-                timeframe=self.primary_timeframe,
+                timestamp=int(row["timestamp"]),
+                candle_index=candle_index,
+                timeframe="1h",
             )]
         return []
-
-strategy = MyMACDRSIStrategy()
-result = strategy.run(df)
 ```
 
-### Multi-timeframe strategy
+### 4 · Simulate (backtest)
 
 ```python
-class HTFFilterStrategy(BaseStrategy):
-    primary_timeframe = "1h"    # loop iterates over 1h candles
+from AlgoTradeKit.simulate import Simulate, SimulateConfig
 
-    def prepare_indicators(self, data):
-        for tf in data:
-            df = data[tf].copy()
-            df["_ema200"] = EMA(df["close"], length=200).ema.values
-            data[tf] = df
-        return data
+config = SimulateConfig(
+    initial_balance=10_000,
+    symbol="btcusdt",
+    exchange_type="exchange",   # or "metatrader"
+    leverage=10,
+    spread=0.5,                 # $0.50 bid-ask spread
+    commission_type="percentage",
+    commission=0.001,           # 0.1 % per side
+    position_sizing="risk_percent",
+    risk_per_trade=1.0,         # risk 1 % of balance per trade
+    tp_mode="multi_rr",         # trail SL after each TP level
+    tp_levels=[1.0, 2.0, 3.0], # close at 1R, 2R, 3R
+    sl_mode="signal",
+    risk_free_enabled=True,     # break-even after 1R profit
+    max_positions=3,
+    primary_timeframe="1h",
+)
 
-    def generate_signals(self, i, data):
-        curr_1h = data["1h"].iloc[i]
-        ts      = int(curr_1h["timestamp"])
+strategy = MyStrategy()
+data     = {"1h": df}
 
-        # Get the most recent 4h candle at or before current time
-        htf = self.latest_candle_at("4h", ts, data)
-        if htf is None:
-            return []
+result = strategy.run(data)
+report = Simulate(config).run(result)
 
-        # Only take longs when price is above the 4h EMA200
-        if curr_1h["close"] > htf["_ema200"]:
-            # ... your entry logic ...
-            pass
-        return []
+print(report)
+# → <SimulateReport 'BTCUSDT_risk1.0pct_lev10x_tp_multi_rr_[1.0_2.0_3.0]'
+#       trades=47 pnl=+1243.80 (+12.4%) wr=61.7%>
 
-data = {"1h": df_1h, "4h": df_4h}
-result = HTFFilterStrategy().run(data)
+print(f"Profit factor : {report.profit_factor:.2f}")
+print(f"Max drawdown  : {report.max_drawdown.drawdown_percent:.1f}%")
+print(f"Sharpe ratio  : {report.sharpe_ratio:.2f}")
+```
+
+### 5 · Sweep configs in parallel
+
+```python
+from AlgoTradeKit.simulate import run_batch
+
+configs = [
+    SimulateConfig(risk_per_trade=0.5, tp_mode="fixed_rr", tp_rr=1.5),
+    SimulateConfig(risk_per_trade=1.0, tp_mode="fixed_rr", tp_rr=2.0),
+    SimulateConfig(risk_per_trade=2.0, tp_mode="fixed_rr", tp_rr=3.0),
+]
+reports = run_batch(strategy, data, configs)
+best    = max(reports, key=lambda r: r.total_pnl)
+print(f"Best: {best.config.config_id}  PnL={best.total_pnl:.2f}")
+```
+
+### 6 · Multi-symbol portfolio (shared wallet)
+
+```python
+from AlgoTradeKit.simulate import run_multi
+
+report = run_multi([
+    (btc_strategy, btc_data, SimulateConfig(symbol="btcusdt", risk_per_trade=1.0)),
+    (eth_strategy, eth_data, SimulateConfig(symbol="ethusdt", risk_per_trade=0.5)),
+])
+print(f"Portfolio PnL: {report.total_pnl:.2f}")
+```
+
+### 7 · Visualise
+
+```python
+from AlgoTradeKit.visual import Chart
+
+chart = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv")
+chart.serve()   # opens browser at localhost:8000
 ```
 
 ---
 
-## Strategy Module Reference
+## SimulateConfig reference
 
-### BaseStrategy
-
-Abstract base class. Subclass it and implement the required methods.
-
-```
-primary_timeframe : str   = "1h"   # timeframe the main loop iterates over
-warmup_period     : int   = 0      # skip this many candles at the start
-```
-
-| Method | Required | Called | Purpose |
-|---|---|---|---|
-| `prepare_indicators(data)` | ✅ | Once before loop | Add indicator columns |
-| `generate_signals(i, data)` | ✅ | Every candle | Detect entries, return `list[Signal]` |
-| `setup(data)` | ❌ | Once before loop | Initialise stateful variables |
-| `detect_exit_signals(i, data)` | ❌ | Every candle | Detect exits, return `list[ExitSignal]` |
-
-**Entry point:** `strategy.run(data, mode=StrategyMode.BACKTEST)`
-
-**Input formats:**
-- Single timeframe: `strategy.run(df)` — wrapped as `{primary_timeframe: df}`
-- Multi-timeframe: `strategy.run({"1h": df_1h, "4h": df_4h})`
-
-**Helper methods** (available inside `generate_signals`):
-
-```python
-# Get current candle
-candle = self.get_candle(i, data)                          # primary TF
-candle = self.get_candle(i, data, timeframe="4h")         # other TF by index
-
-# Cross-timeframe lookup by timestamp (no look-ahead)
-htf = self.latest_candle_at("4h", curr["timestamp"], data)
-
-# Historical slice
-hist = self.history(i, data)                              # all up to i
-hist = self.history(i, data, lookback=20)                 # last 20 candles
-hist = self.history(i, data, timeframe="4h", lookback=5)  # other TF
-```
-
-### StrategyMode
-
-```python
-StrategyMode.BACKTEST  # all candles processed, all signals returned
-StrategyMode.LIVE      # all candles processed, only last-candle signals returned
-```
-
-In LIVE mode every candle is still run — stateful strategies (POI lists, breaker blocks,
-trend tracking) build up their internal state correctly by processing the full history.
-Only the output is filtered to the last candle.
-
-### Signal
-
-```python
-Signal(
-    direction    = "long" | "short",
-    entry_price  = float,
-    stop_loss    = float,
-    take_profit  = float | None,    # None = managed by simulate/trade
-    timestamp    = int,             # UTC milliseconds
-    candle_index = int,
-    timeframe    = str,
-    metadata     = dict,            # any extra data
-)
-
-signal.is_long          # bool
-signal.is_short         # bool
-signal.sl_distance      # abs(entry - sl)
-signal.risk_reward      # tp_distance / sl_distance (or None)
-```
-
-### ExitSignal
-
-```python
-ExitSignal(
-    reason      = str,              # "trend_reversal", "force_close", etc.
-    exit_price  = float | None,     # None = exit at market
-    timestamp   = int,
-    candle_index = int,
-    metadata    = dict,
-)
-```
-
-### StrategyResult
-
-```python
-result.signals          # list[Signal]  — all entry signals
-result.exit_signals     # list[ExitSignal]
-result.data             # dict[str, pd.DataFrame] — enriched with indicators
-result.mode             # StrategyMode
-
-result.has_signal       # bool
-result.signal_count     # int
-result.long_signals     # list[Signal]
-result.short_signals    # list[Signal]
-```
-
-### Built-in: MACDCrossoverStrategy
-
-```python
-from AlgoTradeKit.strategy import MACDCrossoverStrategy
-
-strategy = MACDCrossoverStrategy(
-    fast_length   = 12,    # TV default
-    slow_length   = 26,    # TV default
-    signal_length = 9,     # TV default
-    sl_lookback   = 10,    # candles for swing-low/high SL
-    timeframe     = "1h",
-)
-```
-
-Signals: MACD/signal line crossovers.
-SL: swing low (long) or swing high (short) over `sl_lookback` candles.
-Exits: `ExitSignal(reason="macd_reversal")` when histogram changes sign.
-
----
-
-## Data Module
-
-### Collect candle data
-
-```python
-from AlgoTradeKit.data import Collector
-
-collector = Collector(source="binance-spot", symbol="ETHUSDT", timeframe="4h")
-collector.destination = "data/"
-collector.starttime   = "2021/01/01"
-collector.endtime     = "2023/01/01"   # optional — defaults to now
-collector.collect()                     # returns path to saved CSV
-```
-
-### Resample timeframes
-
-```python
-from AlgoTradeKit.data import Converter
-
-conv = Converter(source="data/binance-futures_BTCUSDT_1h.csv", target_timeframe="4h")
-conv.destination = "data/"
-conv.convert()
-```
-
-### Supported sources
-
-| Source key            | Market                |
-| --------------------- | --------------------- |
-| `"binance-spot"`      | Binance Spot          |
-| `"binance-futures"`   | Binance USD-M Futures |
-
-### Supported timeframes
-
-`1m` `3m` `5m` `15m` `30m` `1h` `2h` `4h` `6h` `8h` `12h` `1d` `3d` `1w` `1M`
-
----
-
-## Indicator Reference
-
-### MA Family
-
-All Moving Averages accept `source` (price series) and `length` (period).
-
-| Class    | Formula                              | TV Default | TV Colour  |
-| -------- | ------------------------------------ | ---------- | ---------- |
-| `SMA`    | Rolling mean                         | 9          | `#2962FF`  |
-| `EMA`    | α = 2/(n+1)                          | 9          | `#FF6D00`  |
-| `WMA`    | Linear weights                       | 9          | `#00BCD4`  |
-| `SMMA`   | Wilder RMA, α = 1/n                  | 9          | `#4CAF50`  |
-| `DEMA`   | 2·EMA − EMA(EMA)                     | 9          | `#F44336`  |
-| `TEMA`   | 3·EMA − 3·EMA(EMA) + EMA(EMA(EMA))  | 9          | `#FF9800`  |
-| `HullMA` | WMA(2·WMA(n/2)−WMA(n), √n)          | 9          | `#9C27B0`  |
-| `VWMA`   | Σ(price·vol) / Σ(vol)                | 20         | `#E040FB`  |
-| `VWAP`   | Cumulative PV/V with σ bands         | —          | `#2962FF`  |
-
-```python
-from AlgoTradeKit.indicator import SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, VWAP
-
-sma  = SMA(close, length=20)
-ema  = EMA(close, length=20)
-wma  = WMA(close, length=20)
-vwma = VWMA(close, volume, length=20)
-smma = SMMA(close, length=20)
-dema = DEMA(close, length=20)
-tema = TEMA(close, length=20)
-hma  = HullMA(close, length=20)
-vwap = VWAP(high, low, close, volume, anchor="none", bands=[1, 2])
-```
-
-### RSI
-
-```python
-rsi = RSI(
-    source      = df["close"],
-    length      = 14,          # period (TV default)
-    overbought  = 70,          # upper level (TV default)
-    oversold    = 30,          # lower level (TV default)
-    show_ma     = False,       # add MA on RSI line
-    ma_type     = "EMA",       # EMA | SMA | SMMA | WMA
-    ma_length   = 14,
-)
-
-rsi.rsi                    # RSI series
-rsi.is_overbought()        # bool series
-rsi.is_oversold()          # bool series
-rsi.crossover_ob()         # entered overbought
-rsi.crossunder_os()        # exited oversold (bullish signal)
-```
-
-### MACD
-
-```python
-macd = MACD(
-    source        = df["close"],
-    fast_length   = 12,        # TV default
-    slow_length   = 26,        # TV default
-    signal_length = 9,         # TV default
-    oscillator_ma = "EMA",     # EMA | SMA | SMMA | WMA
-    signal_ma     = "EMA",     # EMA | SMA | SMMA | WMA
-)
-
-macd.macd                  # MACD line
-macd.signal                # Signal line
-macd.histogram             # MACD − Signal
-macd.histogram_colors()    # per-bar TV 4-colour Series
-macd.crossover()           # bullish MACD/signal cross
-macd.zero_crossover()      # MACD crosses above zero
-```
-
-### Ichimoku
-
-```python
-ichi = Ichimoku(
-    high            = df["high"],
-    low             = df["low"],
-    close           = df["close"],
-    tenkan_period   = 9,        # TV default
-    kijun_period    = 26,       # TV default
-    senkou_b_period = 52,       # TV default
-    displacement    = 26,       # TV default
-)
-
-ichi.tenkan                # Conversion Line
-ichi.kijun                 # Base Line
-ichi.senkou_a              # Leading Span A  (26 bars forward)
-ichi.senkou_b              # Leading Span B  (26 bars forward)
-ichi.chikou                # Lagging Span    (26 bars back)
-ichi.cloud_df()            # DataFrame with full cloud + 26 future bars
-ichi.tk_cross_bullish()    # Tenkan crosses above Kijun
-ichi.price_above_cloud()   # Close above both Span A and B
-```
+| Parameter | Default | Description |
+|---|---|---|
+| `initial_balance` | `10_000` | Starting wallet balance |
+| `symbol` | `""` | Instrument (required for MT5 lot sizing) |
+| `exchange_type` | `"exchange"` | `"exchange"` or `"metatrader"` |
+| `leverage` | `1.0` | Leverage multiplier |
+| `spread` | `0.0` | Bid-ask spread in price units |
+| `commission_type` | `"percentage"` | `"percentage"` / `"per_lot"` / `"fixed"` |
+| `commission` | `0.001` | Commission rate or amount |
+| `position_sizing` | `"risk_percent"` | `"risk_percent"` / `"fixed_amount"` / `"fixed_lot"` |
+| `risk_per_trade` | `1.0` | % of balance to risk |
+| `compound` | `False` | Size off current balance (True) or initial (False) |
+| `max_positions` | `1` | Max simultaneous positions |
+| `max_long_positions` | `1` | Max simultaneous longs |
+| `max_short_positions` | `1` | Max simultaneous shorts |
+| `tp_mode` | `"signal"` | `"signal"` / `"fixed_rr"` / `"multi_rr"` / `"none"` |
+| `tp_rr` | `2.0` | Risk-reward ratio for `"fixed_rr"` |
+| `tp_levels` | `[1,2,3]` | R-multiples for `"multi_rr"` |
+| `sl_mode` | `"signal"` | `"signal"` / `"trailing"` |
+| `trailing_sl_percent` | `1.0` | Trailing SL % from peak price |
+| `risk_free_enabled` | `False` | Move SL to entry at N×R profit |
+| `risk_free_at_rr` | `1.0` | R-multiple that activates break-even |
+| `force_close_on_exit_signal` | `False` | Close on strategy ExitSignal |
+| `drawdown_threshold` | `5.0` | Report drawdowns ≥ this % |
+| `primary_timeframe` | `"1h"` | TF key in StrategyResult.data |
 
 ---
 
@@ -408,17 +184,18 @@ ichi.price_above_cloud()   # Close above both Span A and B
 
 Requires Python 3.10+
 
-```
+```bash
 pip install AlgoTradeKit
 ```
 
 For development:
 
-```
+```bash
 git clone https://github.com/AmirMohammadBazdar/AlgoTradeKit.git
 cd AlgoTradeKit
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
+pytest
 ```
 
 ---
@@ -427,23 +204,15 @@ pip install -e ".[dev]"
 
 - `pandas >= 2.0`
 - `requests >= 2.28`
-- `fastapi >= 0.110.0` *(visual module)*
-- `uvicorn >= 0.29.0` *(visual module)*
-- `websockets >= 12.0` *(visual module)*
 
 ---
 
 ## Roadmap
 
-- [x] `data` module — Collector (Binance Spot & Futures)
-- [x] `data` module — Converter (timeframe resampling)
-- [x] `visual` module — interactive candlestick chart
-- [x] `indicator` module — RSI, MACD, MA family, Ichimoku
-- [x] `strategy` module — BaseStrategy framework + MACDCrossoverStrategy
-- [ ] `indicator` — Bollinger Bands, ATR, Stochastic
-- [ ] `simulate` module — backtesting engine with full report
-- [ ] `trade` module — live trading via exchange API / MT5
+- [ ] `trade` module — live trading via Binance API / MT5
+- [ ] `report` module — HTML/PDF report with interactive balance chart, drawdown overlay, session heatmaps
 - [ ] MEXC, Bybit, OKX data sources
+- [ ] WebSocket live data bridge
 
 ---
 
