@@ -54,6 +54,12 @@ TP_MODE_NONE = "none"        # No TP — only SL / force-close
 SL_MODE_SIGNAL = "signal"    # Use stop_loss from Signal as-is
 SL_MODE_TRAILING = "trailing"  # Trail SL behind price as it moves favourably
 
+#: Report rendering mode (v0.7.0).
+REPORT_MODE_NONE    = "none"      # No report generated
+REPORT_MODE_WEBPAGE = "webpage"   # Open interactive report in browser
+REPORT_MODE_SAVE    = "save"      # Save report as standalone HTML file
+REPORT_MODE_BOTH    = "both"      # Open in browser AND save HTML file
+
 
 # ---------------------------------------------------------------------------
 # SimulateConfig
@@ -139,6 +145,21 @@ class SimulateConfig:
     config_id : str
         Human-readable identifier for this config.  Auto-generated from key
         parameters if left empty.
+    show_chart : bool
+        When ``True``, open an interactive candle chart after the simulation
+        completes.  The chart shows the OHLCV data with position boxes for
+        every trade and any strategy drawings (default: ``False``).
+    report_mode : str
+        Controls whether and how the simulation report is rendered after run:
+
+        * ``"none"``    — no report (default).
+        * ``"webpage"`` — open an interactive report in the default browser.
+        * ``"save"``    — save a standalone ``report.html`` file on disk.
+        * ``"both"``    — open in browser **and** save to disk.
+    report_save_path : str
+        File path for the saved HTML report (used when *report_mode* is
+        ``"save"`` or ``"both"``).  Default: ``"report.html"`` in the
+        current working directory.
     """
 
     # ------------------------------------------------------------------
@@ -208,6 +229,18 @@ class SimulateConfig:
     config_id: str = ""
 
     # ------------------------------------------------------------------
+    # Visualisation / reporting (v0.7.0)
+    # ------------------------------------------------------------------
+    show_chart: bool = False
+    """Open an interactive candle chart after the simulation (default: False)."""
+
+    report_mode: str = REPORT_MODE_NONE
+    """Report rendering mode: 'none' | 'webpage' | 'save' | 'both'."""
+
+    report_save_path: str = "report.html"
+    """Destination file path when report_mode is 'save' or 'both'."""
+
+    # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
 
@@ -260,6 +293,13 @@ class SimulateConfig:
             )
         if not self.config_id:
             self.config_id = self._auto_id()
+        if self.report_mode not in (
+            REPORT_MODE_NONE, REPORT_MODE_WEBPAGE, REPORT_MODE_SAVE, REPORT_MODE_BOTH
+        ):
+            raise ValueError(
+                f"SimulateConfig.report_mode must be one of "
+                f"'none', 'webpage', 'save', 'both', got {self.report_mode!r}."
+            )
 
     def _auto_id(self) -> str:
         """Generate a readable identifier from key parameters."""
