@@ -7,6 +7,105 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.7.0] — 2026-06-17
+
+### Added
+
+#### `report` module (new)
+- **`ReportServer`** — FastAPI + WebSocket server that serves the report page
+  in a background daemon thread, identical in architecture to `ChartServer`.
+- **`show_report(report, block, port, title, on_open_chart)`** — open the
+  interactive simulation report in the default browser.
+- **`save_report_html(report, path)`** — save a fully self-contained HTML
+  report file that can be shared and opened without a running server.
+- **`build_report_payload(report)`** — serialise a `SimulateReport` into a
+  JSON-safe dict for custom downstream use.
+- **`report/static/report.html`** — comprehensive single-page report UI:
+  - **Equity curve** (Chart.js 4, `chartjs-plugin-zoom`) — wallet balance and
+    equity over time; scroll-to-zoom, drag-to-pan, double-click-to-reset.
+  - **Max drawdown overlay** — shaded rectangle with percentage label.
+  - **Significant drawdown regions** — all drawdowns above the configured
+    threshold rendered as lighter shading.
+  - **Per-trade dots** — green/red scatter markers for every closed trade on
+    the equity curve; hover shows full trade detail tooltip.
+  - **"Open on Candle Chart" button** in the trade tooltip — sends a
+    WebSocket message to the Python process, which navigates the linked chart
+    to the position entry candle.
+  - **Series visibility toggles** — show/hide Balance, Wallet, Trades,
+    Max DD, Drawdown regions independently.
+  - **Performance KPI grid** — initial/final balance, total PnL, win rate,
+    avg win/loss, largest win/loss, avg R-multiple.
+  - **Risk metrics grid** — profit factor, expectancy, Sharpe, Sortino,
+    Calmar, recovery factor, max consecutive wins/losses, max drawdown.
+  - **Trade statistics grid** — total, long, short, wins, losses, break-even,
+    SL count, TP count, risk-free count, force-close count, end-of-data count.
+  - **Drawdown table** — all significant drawdowns sorted by severity; the
+    deepest is highlighted.
+  - **Weekday analysis table** — trades, win%, total PnL, avg PnL per day.
+  - **Session analysis table** — London, New York, Tokyo, Sydney, Off-Hours.
+  - **Monthly analysis table** — full calendar breakdown (all months present
+    in the simulation data).
+  - **Cost & excursion summary** — total commission, total spread, avg MAE,
+    avg MFE.
+  - **PDF/print export** — browser print dialog triggered by a header button;
+    dedicated `@media print` CSS for clean print layout.
+- **Report mode constants** — `REPORT_MODE_NONE`, `REPORT_MODE_WEBPAGE`,
+  `REPORT_MODE_SAVE`, `REPORT_MODE_BOTH` exported from both
+  `AlgoTradeKit.report` and `AlgoTradeKit.simulate`.
+
+#### `visual` module
+- **`PositionBox`** (`visual.models`) — TradingView-style position box
+  drawing with a loss zone (SL → entry) and profit zone (entry → TP) rendered
+  as two stacked semi-transparent rectangles, a dashed entry line,
+  entry/exit markers, and a centred R:R label.
+  When `take_profit` is `None`, a 2× SL-distance placeholder zone is drawn.
+- **`Chart.add_position_box(...)`** — add a `PositionBox` to the chart,
+  broadcasting it to any open browser tabs.
+- **`Chart.navigate_to_candle(timestamp_ms)`** — scroll and zoom the chart
+  to centre the candle at the given UTC millisecond timestamp.
+- **`add_simulation_positions(chart, report, opacity, max_trades)`**
+  (in `visual.indicator_renderer`) — overlay all trades from a
+  `SimulateReport` as `PositionBox` drawings in one call.
+- **`add_strategy_drawings(chart, strategy_result)`**
+  (in `visual.indicator_renderer`) — apply all drawings from
+  `StrategyResult.drawings` to the chart (support/resistance lines,
+  signal zones, etc.).
+- Both new helpers are exported from `AlgoTradeKit.visual`.
+- `index.html` frontend updated to render `position_box` drawing type and
+  handle the new `navigate_to_candle` WebSocket message.
+
+#### `simulate` module
+- **`SimulateConfig.show_chart`** (`bool`, default `False`) — when `True`,
+  a candle chart is opened after the simulation with position boxes and any
+  strategy drawings automatically applied.
+- **`SimulateConfig.report_mode`** (`str`, default `"none"`) — controls
+  post-simulation reporting:
+  `"none"` | `"webpage"` | `"save"` | `"both"`.
+- **`SimulateConfig.report_save_path`** (`str`, default `"report.html"`) —
+  destination path for the saved HTML file when `report_mode` is `"save"` or
+  `"both"`.
+- `Simulate._render_post_simulation()` — internal method orchestrating
+  chart and report rendering after `run()` completes.
+
+#### `strategy` module
+- **`StrategyResult.drawings`** (`list[dict]`, default `[]`) — list of
+  visual drawing dicts the strategy wants rendered on the candle chart.
+  Each dict follows the same format as the chart module's drawing objects
+  (type, coordinates, color); times in **Unix seconds**.  Strategies
+  populate this in `prepare_indicators()` or `generate_signals()`.
+
+### Changed
+- `visual.__init__` — exports `PositionBox`, `add_simulation_positions`,
+  `add_strategy_drawings`.
+- `simulate.__init__` — exports `REPORT_MODE_*` constants.
+- `strategy._types.StrategyResult.__repr__` — now includes `drawings=N`.
+
+### Fixed
+- `test_report.py` — `test_run_no_server_started` patched at the correct
+  (local-import) call site.
+
+---
+
 ## [0.6.0] — 2026-06-15
 
 ### Added
