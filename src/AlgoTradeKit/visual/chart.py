@@ -43,7 +43,7 @@ import pandas as pd
 
 from .models import (
     Bar, Box, FibRetracement, HorizontalLine,
-    IndicatorSeries, Signal, TextLabel, TrendLine,
+    IndicatorSeries, PositionBox, Signal, TextLabel, TrendLine,
 )
 from .server import ChartServer
 
@@ -477,6 +477,79 @@ class Chart:
         self._drawings.append(d)
         if self._shown:
             self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        return self
+
+    def add_position_box(
+        self,
+        open_time:    int,
+        close_time:   int,
+        entry_price:  float,
+        stop_loss:    float,
+        take_profit:  Optional[float],
+        direction:    str,
+        net_pnl:      float,
+        close_reason: str = "",
+        trade_id:     int  = -1,
+        rr_ratio:     float = 0.0,
+        opacity:      float = 0.15,
+    ) -> "Chart":
+        """
+        Add a TradingView-style position box for one simulated trade.
+
+        Times must be in **Unix seconds** (divide AlgoTradeKit ms by 1000).
+        Use ``add_simulation_positions(chart, report)`` from the
+        ``visual.indicator_renderer`` module to add all trades at once.
+
+        Parameters
+        ----------
+        open_time  : Entry candle time in Unix seconds.
+        close_time : Exit candle time in Unix seconds.
+        entry_price: Actual fill price.
+        stop_loss  : Initial stop-loss price.
+        take_profit: Take-profit price or ``None`` (draws 2R placeholder).
+        direction  : ``"long"`` or ``"short"``.
+        net_pnl    : Net P&L of the trade.
+        close_reason: ``"sl"`` / ``"tp"`` / ``"rf"`` / ``"force_close"``.
+        trade_id   : Sequential trade ID from the simulation.
+        rr_ratio   : Actual R multiple of the trade.
+        opacity    : Box fill opacity (default 0.15).
+        """
+        d = PositionBox(
+            open_time=open_time,
+            close_time=close_time,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            direction=direction,
+            net_pnl=net_pnl,
+            close_reason=close_reason,
+            trade_id=trade_id,
+            rr_ratio=rr_ratio,
+            opacity=opacity,
+        )
+        self._drawings.append(d)
+        if self._shown:
+            self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        return self
+
+    def navigate_to_candle(self, timestamp_ms: int) -> "Chart":
+        """
+        Scroll and zoom the chart to show the candle at *timestamp_ms*.
+
+        Called by the report module when the user clicks a trade marker
+        in the report page.  The browser smoothly scrolls to centre the
+        requested candle.
+
+        Parameters
+        ----------
+        timestamp_ms : int
+            UTC millisecond timestamp of the target candle.
+        """
+        if self._shown:
+            self._server.send({
+                "type":      "navigate_to_candle",
+                "timestamp": timestamp_ms // 1000,  # frontend uses seconds
+            })
         return self
 
     def remove_drawing(self, drawing_id: str) -> "Chart":
