@@ -7,6 +7,9 @@ Signal        — entry signal emitted by a strategy (direction, price, SL, TP)
 ExitSignal    — exit condition detected by a strategy (reason + target price)
 StrategyResult— full output of BaseStrategy.run()
 StrategyMode  — BACKTEST (all candles) or LIVE (last candle only)
+
+v0.7.0: StrategyResult.drawings — list of visual drawing dicts the strategy
+        wants rendered on the candle chart (passed to the visual module).
 """
 
 from __future__ import annotations
@@ -189,12 +192,38 @@ class StrategyResult:
         Useful for the visual module or post-analysis.
     mode : StrategyMode
         The mode that was used when ``run()`` was called.
+    drawings : list[dict]
+        Visual drawing objects the strategy wants rendered on the candle chart.
+        Each dict follows the same format as the visual module's drawing dicts
+        (type, coordinates, color, etc.).  Strategies populate this list in
+        ``prepare_indicators()`` or ``generate_signals()`` to show support/
+        resistance lines, signal zones, indicator levels, etc.
+
+        Drawing dict format examples::
+
+            # Horizontal line at a detected support level
+            {"type": "hline", "price": 42000.0, "color": "#58a6ff",
+             "lineWidth": 1, "lineStyle": 2, "label": "Support", "source": "server"}
+
+            # Trend line
+            {"type": "trendline", "time1": 1700000000, "price1": 40000.0,
+             "time2": 1700003600, "price2": 41000.0, "color": "#e3b341",
+             "lineWidth": 1, "source": "server"}
+
+            # Signal zone box
+            {"type": "box", "time1": 1700000000, "price1": 41000.0,
+             "time2": 1700007200, "price2": 42000.0, "color": "#3fb950",
+             "opacity": 0.1, "borderColor": "#3fb950", "source": "server"}
+        
+        All times must be in **Unix seconds** (not milliseconds) to match
+        the chart frontend's coordinate system.
     """
 
     signals: list[Signal]
     exit_signals: list[ExitSignal]
     data: "dict[str, pd.DataFrame]"
     mode: StrategyMode
+    drawings: list[dict] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Convenience helpers
@@ -223,5 +252,6 @@ class StrategyResult:
     def __repr__(self) -> str:
         return (
             f"<StrategyResult mode={self.mode.value} "
-            f"signals={self.signal_count} exits={len(self.exit_signals)}>"
+            f"signals={self.signal_count} exits={len(self.exit_signals)} "
+            f"drawings={len(self.drawings)}>"
         )
