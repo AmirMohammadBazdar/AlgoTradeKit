@@ -46,6 +46,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from AlgoTradeKit.indicator.macd import MACD
     from AlgoTradeKit.indicator.ichimoku import Ichimoku
     from AlgoTradeKit.indicator._base import _BaseIndicator
+    from AlgoTradeKit.simulate._report import SimulateReport
+    from AlgoTradeKit.strategy._types import StrategyResult
 
 
 # ---------------------------------------------------------------------------
@@ -428,3 +430,135 @@ def add_ichimoku(
         "seriesType": "area",
         "group":      ichi_group,
     })
+
+
+# ---------------------------------------------------------------------------
+# Simulation positions (v0.7.0)
+# ---------------------------------------------------------------------------
+
+def add_simulation_positions(
+    chart: "Chart",
+    report: "SimulateReport",
+    opacity: float = 0.15,
+    max_trades: int | None = None,
+) -> "Chart":
+    """
+    Overlay all simulated trades on a candle chart as position boxes.
+
+    For each completed trade in *report* a :class:`PositionBox` is added
+    showing the loss zone (SL→entry) and profit zone (entry→TP), plus
+    entry and exit signal markers.
+
+    Parameters
+    ----------
+    chart : Chart
+        The candle chart to draw on.  Must already have OHLCV data loaded.
+    report : SimulateReport
+        The completed simulation report (from ``Simulate(config).run()``).
+    opacity : float
+        Fill opacity for position boxes (default 0.15).
+    max_trades : int | None
+        Limit the number of trades drawn.  ``None`` draws all.
+
+    Returns
+    -------
+    Chart
+        The same *chart* instance (for chaining).
+
+    Example
+    -------
+    ::
+
+        from AlgoTradeKit.visual import Chart
+        from AlgoTradeKit.visual.indicator_renderer import add_simulation_positions
+
+        chart = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv")
+        add_simulation_positions(chart, report)
+        chart.show(block=True)
+    """
+    # Lazy import to avoid circular dependency at module level
+    from AlgoTradeKit.simulate._report import SimulateReport  # noqa: F401 (type hint only)
+
+    markers = report.trade_markers
+    if max_trades is not None:
+        markers = markers[:max_trades]
+
+    for m in markers:
+        open_sec  = m["open_time"]  // 1000
+        close_sec = m["close_time"] // 1000
+        rr = m.get("pnl_r", 0.0)
+
+        chart.add_position_box(
+            open_time    = open_sec,
+            close_time   = close_sec,
+            entry_price  = m["entry_price"],
+            stop_loss    = m["initial_stop_loss"],
+            take_profit  = m.get("take_profit"),
+            direction    = m["direction"],
+            net_pnl      = m["net_pnl"],
+            close_reason = m["close_reason"],
+            trade_id     = m["trade_id"],
+            rr_ratio     = rr,
+            opacity      = opacity,
+        )
+
+    return chart
+
+
+def add_strategy_drawings(
+    chart: "Chart",
+    strategy_result: "StrategyResult",
+) -> "Chart":
+    """
+    Add all strategy-generated drawings (signal zones, support/resistance
+    lines, indicator levels, etc.) from *strategy_result* to *chart*.
+
+    Strategies populate ``StrategyResult.drawings`` in their
+    ``prepare_indicators()`` or ``generate_signals()`` methods.  Each
+    drawing must be a dict with at minimum ``{"type": ..., ...}`` in the
+    same format as the chart module's drawing objects.  Times must be in
+    **Unix seconds**.
+
+    Parameters
+    ----------
+    chart : Chart
+        Target candle chart.
+    strategy_result : StrategyResult
+        The result of ``strategy.run(data)``.
+
+    Returns
+    -------
+    Chart
+        The same *chart* instance (for chaining).
+    """
+    import itertools as _itertools
+
+    _id_ctr = _itertools.count(1)
+
+    for raw in strategy_result.drawings:
+        d = dict(raw)  # defensive copy
+        if "id" not in d:
+            d["id"] = f"strat_{next(_id_ctr)}"
+        if "locked" not in d:
+            d["locked"] = True
+        if "source" not in d:
+            d["source"] = "server"
+
+        # Store as a raw dict wrapper so chart._drawings can serialise it
+        from .models import RawIndicator
+
+        class _RawDrawing:
+            """Thin wrapper that gives a dict the .id and .to_dict() interface."""
+            def __init__(self, payload: dict) -> None:
+                self.id = payload["id"]
+                self._payload = payload
+
+            def to_dict(self) -> dict:
+                return self._payload
+
+        wrapped = _RawDrawing(d)
+        chart._drawings.append(wrapped)  # type: ignore[arg-type]
+        if chart._shown:
+            chart._server.send({"type": "add_drawing", "drawing": d})
+
+    return chart

@@ -18,6 +18,7 @@ Quick start
 Supported drawing types
 -----------------------
     HorizontalLine, TrendLine, Box, Signal, TextLabel, FibRetracement
+    PositionBox  (v0.7.0) — TradingView-style simulation position box
 
 Streaming (live data)
 ---------------------
@@ -46,11 +47,25 @@ Indicators (v0.4.0)
 
     chart.show()
 
-Future integration
-------------------
-    # strategy module (v0.5.0):
-    for signal in strategy.signals:
-        c.add_signal(signal.time, signal.side, price=signal.price)
+Simulation positions (v0.7.0)
+------------------------------
+    from AlgoTradeKit.visual.indicator_renderer import add_simulation_positions
+
+    # After running a simulation:
+    chart = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv")
+    add_simulation_positions(chart, report)
+    chart.show(block=True)
+
+    # Or let SimulateConfig.show_chart do it automatically.
+
+Strategy drawings (v0.7.0)
+---------------------------
+    from AlgoTradeKit.visual.indicator_renderer import add_strategy_drawings
+
+    result = strategy.run(data)
+    chart = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv")
+    add_strategy_drawings(chart, result)
+    chart.show()
 """
 
 from .chart import Chart
@@ -60,11 +75,19 @@ from .models import (
     FibRetracement,
     HorizontalLine,
     IndicatorSeries,
+    PositionBox,
     Signal,
     TextLabel,
     TrendLine,
 )
-from .indicator_renderer import add_ichimoku, add_ma, add_macd, add_rsi
+from .indicator_renderer import (
+    add_ichimoku,
+    add_ma,
+    add_macd,
+    add_rsi,
+    add_simulation_positions,
+    add_strategy_drawings,
+)
 
 __all__ = [
     # Chart
@@ -75,6 +98,7 @@ __all__ = [
     "FibRetracement",
     "HorizontalLine",
     "IndicatorSeries",
+    "PositionBox",
     "Signal",
     "TextLabel",
     "TrendLine",
@@ -83,4 +107,7 @@ __all__ = [
     "add_macd",
     "add_ma",
     "add_ichimoku",
+    # Simulation helpers (v0.7.0)
+    "add_simulation_positions",
+    "add_strategy_drawings",
 ]
