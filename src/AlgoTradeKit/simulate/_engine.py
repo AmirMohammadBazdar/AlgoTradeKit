@@ -32,6 +32,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..strategy._types import StrategyResult
+
+if TYPE_CHECKING:  # pragma: no cover
+    from ..simulate._report import SimulateReport
 from ._config import (
     SimulateConfig,
     SL_MODE_TRAILING,
@@ -45,6 +48,10 @@ from ._config import (
     TP_MODE_FIXED_RR,
     TP_MODE_MULTI_RR,
     TP_MODE_NONE,
+    REPORT_MODE_NONE,
+    REPORT_MODE_WEBPAGE,
+    REPORT_MODE_SAVE,
+    REPORT_MODE_BOTH,
 )
 from ._lot import calculate_mt5_lot, get_mt5_pip_info, round_lot
 from ._position import (
@@ -587,9 +594,140 @@ class Simulate:
         for ex in strategy_result.exit_signals:
             exits_by_idx.setdefault(ex.candle_index, []).append(ex)
 
-        return self._simulate_loop(
+        report = self._simulate_loop(
             primary_df, signals_by_idx, exits_by_idx, config
         )
+
+        # ------------------------------------------------------------------
+        # Post-simulation rendering (v0.7.0)
+        # Runs only when the caller has enabled show_chart / report_mode.
+        # ------------------------------------------------------------------
+        self._render_post_simulation(report, strategy_result)
+
+        return report
+
+    # ------------------------------------------------------------------
+    # Post-simulation visualisation
+    # ------------------------------------------------------------------
+
+    def _render_post_simulation(
+        self,
+        report: "SimulateReport",
+        strategy_result: "StrategyResult",
+    ) -> None:
+        """
+        Open the candle chart and/or the report page after a simulation run.
+
+        Called automatically by ``run()`` when the config has
+        ``show_chart=True`` or ``report_mode != "none"``.
+        """
+        config = self.config
+        tf = config.primary_timeframe
+
+        chart = None
+        chart_server = None
+
+        # ---- 1. Build candle chart with positions ----
+        if config.show_chart:
+            chart, chart_server = self._build_simulation_chart(
+                strategy_result, report, tf
+            )
+
+        # ---- 2. Report page ----
+        if config.report_mode != REPORT_MODE_NONE:
+            self._render_report(report, strategy_result, chart, chart_server)
+
+    def _build_simulation_chart(
+        self,
+        strategy_result: "StrategyResult",
+        report: "SimulateReport",
+        tf: str,
+    ):
+        """
+        Build and show an interactive candle chart with position boxes and
+        strategy drawings.  Returns (Chart, ChartServer) tuple.
+        """
+        import time as _time
+        from ..visual import Chart
+        from ..visual.indicator_renderer import (
+            add_simulation_positions,
+            add_strategy_drawings,
+        )
+
+        primary_df = strategy_result.data[tf]
+
+        chart = Chart(
+            title=f"{self.config.symbol or ''} — Simulation Chart ({tf})",
+        )
+        chart.set_data(primary_df)
+
+        # Add MACD / MA / RSI if the strategy put them in the data
+        # (strategy_result.data columns beyond OHLCV are available for
+        #  reference but we don't auto-add them — strategies should
+        #  add their own drawings or call add_macd/add_rsi explicitly)
+
+        # Add strategy-defined drawings (support/resistance, signal zones, etc.)
+        if strategy_result.drawings:
+            add_strategy_drawings(chart, strategy_result)
+
+        # Add position boxes
+        add_simulation_positions(chart, report, opacity=0.15)
+
+        # Show chart (non-blocking so report can open simultaneously)
+        server = chart.show(block=False)
+
+        # Give server a moment to start
+        _time.sleep(0.4)
+
+        return chart, server
+
+    def _render_report(
+        self,
+        report: "SimulateReport",
+        strategy_result: "StrategyResult",
+        chart,
+        chart_server,
+    ) -> None:
+        """Build and display/save the report page."""
+        import time as _time
+        from ..report._builder import build_report_payload
+        from ..report._server import ReportServer
+        from ..report._display import save_report_html
+
+        config = self.config
+
+        payload = build_report_payload(report)
+
+        # Patch payload with chart connection info
+        if chart is not None and chart_server is not None:
+            payload["has_chart"] = True
+            payload["chart_port"] = getattr(chart_server, "port", None)
+
+        open_browser = config.report_mode in (REPORT_MODE_WEBPAGE, REPORT_MODE_BOTH)
+        save_file    = config.report_mode in (REPORT_MODE_SAVE, REPORT_MODE_BOTH)
+
+        # Callback: when user clicks a trade in the report, navigate the chart
+        def _on_open_chart(trade_id: int) -> None:
+            if chart is None:
+                return
+            marker = next(
+                (m for m in report.trade_markers if m["trade_id"] == trade_id), None
+            )
+            if marker:
+                chart.navigate_to_candle(marker["open_time"])
+
+        if open_browser:
+            report_server = ReportServer(
+                title=f"AlgoTradeKit Report — {config.config_id}",
+                on_open_chart=_on_open_chart if chart else None,
+            )
+            report_server.start(open_browser=True)
+            _time.sleep(0.3)
+            report_server.set_report_data(payload)
+
+        if save_file:
+            out_path = save_report_html(report, path=config.report_save_path)
+            print(f"[AlgoTradeKit] Report saved → {out_path}")
 
     # ------------------------------------------------------------------
     # Core loop (extracted for reuse in _runner.py multi-pair engine)

@@ -5,6 +5,13 @@ Data-classes for all chart objects: candles, indicators, and drawings.
 
 Every class has a ``to_dict()`` method that serialises it into the JSON
 format the frontend (lightweight-charts) understands.
+
+v0.7.0 additions
+-----------------
+PositionBox — TradingView-style position box rendered on a candle chart.
+              Shows loss zone (SL→entry) and profit zone (entry→TP) as two
+              stacked coloured rectangles, with entry/exit markers and an
+              R:R ratio label.
 """
 
 from dataclasses import dataclass, field, asdict
@@ -256,4 +263,137 @@ class FibRetracement:
             "id":     self.id,
             "locked": self.locked,
             "source": "server",
+        }
+
+
+@dataclass
+class PositionBox:
+    """
+    TradingView-style position box rendered on a candle chart.
+
+    Renders two stacked coloured rectangles spanning the trade's time
+    range:
+
+    * **Loss zone** — from ``stop_loss`` to ``entry_price``:
+      red for long, green for short (the zone where a loss occurs).
+    * **Profit zone** — from ``entry_price`` to ``take_profit``:
+      green for long, red for short (the zone where profit is made).
+
+    Additionally draws:
+    * A dashed horizontal entry line across the full time span.
+    * Entry/exit markers (triangles) at the open/close timestamps.
+    * A centred risk/reward label in the profit zone.
+
+    Parameters
+    ----------
+    open_time : int
+        Entry candle timestamp in **Unix seconds** (not milliseconds).
+    close_time : int
+        Exit candle timestamp in **Unix seconds**.
+    entry_price : float
+        Actual fill price.
+    stop_loss : float
+        Initial stop-loss price.
+    take_profit : float | None
+        Take-profit price.  When ``None``, the profit zone is drawn at
+        2× the SL distance as a visual placeholder.
+    direction : str
+        ``"long"`` or ``"short"``.
+    net_pnl : float
+        Net profit/loss of the trade (used to colour the exit marker).
+    close_reason : str
+        Reason the trade was closed (``"sl"``, ``"tp"``, ``"rf"``, …).
+    trade_id : int
+        Sequential trade ID from the simulation.
+    rr_ratio : float
+        Actual R:R of the trade (net_pnl / risk_amount).
+    win_color : str
+        Colour for the profit zone and winning markers (default green).
+    loss_color : str
+        Colour for the loss zone and losing markers (default red).
+    opacity : float
+        Fill opacity for both zones (default 0.15).
+    locked : bool
+        When ``True`` the drawing cannot be moved in the browser.
+    """
+
+    open_time:    int           # Unix seconds
+    close_time:   int           # Unix seconds
+    entry_price:  float
+    stop_loss:    float
+    take_profit:  Optional[float]
+    direction:    str           # "long" | "short"
+    net_pnl:      float
+    close_reason: str
+    trade_id:     int  = -1
+    rr_ratio:     float = 0.0
+    win_color:    str  = "#3fb950"
+    loss_color:   str  = "#f85149"
+    opacity:      float = 0.15
+    locked:       bool  = True
+    id:           str   = field(default_factory=lambda: _new_id("posbox"))
+
+    def to_dict(self) -> dict:
+        sl_dist = abs(self.entry_price - self.stop_loss)
+
+        # Compute a visual TP if none provided (2R placeholder)
+        if self.take_profit is not None:
+            visual_tp = self.take_profit
+        else:
+            if self.direction == "long":
+                visual_tp = self.entry_price + sl_dist * 2.0
+            else:
+                visual_tp = self.entry_price - sl_dist * 2.0
+
+        # Profit zone: entry → TP direction
+        # Loss zone:   entry → SL direction
+        if self.direction == "long":
+            profit_top    = visual_tp
+            profit_bottom = self.entry_price
+            loss_top      = self.entry_price
+            loss_bottom   = self.stop_loss
+            profit_color  = self.win_color
+            loss_color    = self.loss_color
+        else:  # short
+            profit_top    = self.entry_price
+            profit_bottom = visual_tp
+            loss_top      = self.stop_loss
+            loss_bottom   = self.entry_price
+            profit_color  = self.win_color
+            loss_color    = self.loss_color
+
+        # R:R label
+        tp_dist = abs(visual_tp - self.entry_price)
+        rr = (tp_dist / sl_dist) if sl_dist > 0 else 0.0
+        label = f"{self.direction[0].upper()}  1:{rr:.1f}R"
+        if self.close_reason in ("sl", "rf"):
+            label = f"✕ SL  {self.rr_ratio:+.2f}R"
+        elif self.close_reason == "tp":
+            label = f"✓ TP  {self.rr_ratio:+.2f}R"
+        elif self.close_reason == "force_close":
+            label = f"↯ FC  {self.rr_ratio:+.2f}R"
+
+        return {
+            "type":          "position_box",
+            "open_time":     self.open_time,
+            "close_time":    self.close_time,
+            "entry_price":   self.entry_price,
+            "stop_loss":     self.stop_loss,
+            "visual_tp":     visual_tp,
+            "profit_top":    profit_top,
+            "profit_bottom": profit_bottom,
+            "loss_top":      loss_top,
+            "loss_bottom":   loss_bottom,
+            "profit_color":  profit_color,
+            "loss_color":    loss_color,
+            "direction":     self.direction,
+            "net_pnl":       self.net_pnl,
+            "close_reason":  self.close_reason,
+            "trade_id":      self.trade_id,
+            "rr_ratio":      self.rr_ratio,
+            "label":         label,
+            "opacity":       self.opacity,
+            "id":            self.id,
+            "locked":        self.locked,
+            "source":        "server",
         }

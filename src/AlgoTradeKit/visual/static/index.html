@@ -1484,6 +1484,84 @@ function renderOne(d,ctx,W,H){
     if(hl) drawHandle(ctx,pt.x+tw/2+2,pt.y-fs/2,d.color||'#58a6ff',true);
   }
 
+  else if(d.type==='position_box'){
+    // Resolve timestamps: position_box times are Unix seconds (same as allBars)
+    const openPt  = toXY(d.open_time,  d.entry_price);
+    const closePt = toXY(d.close_time, d.entry_price);
+    if(!openPt){ctx.restore();return;}
+    const x1 = openPt.x;
+    const x2 = closePt ? closePt.x : Math.min(x1 + 60, W);  // fallback to screen edge
+    const w  = Math.max(x2 - x1, 2);
+
+    // Loss zone: SL to entry
+    const lossTopPt = toXY(d.open_time, d.loss_top);
+    const lossBotPt = toXY(d.open_time, d.loss_bottom);
+    if(lossTopPt && lossBotPt){
+      const ly = Math.min(lossTopPt.y, lossBotPt.y);
+      const lh = Math.abs(lossTopPt.y - lossBotPt.y);
+      ctx.globalAlpha = d.opacity || 0.15;
+      ctx.fillStyle = d.loss_color || '#f85149';
+      ctx.fillRect(x1, ly, w, lh);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = d.loss_color || '#f85149';
+      ctx.lineWidth = 0.5; ctx.setLineDash([]);
+      ctx.strokeRect(x1, ly, w, lh);
+    }
+
+    // Profit zone: entry to TP
+    const profTopPt = toXY(d.open_time, d.profit_top);
+    const profBotPt = toXY(d.open_time, d.profit_bottom);
+    if(profTopPt && profBotPt){
+      const py = Math.min(profTopPt.y, profBotPt.y);
+      const ph = Math.abs(profTopPt.y - profBotPt.y);
+      ctx.globalAlpha = d.opacity || 0.15;
+      ctx.fillStyle = d.profit_color || '#3fb950';
+      ctx.fillRect(x1, py, w, ph);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = d.profit_color || '#3fb950';
+      ctx.lineWidth = 0.5; ctx.setLineDash([]);
+      ctx.strokeRect(x1, py, w, ph);
+
+      // R:R label in profit zone
+      if(ph > 12 && w > 30 && d.label){
+        const midX = x1 + w/2;
+        const midY = py + ph/2 + 4;
+        ctx.font = `9px ${drawingFont}`;
+        ctx.fillStyle = d.net_pnl >= 0 ? (d.profit_color||'#3fb950') : (d.loss_color||'#f85149');
+        ctx.textAlign = 'center'; ctx.globalAlpha = 0.9;
+        ctx.fillText(d.label, midX, midY);
+        ctx.textAlign = 'left'; ctx.globalAlpha = 1;
+      }
+    }
+
+    // Dashed entry line across full width
+    const entryPt = toXY(d.open_time, d.entry_price);
+    if(entryPt){
+      ctx.beginPath(); ctx.strokeStyle = '#ffffff66';
+      ctx.lineWidth = 0.8; ctx.setLineDash([4,3]);
+      ctx.moveTo(x1, entryPt.y); ctx.lineTo(x2, entryPt.y);
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+
+    // Entry marker (triangle pointing right)
+    if(openPt){
+      const col = d.direction==='long' ? '#3fb950' : '#f85149';
+      const sz = 5;
+      ctx.beginPath();
+      ctx.moveTo(x1 - sz*1.5, openPt.y - sz);
+      ctx.lineTo(x1,          openPt.y);
+      ctx.lineTo(x1 - sz*1.5, openPt.y + sz);
+      ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+    }
+
+    // Exit marker (small circle at close)
+    if(closePt){
+      const col = d.net_pnl >= 0 ? '#3fb950' : '#f85149';
+      ctx.beginPath(); ctx.arc(x2, closePt.y, 3, 0, Math.PI*2);
+      ctx.fillStyle = col; ctx.fill();
+    }
+  }
+
   ctx.restore();
 }
 
@@ -1925,6 +2003,22 @@ function handleMsg(msg){
     case 'update_drawing':
       if(drawings[msg.drawing.id]) Object.assign(drawings[msg.drawing.id],msg.drawing);
       redrawAll(); break;
+    case 'navigate_to_candle':{
+      // Smoothly scroll+zoom to show the target candle
+      if(!mainChart || !allBars.length) break;
+      const ts = msg.timestamp;
+      // Find the bar index closest to ts
+      let bestIdx=0, bestDiff=Infinity;
+      for(let i=0;i<allBars.length;i++){
+        const diff=Math.abs(allBars[i].time - ts);
+        if(diff < bestDiff){ bestDiff=diff; bestIdx=i; }
+      }
+      // Set visible range: 50 candles either side
+      const half=50, from=Math.max(0,bestIdx-half), to=Math.min(allBars.length-1,bestIdx+half);
+      mainChart.timeScale().setVisibleLogicalRange({from,to});
+      redrawAll();
+      break;
+    }
   }
 }
 

@@ -12,29 +12,20 @@ Single strategy, single config::
     config = SimulateConfig(
         initial_balance=10_000,
         symbol="btcusdt",
-        exchange_type="exchange",
         leverage=10,
-        spread=0.5,
-        commission_type="percentage",
-        commission=0.001,           # 0.1 % per side
-        risk_per_trade=1.0,         # 1 % of balance per trade
+        risk_per_trade=1.0,
         tp_mode="multi_rr",
         tp_levels=[1.0, 2.0, 3.0],
-        sl_mode="signal",
-        risk_free_enabled=True,
-        risk_free_at_rr=1.0,
-        max_positions=3,
-        max_long_positions=2,
-        max_short_positions=2,
         primary_timeframe="1h",
+        # v0.7.0 visualisation options
+        show_chart=True,         # open candle chart with position boxes
+        report_mode="webpage",   # open interactive report in browser
     )
 
     strategy_result = my_strategy.run(data)
     report = Simulate(config).run(strategy_result)
 
     print(report)
-    # → <SimulateReport 'BTCUSDT_risk1.0pct_lev10x_tp_multi_rr_[1.0_2.0_3.0]'
-    #       trades=47 pnl=+1243.80 (+12.4%) wr=61.7%>
 
 Batch config sweep::
 
@@ -53,16 +44,16 @@ Multi-pair portfolio (shared wallet)::
     from AlgoTradeKit.simulate import run_multi
 
     report = run_multi([
-        (btc_strategy, btc_data, SimulateConfig(symbol="btcusdt", risk_per_trade=1.0)),
-        (eth_strategy, eth_data, SimulateConfig(symbol="ethusdt", risk_per_trade=0.5)),
+        (btc_strategy, btc_data, SimulateConfig(symbol="btcusdt")),
+        (eth_strategy, eth_data, SimulateConfig(symbol="ethusdt")),
     ])
 
 Public API
 ----------
 Classes
-    SimulateConfig       — full simulation configuration
+    SimulateConfig       — full simulation configuration (v0.7.0: show_chart, report_mode)
     Simulate             — single-pair backtesting engine
-    SimulateReport       — complete statistical report (input to ``report`` module)
+    SimulateReport       — complete statistical report
     ClosedTrade          — immutable record of one completed trade
     DrawdownPeriod       — one peak-to-trough drawdown event
     SessionStats         — per-Forex-session trade statistics
@@ -76,6 +67,7 @@ Functions
 String constants (for SimulateConfig fields)
     EXCHANGE_TYPE_*      COMMISSION_TYPE_*      SIZING_*
     TP_MODE_*            SL_MODE_*
+    REPORT_MODE_*        (v0.7.0)
 """
 
 from ._config import (
@@ -93,6 +85,11 @@ from ._config import (
     TP_MODE_MULTI_RR,
     TP_MODE_NONE,
     TP_MODE_SIGNAL,
+    # v0.7.0 report mode constants
+    REPORT_MODE_NONE,
+    REPORT_MODE_WEBPAGE,
+    REPORT_MODE_SAVE,
+    REPORT_MODE_BOTH,
     SimulateConfig,
 )
 from ._engine import Simulate
@@ -131,6 +128,11 @@ __all__ = [
     "TP_MODE_NONE",
     "SL_MODE_SIGNAL",
     "SL_MODE_TRAILING",
+    # v0.7.0 report mode constants
+    "REPORT_MODE_NONE",
+    "REPORT_MODE_WEBPAGE",
+    "REPORT_MODE_SAVE",
+    "REPORT_MODE_BOTH",
     # Engine
     "Simulate",
     # Position records

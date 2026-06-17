@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>AlgoTradeKit — Simulation Report</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--bg4:#2d333b;
+  --border:#30363d;--text:#e6edf3;--text2:#8b949e;--text3:#656d76;
+  --accent:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#e3b341;
+  --purple:#bc8cff;--orange:#d29922;
+}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);
+     min-height:100vh;padding:0}
+a{color:var(--accent);text-decoration:none}
+
+/* ── Header ─────────────────────────────────────────────────── */
+#header{background:var(--bg2);border-bottom:1px solid var(--border);padding:14px 24px;
+        display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:100}
+#logo{font-family:'Courier New',monospace;font-weight:900;font-size:13px;color:var(--accent);
+      letter-spacing:.1em;border:1px solid var(--accent)55;padding:3px 9px;border-radius:4px;white-space:nowrap}
+#report-title{font-size:15px;font-weight:600;flex:1}
+#pnl-badge{font-size:13px;font-weight:700;padding:3px 10px;border-radius:5px;font-family:'Courier New',monospace}
+#pnl-badge.pos{background:#3fb95022;color:var(--green);border:1px solid #3fb95055}
+#pnl-badge.neg{background:#f8514922;color:var(--red);border:1px solid #f8514955}
+#print-btn{padding:6px 14px;border-radius:6px;border:1px solid var(--border);background:var(--bg3);
+           color:var(--text);font-size:12px;cursor:pointer;display:flex;align-items:center;gap:6px;white-space:nowrap}
+#print-btn:hover{background:var(--bg4);border-color:var(--accent)}
+#wsdot{width:8px;height:8px;border-radius:50%;background:#444;flex-shrink:0;transition:background .3s}
+#wsdot.live{background:var(--green)} #wsdot.conn{background:var(--yellow)}
+
+/* ── Layout ──────────────────────────────────────────────────── */
+#main{max-width:1400px;margin:0 auto;padding:20px 24px 40px}
+
+/* ── Sections ────────────────────────────────────────────────── */
+.section{background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+         margin-bottom:20px;overflow:hidden}
+.section-hdr{padding:12px 18px;border-bottom:1px solid var(--border);display:flex;
+             align-items:center;justify-content:space-between;gap:10px}
+.section-hdr h2{font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;
+                letter-spacing:.06em}
+.section-body{padding:18px}
+
+/* ── KPI Grid ────────────────────────────────────────────────── */
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}
+.kpi{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
+.kpi-label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:5px}
+.kpi-value{font-size:18px;font-weight:700;font-family:'Courier New',monospace}
+.kpi-sub{font-size:10px;color:var(--text3);margin-top:3px}
+.pos{color:var(--green)} .neg{color:var(--red)} .neu{color:var(--accent)}
+.warn{color:var(--yellow)}
+
+/* ── Chart container ─────────────────────────────────────────── */
+#equity-chart-wrap{position:relative;width:100%;height:360px;padding:4px 0}
+#equity-chart-wrap canvas{cursor:crosshair}
+.chart-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.toggle-btn{font-size:11px;padding:3px 10px;border-radius:4px;border:1px solid var(--border);
+            background:transparent;color:var(--text2);cursor:pointer;transition:all .15s}
+.toggle-btn.on{background:var(--accent)22;color:var(--accent);border-color:var(--accent)55}
+.toggle-btn:hover:not(.on){background:var(--bg3)}
+.chart-hint{font-size:10px;color:var(--text3);margin-left:auto}
+
+/* ── Tooltip ─────────────────────────────────────────────────── */
+#trade-tooltip{position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;
+               padding:10px 14px;pointer-events:none;z-index:200;display:none;
+               font-size:11px;min-width:200px;box-shadow:0 8px 24px #000a}
+#trade-tooltip h4{font-size:12px;margin-bottom:6px;color:var(--text)}
+#trade-tooltip table{border-collapse:collapse;width:100%}
+#trade-tooltip td{padding:2px 4px;color:var(--text2)}
+#trade-tooltip td:last-child{text-align:right;color:var(--text);font-family:'Courier New',monospace}
+#open-chart-btn{margin-top:8px;width:100%;padding:4px 0;border-radius:4px;border:1px solid var(--accent);
+                background:var(--accent)11;color:var(--accent);cursor:pointer;font-size:11px;display:none}
+#open-chart-btn:hover{background:var(--accent)22}
+
+/* ── Tables ──────────────────────────────────────────────────── */
+.tbl-wrap{overflow-x:auto}
+table.data-tbl{width:100%;border-collapse:collapse;font-size:12px}
+table.data-tbl th{padding:8px 12px;text-align:left;color:var(--text3);font-weight:500;
+                  font-size:10px;text-transform:uppercase;letter-spacing:.05em;
+                  border-bottom:1px solid var(--border);white-space:nowrap}
+table.data-tbl td{padding:8px 12px;border-bottom:1px solid var(--border)44;
+                  font-family:'Courier New',monospace;white-space:nowrap}
+table.data-tbl tr:last-child td{border-bottom:none}
+table.data-tbl tr:hover td{background:var(--bg3)88}
+table.data-tbl td.r{text-align:right}
+table.data-tbl td.dd-max{background:#f8514912;color:var(--red)}
+
+/* ── Config badges ───────────────────────────────────────────── */
+.cfg-grid{display:flex;flex-wrap:wrap;gap:8px}
+.cfg-badge{background:var(--bg3);border:1px solid var(--border);border-radius:5px;
+           padding:4px 10px;font-size:11px;font-family:'Courier New',monospace}
+.cfg-badge span{color:var(--text2);font-family:'Segoe UI',system-ui,sans-serif}
+
+/* ── Two-col layout for time analysis ───────────────────────── */
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:800px){.two-col{grid-template-columns:1fr}}
+
+/* ── Loading state ───────────────────────────────────────────── */
+#loading{display:flex;flex-direction:column;align-items:center;justify-content:center;
+         min-height:400px;gap:14px;color:var(--text2)}
+.spinner{width:36px;height:36px;border:3px solid var(--border);border-top-color:var(--accent);
+         border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Print styles ────────────────────────────────────────────── */
+@media print{
+  #header{position:relative;background:white;color:#000;border-color:#ccc}
+  #logo,#print-btn,#wsdot{display:none}
+  #report-title{color:#000}
+  body,#main,.section{background:white!important;color:#000!important}
+  .section{border-color:#ccc!important;break-inside:avoid}
+  .kpi{background:#f5f5f5!important}
+  table.data-tbl th,table.data-tbl td{color:#333!important;border-color:#ccc!important}
+  .toggle-btn,.chart-controls,.chart-hint{display:none}
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div id="header">
+  <div id="logo">ATK</div>
+  <div id="report-title">Simulation Report</div>
+  <div id="pnl-badge" class="neu">Loading…</div>
+  <button id="print-btn" onclick="window.print()">
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M2.5 8a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1z"/>
+      <path d="M5 1a2 2 0 0 0-2 2v2H2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1v1a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-1h1a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1V3a2 2 0 0 0-2-2H5zM4 3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2H4V3zm1 5a2 2 0 0 0-2 2v1H2a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-1v-1a2 2 0 0 0-2-2H5zm7 2v3a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1z"/>
+    </svg>
+    Export PDF
+  </button>
+  <div id="wsdot" class="conn" title="WebSocket status"></div>
+</div>
+
+<!-- Main content -->
+<div id="main">
+  <div id="loading">
+    <div class="spinner"></div>
+    <div>Loading report data…</div>
+  </div>
+  <div id="report-content" style="display:none">
+
+    <!-- Config bar -->
+    <div class="section" id="sec-config">
+      <div class="section-hdr"><h2>Simulation Configuration</h2></div>
+      <div class="section-body">
+        <div class="cfg-grid" id="cfg-grid"></div>
+      </div>
+    </div>
+
+    <!-- Equity chart -->
+    <div class="section" id="sec-equity">
+      <div class="section-hdr">
+        <h2>Equity Curve</h2>
+        <div class="chart-controls" id="chart-controls">
+          <button class="toggle-btn on" id="tog-equity" onclick="toggleSeries('equity')">Balance</button>
+          <button class="toggle-btn on" id="tog-wallet" onclick="toggleSeries('wallet')">Wallet</button>
+          <button class="toggle-btn on" id="tog-trades" onclick="toggleSeries('trades')">Trades</button>
+          <button class="toggle-btn on" id="tog-maxdd" onclick="toggleSeries('maxdd')">Max DD</button>
+          <button class="toggle-btn on" id="tog-sigdd" onclick="toggleSeries('sigdd')">Drawdowns</button>
+          <span class="chart-hint">Scroll to zoom · Drag to pan · Double-click to reset</span>
+        </div>
+      </div>
+      <div class="section-body">
+        <div id="equity-chart-wrap"><canvas id="equity-chart"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Performance KPIs -->
+    <div class="section" id="sec-perf">
+      <div class="section-hdr"><h2>Performance Summary</h2></div>
+      <div class="section-body">
+        <div class="kpi-grid" id="kpi-perf"></div>
+      </div>
+    </div>
+
+    <!-- Risk Metrics -->
+    <div class="section" id="sec-risk">
+      <div class="section-hdr"><h2>Risk Metrics</h2></div>
+      <div class="section-body">
+        <div class="kpi-grid" id="kpi-risk"></div>
+      </div>
+    </div>
+
+    <!-- Trade Statistics -->
+    <div class="section" id="sec-trades">
+      <div class="section-hdr"><h2>Trade Statistics</h2></div>
+      <div class="section-body">
+        <div class="kpi-grid" id="kpi-trades"></div>
+      </div>
+    </div>
+
+    <!-- Drawdowns table -->
+    <div class="section" id="sec-dd">
+      <div class="section-hdr"><h2 id="dd-hdr-title">Significant Drawdowns</h2></div>
+      <div class="section-body">
+        <div class="tbl-wrap">
+          <table class="data-tbl" id="dd-table">
+            <thead><tr>
+              <th>#</th><th>Start</th><th>End</th>
+              <th class="r">Peak Balance</th><th class="r">Trough Balance</th>
+              <th class="r">Amount</th><th class="r">Drawdown %</th>
+            </tr></thead>
+            <tbody id="dd-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Time Analysis -->
+    <div class="section" id="sec-time">
+      <div class="section-hdr"><h2>Time Analysis</h2></div>
+      <div class="section-body">
+        <div class="two-col">
+          <div>
+            <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;
+                        letter-spacing:.05em;margin-bottom:10px">By Weekday</div>
+            <div class="tbl-wrap">
+              <table class="data-tbl" id="weekday-table">
+                <thead><tr>
+                  <th>Day</th><th class="r">Trades</th><th class="r">Win%</th>
+                  <th class="r">Total PnL</th><th class="r">Avg PnL</th>
+                </tr></thead>
+                <tbody id="weekday-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;
+                        letter-spacing:.05em;margin-bottom:10px">By Session</div>
+            <div class="tbl-wrap">
+              <table class="data-tbl" id="session-table">
+                <thead><tr>
+                  <th>Session</th><th class="r">Trades</th><th class="r">Win%</th>
+                  <th class="r">Total PnL</th><th class="r">Avg PnL</th>
+                </tr></thead>
+                <tbody id="session-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Monthly Analysis -->
+    <div class="section" id="sec-monthly">
+      <div class="section-hdr"><h2>Monthly Analysis</h2></div>
+      <div class="section-body">
+        <div class="tbl-wrap">
+          <table class="data-tbl" id="monthly-table">
+            <thead><tr>
+              <th>Month</th><th class="r">Trades</th><th class="r">Wins</th>
+              <th class="r">Losses</th><th class="r">Win%</th>
+              <th class="r">Total PnL</th><th class="r">Avg PnL</th>
+            </tr></thead>
+            <tbody id="monthly-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Costs -->
+    <div class="section" id="sec-costs">
+      <div class="section-hdr"><h2>Cost &amp; Excursion Summary</h2></div>
+      <div class="section-body">
+        <div class="kpi-grid" id="kpi-costs"></div>
+      </div>
+    </div>
+
+  </div><!-- /report-content -->
+</div><!-- /main -->
+
+<!-- Trade tooltip (appears on hover over equity chart) -->
+<div id="trade-tooltip">
+  <h4 id="tt-title">Trade #0</h4>
+  <table>
+    <tr><td>Direction</td><td id="tt-dir">—</td></tr>
+    <tr><td>Entry</td><td id="tt-entry">—</td></tr>
+    <tr><td>Exit</td><td id="tt-exit">—</td></tr>
+    <tr><td>SL</td><td id="tt-sl">—</td></tr>
+    <tr><td>TP</td><td id="tt-tp">—</td></tr>
+    <tr><td>Net PnL</td><td id="tt-pnl">—</td></tr>
+    <tr><td>R-multiple</td><td id="tt-r">—</td></tr>
+    <tr><td>Close reason</td><td id="tt-reason">—</td></tr>
+    <tr><td>Open</td><td id="tt-open">—</td></tr>
+    <tr><td>Close</td><td id="tt-close">—</td></tr>
+  </table>
+  <button id="open-chart-btn" onclick="openChart()">📈 Open on Candle Chart</button>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+//  State
+// ═══════════════════════════════════════════════════════════════
+let ws = null, reportData = null, equityChart = null;
+let hoveredTradeId = null;
+let seriesVisible = {equity:true, wallet:true, trades:true, maxdd:true, sigdd:true};
+const FMT = new Intl.NumberFormat('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+const DATE_FMT = (ms) => {
+  const d = new Date(ms);
+  return d.toUTCString().slice(0,22);
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  WebSocket
+// ═══════════════════════════════════════════════════════════════
+function wsConnect() {
+  const dot = document.getElementById('wsdot');
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { dot.className = 'live'; };
+  ws.onclose = () => { dot.className = ''; setTimeout(wsConnect, 2000); };
+  ws.onerror = () => ws.close();
+  ws.onmessage = e => {
+    try { handleMsg(JSON.parse(e.data)); } catch(err) { console.error(err); }
+  };
+}
+
+function handleMsg(msg) {
+  if (msg.type === 'report_data') {
+    reportData = msg;
+    renderReport(msg);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Render
+// ═══════════════════════════════════════════════════════════════
+function renderReport(d) {
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('report-content').style.display = 'block';
+
+  const s = d.summary;
+  const pnlSign = s.total_pnl >= 0 ? '+' : '';
+  const badge = document.getElementById('pnl-badge');
+  badge.textContent = `${pnlSign}$${FMT.format(s.total_pnl)}  (${pnlSign}${s.total_pnl_percent?.toFixed(2) ?? '—'}%)`;
+  badge.className = s.total_pnl >= 0 ? 'pos' : 'neg';
+
+  const cfgId = d.config?.config_id || '—';
+  document.getElementById('report-title').textContent =
+    `Simulation Report — ${d.config?.symbol || 'Portfolio'} · ${cfgId}`;
+
+  renderConfig(d.config);
+  buildEquityChart(d);
+  renderKPIs(d);
+  renderDrawdownTable(d);
+  renderTimeAnalysis(d);
+  renderMonthlytable(d);
+  renderCosts(d);
+}
+
+// ── Config badges ──────────────────────────────────────────────
+function renderConfig(cfg) {
+  const items = [
+    ['Symbol', cfg.symbol],
+    ['Exchange', cfg.exchange_type],
+    ['Leverage', cfg.leverage + 'x'],
+    ['Balance', '$' + FMT.format(cfg.initial_balance)],
+    ['Risk/trade', cfg.risk_per_trade + '%'],
+    ['TP Mode', cfg.tp_mode],
+    ['SL Mode', cfg.sl_mode],
+    ['Commission', cfg.commission_type === 'percentage'
+      ? (cfg.commission * 100).toFixed(3) + '%' : cfg.commission + ' ' + cfg.commission_type],
+    ['Spread', cfg.spread > 0 ? cfg.spread : '—'],
+    ['Timeframe', cfg.primary_timeframe],
+  ];
+  const grid = document.getElementById('cfg-grid');
+  grid.innerHTML = items.map(([k,v]) =>
+    `<div class="cfg-badge"><span>${k}: </span>${v}</div>`
+  ).join('');
+}
+
+// ── KPI helpers ────────────────────────────────────────────────
+function kpi(label, value, cls='', sub='') {
+  return `<div class="kpi">
+    <div class="kpi-label">${label}</div>
+    <div class="kpi-value ${cls}">${value}</div>
+    ${sub ? `<div class="kpi-sub">${sub}</div>` : ''}
+  </div>`;
+}
+function money(v)  { return v == null ? '—' : (v >= 0 ? '+' : '') + '$' + FMT.format(v); }
+function pct(v)    { return v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(2) + '%'; }
+function num(v,n=2){ return v == null ? '—' : v.toFixed(n); }
+function cls(v)    { return v == null ? 'neu' : v > 0 ? 'pos' : v < 0 ? 'neg' : 'neu'; }
+function clsWR(v)  { return v >= 55 ? 'pos' : v >= 45 ? 'neu' : 'neg'; }
+function clsPF(v)  { return v == null ? 'neu' : v > 1.5 ? 'pos' : v >= 1.0 ? 'neu' : 'neg'; }
+
+function renderKPIs(d) {
+  const s = d.summary;
+  document.getElementById('kpi-perf').innerHTML = [
+    kpi('Initial Balance', '$' + FMT.format(s.initial_balance)),
+    kpi('Final Balance',   '$' + FMT.format(s.final_balance),    cls(s.total_pnl)),
+    kpi('Total PnL',       money(s.total_pnl),                   cls(s.total_pnl),
+        pct(s.total_pnl_percent)),
+    kpi('Win Rate',        s.win_rate?.toFixed(1) + '%',         clsWR(s.win_rate),
+        s.winning_trades + ' wins / ' + s.losing_trades + ' losses'),
+    kpi('Avg Win',         money(s.avg_win),  'pos',  'per winning trade'),
+    kpi('Avg Loss',        money(s.avg_loss), 'neg',  'per losing trade'),
+    kpi('Largest Win',     money(s.largest_win),  'pos'),
+    kpi('Largest Loss',    money(s.largest_loss), 'neg'),
+    kpi('Avg R-multiple',  num(s.avg_pnl_r, 3) + 'R', cls(s.avg_pnl_r)),
+  ].join('');
+
+  document.getElementById('kpi-risk').innerHTML = [
+    kpi('Profit Factor',   num(s.profit_factor),  clsPF(s.profit_factor),
+        'gross profit / gross loss'),
+    kpi('Expectancy',      money(s.expectancy),   cls(s.expectancy), 'per trade'),
+    kpi('Sharpe Ratio',    num(s.sharpe_ratio),   cls(s.sharpe_ratio)),
+    kpi('Sortino Ratio',   num(s.sortino_ratio),  cls(s.sortino_ratio)),
+    kpi('Calmar Ratio',    num(s.calmar_ratio),   cls(s.calmar_ratio)),
+    kpi('Recovery Factor', num(s.recovery_factor), cls(s.recovery_factor)),
+    kpi('Max Consec. Wins',  s.max_consecutive_wins,   'pos'),
+    kpi('Max Consec. Losses',s.max_consecutive_losses, 'neg'),
+    kpi('Max Drawdown',
+        d.max_drawdown ? '-' + d.max_drawdown.drawdown_percent?.toFixed(2) + '%' : '—',
+        d.max_drawdown ? 'neg' : 'neu',
+        d.max_drawdown ? money(-d.max_drawdown.drawdown_amount) : ''),
+  ].join('');
+
+  document.getElementById('kpi-trades').innerHTML = [
+    kpi('Total Trades', s.total_trades),
+    kpi('Long',  s.long_trades,  'pos'),
+    kpi('Short', s.short_trades, 'neg'),
+    kpi('Wins',        s.winning_trades,   'pos'),
+    kpi('Losses',      s.losing_trades,    'neg'),
+    kpi('Break-Even',  s.break_even_trades, 'neu'),
+    kpi('Stop-Loss',   s.sl_count,         'neg', 'closed by SL'),
+    kpi('Take-Profit', s.tp_count,         'pos', 'closed by TP'),
+    kpi('Risk-Free',   s.risk_free_count,  'neu', 'SL to break-even'),
+    kpi('Force-Close', s.force_close_count,'warn','closed by exit signal'),
+    kpi('End-of-Data', s.end_of_data_count,'neu', 'open at last candle'),
+    kpi('Loss Rate',   s.loss_rate?.toFixed(1) + '%', 'neg'),
+  ].join('');
+}
+
+function renderCosts(d) {
+  const s = d.summary;
+  document.getElementById('kpi-costs').innerHTML = [
+    kpi('Total Commission', money(-Math.abs(s.total_commission || 0)), 'neg'),
+    kpi('Total Spread',     money(-Math.abs(s.total_spread_cost || 0)), 'neg'),
+    kpi('Total Cost',       money(-(Math.abs(s.total_commission||0)+Math.abs(s.total_spread_cost||0))), 'neg'),
+    kpi('Avg MAE', money(s.avg_mae), s.avg_mae < 0 ? 'neg' : 'neu',
+        'Max Adverse Excursion'),
+    kpi('Avg MFE', money(s.avg_mfe), s.avg_mfe > 0 ? 'pos' : 'neu',
+        'Max Favourable Excursion'),
+  ].join('');
+}
+
+// ── Drawdown table ─────────────────────────────────────────────
+function renderDrawdownTable(d) {
+  const tbody = document.getElementById('dd-tbody');
+  const dds = d.significant_drawdowns || [];
+  const maxPct = dds.length ? dds[0].drawdown_percent : 0;
+
+  document.getElementById('dd-hdr-title').textContent =
+    `Significant Drawdowns (≥${d.config?.drawdown_threshold ?? 5}%)  —  ${dds.length} events`;
+
+  if (!dds.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text3);text-align:center;padding:20px">No significant drawdowns above threshold</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = dds.map((dd, i) => {
+    const isMax = dd.drawdown_percent >= maxPct - 0.01;
+    return `<tr>
+      <td class="${isMax ? 'dd-max' : ''}">${i+1}</td>
+      <td>${DATE_FMT(dd.start_time)}</td>
+      <td>${DATE_FMT(dd.end_time)}</td>
+      <td class="r">$${FMT.format(dd.peak_balance)}</td>
+      <td class="r">$${FMT.format(dd.trough_balance)}</td>
+      <td class="r neg">-$${FMT.format(dd.drawdown_amount)}</td>
+      <td class="r neg ${isMax ? 'dd-max' : ''}">-${dd.drawdown_percent?.toFixed(2)}%</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Time analysis tables ───────────────────────────────────────
+function renderTimeAnalysis(d) {
+  const mkRow = s => `<tr>
+    <td>${s.weekday || s.session}</td>
+    <td class="r">${s.total_trades}</td>
+    <td class="r ${s.win_rate >= 55 ? 'pos' : s.win_rate < 45 ? 'neg' : 'neu'}">${s.win_rate?.toFixed(1)}%</td>
+    <td class="r ${s.total_pnl >= 0 ? 'pos' : 'neg'}">${money(s.total_pnl)}</td>
+    <td class="r ${s.avg_pnl >= 0 ? 'pos' : 'neg'}">${money(s.avg_pnl)}</td>
+  </tr>`;
+
+  document.getElementById('weekday-tbody').innerHTML =
+    (d.weekday_stats || []).map(mkRow).join('') ||
+    '<tr><td colspan="5" style="color:var(--text3);padding:12px">No data</td></tr>';
+
+  document.getElementById('session-tbody').innerHTML =
+    (d.session_stats || []).filter(s => s.total_trades > 0).map(mkRow).join('') ||
+    '<tr><td colspan="5" style="color:var(--text3);padding:12px">No data</td></tr>';
+}
+
+function renderMonthlytable(d) {
+  const tbody = document.getElementById('monthly-tbody');
+  const rows = d.monthly_stats || [];
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text3);padding:12px">No data</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(s => `<tr>
+    <td>${s.month}</td>
+    <td class="r">${s.total_trades}</td>
+    <td class="r pos">${s.winning_trades}</td>
+    <td class="r neg">${s.losing_trades}</td>
+    <td class="r ${s.win_rate >= 55 ? 'pos' : s.win_rate < 45 ? 'neg' : 'neu'}">${s.win_rate?.toFixed(1)}%</td>
+    <td class="r ${s.total_pnl >= 0 ? 'pos' : 'neg'}">${money(s.total_pnl)}</td>
+    <td class="r ${s.avg_pnl >= 0 ? 'pos' : 'neg'}">${money(s.avg_pnl)}</td>
+  </tr>`).join('');
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Equity Curve Chart
+// ═══════════════════════════════════════════════════════════════
+function buildEquityChart(d) {
+  const hist = d.balance_history || [];
+  if (!hist.length) return;
+
+  const labels = hist.map(h => h.t);
+  const equityData = hist.map(h => ({x: h.t, y: h.e}));
+  const walletData = hist.map(h => ({x: h.t, y: h.w}));
+
+  // Trade markers as scatter
+  const tradePoints = (d.trade_markers || []).map(m => ({
+    x: m.close_time,
+    y: hist.reduce((best, h) =>
+      Math.abs(h.t - m.close_time) < Math.abs(best.t - m.close_time) ? h : best
+    , hist[0]).e,
+    trade: m,
+  }));
+
+  // Max drawdown region
+  const maxDDAnnotations = {};
+  if (d.max_drawdown && seriesVisible.maxdd) {
+    maxDDAnnotations.maxdd = {
+      type: 'box',
+      xMin: d.max_drawdown.start_time,
+      xMax: d.max_drawdown.end_time,
+      backgroundColor: 'rgba(248,81,73,0.08)',
+      borderColor: 'rgba(248,81,73,0.4)',
+      borderWidth: 1,
+      label: {
+        content: `Max DD: -${d.max_drawdown.drawdown_percent?.toFixed(2)}%`,
+        display: true,
+        position: 'start',
+        color: '#f85149',
+        font: {size: 10},
+      }
+    };
+  }
+
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  if (equityChart) equityChart.destroy();
+
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      datasets: [
+        {
+          label: 'Equity',
+          data: equityData,
+          borderColor: '#58a6ff',
+          backgroundColor: 'rgba(88,166,255,0.06)',
+          borderWidth: 2,
+          fill: true,
+          pointRadius: 0,
+          tension: 0.2,
+          parsing: false,
+        },
+        {
+          label: 'Wallet',
+          data: walletData,
+          borderColor: '#8b949e',
+          borderWidth: 1,
+          borderDash: [4, 3],
+          fill: false,
+          pointRadius: 0,
+          tension: 0.2,
+          parsing: false,
+        },
+        {
+          label: 'Trades',
+          data: tradePoints,
+          type: 'scatter',
+          pointRadius: tradePoints.map(p => 5),
+          pointHoverRadius: 8,
+          backgroundColor: tradePoints.map(p =>
+            p.trade.is_win ? 'rgba(63,185,80,0.8)' : 'rgba(248,81,73,0.8)'
+          ),
+          borderColor: tradePoints.map(p =>
+            p.trade.is_win ? '#3fb950' : '#f85149'
+          ),
+          borderWidth: 1,
+          parsing: false,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      interaction: {mode: 'nearest', axis: 'x', intersect: false},
+      plugins: {
+        legend: {display: false},
+        tooltip: {
+          enabled: false,
+          external: externalTooltip,
+        },
+        zoom: {
+          pan: {enabled: true, mode: 'x'},
+          zoom: {
+            wheel: {enabled: true},
+            pinch: {enabled: true},
+            mode: 'x',
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#656d76',
+            font: {size: 10},
+            maxTicksLimit: 8,
+            callback: v => {
+              const d = new Date(v);
+              return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'2-digit'});
+            }
+          },
+          grid: {color: 'rgba(48,54,61,0.6)'},
+        },
+        y: {
+          ticks: {
+            color: '#656d76',
+            font: {size: 10, family: "'Courier New', monospace"},
+            callback: v => '$' + FMT.format(v),
+          },
+          grid: {color: 'rgba(48,54,61,0.6)'},
+        }
+      },
+      onHover: (evt, elements) => {
+        evt.native.target.style.cursor = elements.length ? 'pointer' : 'crosshair';
+      },
+      onClick: (evt, elements) => {
+        const tradeEl = elements.find(e => e.datasetIndex === 2);
+        if (tradeEl) {
+          const trade = equityChart.data.datasets[2].data[tradeEl.index].trade;
+          hoveredTradeId = trade.trade_id;
+          showTooltipForTrade(trade, evt.native);
+        }
+      },
+    }
+  });
+
+  // Draw max DD and significant DD as chart background annotations
+  // (done via plugin to avoid needing the separate annotation plugin)
+  addDrawdownAnnotations(d);
+}
+
+function addDrawdownAnnotations(d) {
+  if (!equityChart) return;
+  // We re-draw significant drawdowns as dataset backgrounds
+  const sigDD = d.significant_drawdowns || [];
+  if (!sigDD.length) return;
+
+  const ddDatasets = sigDD.map((dd, i) => ({
+    label: `DD ${i+1}`,
+    data: [],
+    _ddRegion: {xMin: dd.start_time, xMax: dd.end_time, pct: dd.drawdown_percent},
+    borderColor: 'transparent',
+    backgroundColor: 'transparent',
+    parsing: false,
+  }));
+  // We use afterDraw plugin to paint them directly on canvas
+  equityChart._ddRegions = sigDD;
+  equityChart._maxDD = d.max_drawdown;
+}
+
+// Custom afterDraw to paint drawdown regions
+Chart.register({
+  id: 'drawdownRegions',
+  afterDraw(chart) {
+    if (!chart._ddRegions) return;
+    const {ctx, chartArea, scales: {x, y}} = chart;
+    if (!chartArea) return;
+    ctx.save();
+    // Significant drawdowns
+    if (chart._ddRegions && seriesVisible.sigdd) {
+      chart._ddRegions.forEach(dd => {
+        const x1 = x.getPixelForValue(dd.start_time);
+        const x2 = x.getPixelForValue(dd.end_time);
+        if (x2 < chartArea.left || x1 > chartArea.right) return;
+        const cx1 = Math.max(x1, chartArea.left);
+        const cx2 = Math.min(x2, chartArea.right);
+        ctx.fillStyle = 'rgba(248,81,73,0.05)';
+        ctx.fillRect(cx1, chartArea.top, cx2 - cx1, chartArea.height);
+      });
+    }
+    // Max drawdown overlay
+    if (chart._maxDD && seriesVisible.maxdd) {
+      const dd = chart._maxDD;
+      const x1 = x.getPixelForValue(dd.start_time);
+      const x2 = x.getPixelForValue(dd.end_time);
+      if (!(x2 < chartArea.left || x1 > chartArea.right)) {
+        const cx1 = Math.max(x1, chartArea.left);
+        const cx2 = Math.min(x2, chartArea.right);
+        ctx.fillStyle = 'rgba(248,81,73,0.12)';
+        ctx.fillRect(cx1, chartArea.top, cx2 - cx1, chartArea.height);
+        ctx.strokeStyle = 'rgba(248,81,73,0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(cx1, chartArea.top, cx2 - cx1, chartArea.height);
+        ctx.setLineDash([]);
+        // Label
+        ctx.fillStyle = '#f85149';
+        ctx.font = '10px "Segoe UI", system-ui';
+        ctx.textAlign = 'left';
+        ctx.fillText(`Max DD: -${dd.drawdown_percent?.toFixed(2)}%`, cx1 + 4, chartArea.top + 14);
+      }
+    }
+    ctx.restore();
+  }
+});
+
+// ── External tooltip for scatter trade markers ─────────────────
+function externalTooltip(context) {
+  const {chart, tooltip} = context;
+  if (tooltip.opacity === 0) { hideTooltip(); return; }
+  if (tooltip.dataPoints.length === 0) return;
+  const dp = tooltip.dataPoints[0];
+  if (dp.datasetIndex !== 2) { hideTooltip(); return; }
+  const trade = dp.raw.trade;
+  if (!trade) return;
+
+  const el = document.getElementById('trade-tooltip');
+  showTooltipForTrade(trade, {
+    clientX: tooltip.caretX + chart.canvas.getBoundingClientRect().left,
+    clientY: tooltip.caretY + chart.canvas.getBoundingClientRect().top,
+  });
+}
+
+function showTooltipForTrade(trade, mouseEvt) {
+  hoveredTradeId = trade.trade_id;
+  const el = document.getElementById('trade-tooltip');
+  document.getElementById('tt-title').textContent = `Trade #${trade.trade_id}  ${trade.symbol}`;
+  document.getElementById('tt-dir').textContent   = trade.direction.toUpperCase();
+  document.getElementById('tt-dir').className     = trade.direction === 'long' ? 'pos' : 'neg';
+  document.getElementById('tt-entry').textContent = trade.entry_price?.toFixed(6) ?? '—';
+  document.getElementById('tt-exit').textContent  = trade.exit_price?.toFixed(6) ?? '—';
+  document.getElementById('tt-sl').textContent    = trade.stop_loss?.toFixed(6) ?? '—';
+  document.getElementById('tt-tp').textContent    = trade.take_profit?.toFixed(6) ?? '—';
+  const pnlEl = document.getElementById('tt-pnl');
+  pnlEl.textContent = money(trade.net_pnl);
+  pnlEl.className   = trade.net_pnl >= 0 ? 'pos' : 'neg';
+  document.getElementById('tt-r').textContent     = num(trade.pnl_r, 3) + 'R';
+  document.getElementById('tt-reason').textContent= trade.close_reason;
+  document.getElementById('tt-open').textContent  = DATE_FMT(trade.open_time);
+  document.getElementById('tt-close').textContent = DATE_FMT(trade.close_time);
+
+  // Show "open chart" button only if chart is available
+  const btn = document.getElementById('open-chart-btn');
+  btn.style.display = reportData?.has_chart ? 'block' : 'none';
+
+  el.style.display = 'block';
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let left = (mouseEvt.clientX || 0) + 16;
+  let top  = (mouseEvt.clientY || 0) + 16;
+  if (left + 230 > vw) left = (mouseEvt.clientX || 0) - 230;
+  if (top + 280 > vh) top = (mouseEvt.clientY || 0) - 280;
+  el.style.left = left + 'px';
+  el.style.top  = top  + 'px';
+}
+
+function hideTooltip() {
+  document.getElementById('trade-tooltip').style.display = 'none';
+}
+
+document.addEventListener('mousemove', e => {
+  const el = document.getElementById('trade-tooltip');
+  if (el.style.display !== 'none' && !el.contains(e.target) &&
+      !document.getElementById('equity-chart').contains(e.target)) {
+    hideTooltip();
+  }
+});
+
+// ── Open candle chart ──────────────────────────────────────────
+function openChart() {
+  if (hoveredTradeId == null || !reportData?.has_chart) return;
+  const trade = (reportData?.trade_markers || []).find(t => t.trade_id === hoveredTradeId);
+  if (!trade) return;
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({type: 'open_chart', trade_id: hoveredTradeId}));
+  }
+  if (reportData.chart_port) {
+    window.open(`http://127.0.0.1:${reportData.chart_port}/`, '_blank');
+  }
+  hideTooltip();
+}
+
+// ── Series visibility toggles ──────────────────────────────────
+function toggleSeries(key) {
+  seriesVisible[key] = !seriesVisible[key];
+  document.getElementById('tog-' + key).classList.toggle('on', seriesVisible[key]);
+
+  if (!equityChart) return;
+  const datasetMap = {equity: 0, wallet: 1, trades: 2};
+  if (key in datasetMap) {
+    const ds = equityChart.data.datasets[datasetMap[key]];
+    ds.hidden = !seriesVisible[key];
+  }
+  equityChart.update('none');
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Boot
+// ═══════════════════════════════════════════════════════════════
+wsConnect();
+</script>
+</body>
+</html>
