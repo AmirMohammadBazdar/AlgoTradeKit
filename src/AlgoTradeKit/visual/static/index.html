@@ -255,6 +255,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
   <button class="tb" id="tool-text" onclick="setTool('text')" title="Text Label">
     <svg width="13" height="12" viewBox="0 0 13 12"><text x="2" y="10" font-size="10" fill="currentColor" font-family="serif" font-style="italic">T</text></svg>
   </button>
+  <button class="tb" id="tool-posbox" onclick="setTool('posbox')" title="Position Box">
+    <svg width="14" height="12" viewBox="0 0 14 12">
+      <rect x="1" y="2" width="12" height="4" rx="0.5" stroke="#3fb950" stroke-width="1.1" fill="#3fb95033"/>
+      <rect x="1" y="6" width="12" height="4" rx="0.5" stroke="#f85149" stroke-width="1.1" fill="#f8514933"/>
+      <line x1="1" y1="6" x2="13" y2="6" stroke="#fff" stroke-width="0.8" stroke-dasharray="2,2"/>
+    </svg>
+  </button>
   <div class="tsep"></div>
   <button class="tb" onclick="clearDrawings()">
     <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.5"/></svg>
@@ -1612,6 +1619,23 @@ function renderOne(d,ctx,W,H){
       ctx.beginPath(); ctx.arc(x2, closePt.y, 3, 0, Math.PI*2);
       ctx.fillStyle = col; ctx.fill();
     }
+
+    // ── Resize handles when unlocked (highlighted or selected) ──
+    if(hl && !d.locked){
+      const tpY  = profTopPt  ? Math.min(profTopPt.y,  profBotPt.y)  : openPt.y - 40;
+      const slY  = lossTopPt  ? Math.max(lossTopPt.y,  lossBotPt.y)  : openPt.y + 40;
+      const enY  = entryPt ? entryPt.y : openPt.y;
+      const midY = (tpY + slY) / 2;
+      // Left / right edge handles (ew-resize)
+      drawHandle(ctx, x1, midY, '#58a6ff', false);
+      drawHandle(ctx, x2, midY, '#58a6ff', false);
+      // Entry line handle (ns-resize)
+      drawHandle(ctx, x1 + w/2, enY,  '#ffffff', true);
+      // TP line handle
+      drawHandle(ctx, x1 + w/2, tpY,  d.profit_color||'#3fb950', true);
+      // SL line handle
+      drawHandle(ctx, x1 + w/2, slY,  d.loss_color||'#f85149', true);
+    }
   }
 
   ctx.restore();
@@ -1694,6 +1718,34 @@ function _hitTest(cx,cy,includeAll){
       if(cx>=pt.x&&cx<=pt.x+d.text.length*fs*0.62&&cy>=pt.y-fs-2&&cy<=pt.y+4)
         return{id:d.id,handle:'body'};
     }
+    else if(d.type==='position_box'){
+      const openPt  = toXY(d.open_time,  d.entry_price);
+      const closePt = toXY(d.close_time, d.entry_price);
+      if(!openPt) continue;
+      const x1 = openPt.x;
+      const x2 = closePt ? closePt.x : x1 + 60;
+      const entryPt  = toXY(d.open_time, d.entry_price);
+      const tpPt     = toXY(d.open_time, d.visual_tp || d.profit_top || d.entry_price);
+      const slPt     = toXY(d.open_time, d.stop_loss  || d.loss_bottom || d.entry_price);
+      if(!entryPt || !tpPt || !slPt) continue;
+      const entryY = entryPt.y, tpY = tpPt.y, slY = slPt.y;
+      const yTop   = Math.min(tpY, slY);
+      const yBot   = Math.max(tpY, slY);
+      // Edge handles (resize)
+      if(Math.abs(cx - x1) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
+        return{id:d.id, handle:'left'};
+      if(Math.abs(cx - x2) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
+        return{id:d.id, handle:'right'};
+      if(Math.abs(cy - entryY) < HIT_R && cx >= x1 && cx <= x2)
+        return{id:d.id, handle:'entry'};
+      if(Math.abs(cy - tpY) < HIT_R && cx >= x1 && cx <= x2)
+        return{id:d.id, handle:'tp'};
+      if(Math.abs(cy - slY) < HIT_R && cx >= x1 && cx <= x2)
+        return{id:d.id, handle:'sl'};
+      // Interior (move)
+      if(cx >= x1 && cx <= x2 && cy >= yTop && cy <= yBot)
+        return{id:d.id, handle:'interior'};
+    }
   }
   return null;
 }
@@ -1712,15 +1764,37 @@ function redrawGhost(){
   const W=ghostCv.clientWidth, H=ghostCv.clientHeight;
   gCtx.clearRect(0,0,W,H);
   if(!draftState) return;
-  const p1=toXY(draftState.time1,draftState.price1);
-  if(!p1) return;
-  const p2=mousePos;
+
+  // Apply same clip as drawCanvas so ghost stays within chart area
+  const clip = getDrawingClipRect();
   gCtx.save();
+  if (clip) {
+    gCtx.beginPath();
+    gCtx.rect(clip.x, clip.y, clip.width, clip.height);
+    gCtx.clip();
+  }
+
+  const p1=toXY(draftState.time1,draftState.price1);
+  if(!p1){ gCtx.restore(); return; }
+  const p2=mousePos;
   gCtx.strokeStyle='#58a6ffaa'; gCtx.lineWidth=1; gCtx.setLineDash([5,4]);
   if(draftState.tool==='tline'||draftState.tool==='fib'){
     gCtx.beginPath(); gCtx.moveTo(p1.x,p1.y); gCtx.lineTo(p2.x,p2.y); gCtx.stroke();
   } else if(draftState.tool==='box'){
     gCtx.strokeRect(Math.min(p1.x,p2.x),Math.min(p1.y,p2.y),Math.abs(p2.x-p1.x),Math.abs(p2.y-p1.y));
+  } else if(draftState.tool==='posbox'){
+    // Preview: entry line and TP zone outline
+    const entryY = p1.y;
+    const tpY    = p2.y;
+    const xl     = Math.min(p1.x, p2.x), xr = Math.max(p1.x, p2.x);
+    const isLong = tpY < entryY;
+    // TP zone
+    gCtx.strokeStyle = isLong ? '#3fb950aa' : '#f85149aa';
+    gCtx.strokeRect(xl, Math.min(entryY, tpY), xr - xl, Math.abs(tpY - entryY));
+    // Entry line (solid)
+    gCtx.setLineDash([]);
+    gCtx.strokeStyle = '#ffffff66'; gCtx.lineWidth = 0.8;
+    gCtx.beginPath(); gCtx.moveTo(xl, entryY); gCtx.lineTo(xr, entryY); gCtx.stroke();
   }
   gCtx.setLineDash([]);
   gCtx.beginPath(); gCtx.arc(p1.x,p1.y,4,0,Math.PI*2);
@@ -1735,7 +1809,7 @@ function setTool(t){
   activeTool=t; draftState=null;
   document.querySelectorAll('.tb[id^="tool-"]').forEach(b=>b.classList.remove('on'));
   const btn=document.getElementById('tool-'+t); if(btn) btn.classList.add('on');
-  const isDrawTool=['hline','tline','box','fib','text'].includes(t);
+  const isDrawTool=['hline','tline','box','fib','text','posbox'].includes(t);
   setCanvasInteractive(isDrawTool);
   document.getElementById('panes').style.cursor=isDrawTool?'crosshair':'default';
   gCtx.clearRect(0,0,ghostCv.width,ghostCv.height);
@@ -1767,6 +1841,10 @@ document.getElementById('panes').addEventListener('mousemove',e=>{
       else if(h==='tr'||h==='bl')   drawCv.style.cursor='nesw-resize';
       else if(h==='tc'||h==='bc')   drawCv.style.cursor='ns-resize';
       else if(h==='lc'||h==='rc')   drawCv.style.cursor='ew-resize';
+      // Position box specific handles
+      else if(h==='left'||h==='right')          drawCv.style.cursor='ew-resize';
+      else if(h==='entry'||h==='tp'||h==='sl')  drawCv.style.cursor='ns-resize';
+      else                                        drawCv.style.cursor='move';
     } else if(hitAny){
       // Locked drawing under cursor — show pointer so user knows they can right-click
       drawCv.style.cursor='pointer';
@@ -1809,14 +1887,57 @@ document.getElementById('panes').addEventListener('click',e=>{
   const{time,price}=coord;
   if(activeTool==='hline'){
     const id='hline_'+Date.now();
-    drawings[id]={type:'hline',id,price,color:'#ef5350',lineWidth:1,lineStyle:0,label:''};
+    drawings[id]={type:'hline',id,price,color:'#ef5350',lineWidth:1,lineStyle:0,label:'',locked:false,source:'user'};
     redrawAll(); notifyDrawingChanged(drawings[id]); setTool('cursor'); return;
   }
   if(activeTool==='text'){
     const txt=prompt('Label text:',''); if(!txt) return;
     const id='txt_'+Date.now();
-    drawings[id]={type:'text',id,time,price,text:txt,color:'#e6edf3',fontSize:12};
+    drawings[id]={type:'text',id,time,price,text:txt,color:'#e6edf3',fontSize:12,locked:false,source:'user'};
     redrawAll(); notifyDrawingChanged(drawings[id]); setTool('cursor'); return;
+  }
+  // ── Position box: two clicks — 1st sets entry+open_time, 2nd sets tp+close_time ─
+  if(activeTool==='posbox'){
+    if(!draftState){
+      draftState={tool:'posbox',time1:time,price1:price};
+      redrawGhost(); return;
+    }
+    // Second click: compute direction from TP vs entry
+    const entryPrice = draftState.price1;
+    const tpPrice    = price;
+    const openTime   = Math.min(draftState.time1, time);
+    const closeTime  = Math.max(draftState.time1, time);
+    const isLong     = tpPrice > entryPrice;
+    const slDist     = Math.abs(tpPrice - entryPrice); // 1R
+    const slPrice    = isLong ? entryPrice - slDist : entryPrice + slDist;
+    const id = 'posbox_'+Date.now();
+    drawings[id] = {
+      type:         'position_box',
+      id,
+      open_time:    openTime,
+      close_time:   closeTime,
+      entry_price:  entryPrice,
+      stop_loss:    slPrice,
+      visual_tp:    tpPrice,
+      profit_top:   isLong ? tpPrice    : entryPrice,
+      profit_bottom:isLong ? entryPrice : tpPrice,
+      loss_top:     isLong ? entryPrice : slPrice,
+      loss_bottom:  isLong ? slPrice    : entryPrice,
+      profit_color: '#3fb950',
+      loss_color:   '#f85149',
+      direction:    isLong ? 'long' : 'short',
+      net_pnl:      0,
+      close_reason: '',
+      trade_id:     -1,
+      rr_ratio:     0,
+      label:        isLong ? 'L  1:1.0R' : 'S  1:1.0R',
+      opacity:      0.15,
+      locked:       false,  // user-created → unlocked by default
+      source:       'user',
+    };
+    notifyDrawingChanged(drawings[id]);
+    draftState=null; gCtx.clearRect(0,0,ghostCv.width,ghostCv.height);
+    redrawAll(); setTool('cursor'); return;
   }
   if(!draftState){ draftState={tool:activeTool,time1:time,price1:price}; redrawGhost(); return; }
   const id=activeTool+'_'+Date.now(); let d=null;
@@ -1887,11 +2008,64 @@ function onDragMove(cx,cy){
   }
   else if(d.type==='signal'){ d.time=time; if(d.price!=null) d.price=price; }
   else if(d.type==='text'){   d.time=time; d.price=price; }
+  else if(d.type==='position_box'){
+    const isMove = (h==='interior');
+    if(isMove){
+      // Move entire box: shift all prices and both times together
+      const sc = dragState.startCoord;
+      const dPrice = price - sc.price;
+      const dTime  = time  - sc.time;
+      d.open_time   = o.open_time   + dTime;
+      d.close_time  = o.close_time  + dTime;
+      d.entry_price = o.entry_price + dPrice;
+      d.stop_loss   = o.stop_loss   + dPrice;
+      d.visual_tp   = (o.visual_tp  || o.entry_price) + dPrice;
+      // Recompute zone boundaries
+      _recomputePosBoxZones(d);
+    } else if(h==='left'){
+      // Drag left edge → change open_time
+      d.open_time = Math.min(time, d.close_time - 1);
+    } else if(h==='right'){
+      // Drag right edge → change close_time
+      d.close_time = Math.max(time, d.open_time + 1);
+    } else if(h==='entry'){
+      // Drag entry line → shift entry, keep TP/SL relative distances
+      const oldEntry = o.entry_price;
+      const delta = price - oldEntry;
+      d.entry_price = price;
+      d.stop_loss   = o.stop_loss  + delta;
+      d.visual_tp   = (o.visual_tp || o.entry_price) + delta;
+      _recomputePosBoxZones(d);
+    } else if(h==='tp'){
+      // Drag TP line → change take_profit/visual_tp
+      d.visual_tp = price;
+      _recomputePosBoxZones(d);
+    } else if(h==='sl'){
+      // Drag SL line → change stop_loss
+      d.stop_loss = price;
+      _recomputePosBoxZones(d);
+    }
+  }
   redrawAll();
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  CONTEXT MENU — right-click on any drawing (locked or not)
+// ── Recompute position_box zone fields after any resize/move ──
+function _recomputePosBoxZones(d){
+  const tp = d.visual_tp   || d.entry_price;
+  const sl = d.stop_loss;
+  const entry = d.entry_price;
+  const isLong = tp > entry;
+  d.direction     = isLong ? 'long' : 'short';
+  d.profit_top    = isLong ? tp    : entry;
+  d.profit_bottom = isLong ? entry : tp;
+  d.loss_top      = isLong ? entry : sl;
+  d.loss_bottom   = isLong ? sl    : entry;
+  // Update label
+  const tpDist = Math.abs(tp - entry);
+  const slDist = Math.abs(sl - entry);
+  const rr     = slDist > 0 ? (tpDist / slDist).toFixed(1) : '0.0';
+  d.label = (isLong ? 'L' : 'S') + `  1:${rr}R`;
+}
 // ═══════════════════════════════════════════════════════════════
 drawCv.addEventListener('contextmenu',e=>{
   e.preventDefault();
