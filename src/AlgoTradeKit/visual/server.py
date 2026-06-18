@@ -5,6 +5,9 @@ Lightweight FastAPI server that:
   - Serves the static index.html on GET /
   - Handles WebSocket connections on /ws
   - Lets Chart instances push messages to all connected clients via broadcast()
+  - Replays the last ``init`` (and any pending ``navigate_to_candle``) to
+    newly-connecting browsers so a page-refresh or a second tab always gets
+    the current chart state.
 """
 
 import asyncio
@@ -13,7 +16,7 @@ import logging
 import socket
 import threading
 from pathlib import Path
-from typing import Set
+from typing import Optional, Set
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -87,6 +90,16 @@ class ChartServer:
     Python process.  Messages from Python → browser use ``send()``.
     Messages from browser → Python arrive via the ``on_message`` callback.
 
+    v0.7.1 changes
+    --------------
+    * ``_last_init`` — caches the most recent ``init`` message so new
+      browser connections (page refresh, second tab) immediately receive the
+      current chart state without waiting for the Python side to re-push.
+    * ``_last_navigate`` — caches the most recent ``navigate_to_candle``
+      message so a newly-opened browser tab (opened by the report's
+      "Open on Candle Chart" button) scrolls to the correct position
+      even though the navigate message was sent before the tab connected.
+
     Parameters
     ----------
     title : str
@@ -99,13 +112,17 @@ class ChartServer:
         self.title   = title
         self.port    = port or _find_free_port()
         self._manager = ConnectionManager()
-        self._loop:   asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
+        self._loop:   Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
         self._app    = self._build_app()
 
         # Set by Chart to receive browser → Python messages.
         # Signature: on_message(msg: dict) -> None
         self.on_message = None
+
+        # v0.7.1: replay cache — new browsers get the current state immediately
+        self._last_init:     Optional[dict] = None
+        self._last_navigate: Optional[dict] = None
 
     # ── FastAPI application ────────────────────────────────────────────────
 
@@ -120,6 +137,18 @@ class ChartServer:
         @app.websocket("/ws")
         async def ws_endpoint(websocket: WebSocket):
             await self._manager.connect(websocket)
+            # Replay cached init so a refreshed/new tab sees the current chart
+            if self._last_init is not None:
+                try:
+                    await websocket.send_text(json.dumps(self._last_init))
+                except Exception:
+                    pass
+            # Replay pending navigate so a new tab scrolls to the right candle
+            if self._last_navigate is not None:
+                try:
+                    await websocket.send_text(json.dumps(self._last_navigate))
+                except Exception:
+                    pass
             try:
                 while True:
                     raw = await websocket.receive_text()
@@ -180,7 +209,20 @@ class ChartServer:
     # ── Messaging ──────────────────────────────────────────────────────────
 
     def send(self, message: dict) -> None:
-        """Thread-safe: broadcast *message* to all connected browser clients."""
+        """Thread-safe: broadcast *message* to all connected browser clients.
+
+        As a side-effect, ``init`` and ``navigate_to_candle`` messages are
+        cached so newly-connecting browsers receive the current state.
+        """
+        # Cache for replay on new connections
+        msg_type = message.get("type")
+        if msg_type == "init":
+            self._last_init = message
+            # Clear stale navigate when a fresh init is pushed
+            self._last_navigate = None
+        elif msg_type == "navigate_to_candle":
+            self._last_navigate = message
+
         if self._loop is None:
             return
         asyncio.run_coroutine_threadsafe(
