@@ -1258,14 +1258,66 @@ function fromXY(cx,cy){
 function toXYFromOrig(time,price){ return toXY(time,price); }
 
 // ═══════════════════════════════════════════════════════════════
+//  CANVAS CLIP REGION
+//  Returns the safe drawing area that excludes the right price
+//  axis and the bottom time axis, so drawings never render over
+//  those axis areas or bleed into adjacent sub-pane axes.
+// ═══════════════════════════════════════════════════════════════
+function getDrawingClipRect() {
+  const panesEl = document.getElementById('panes');
+  if (!panesEl || !panes.main) return null;
+
+  const W = panesEl.clientWidth;
+  const H = panesEl.clientHeight;
+
+  // ── Right price axis width ───────────────────────────────────
+  // LWC renders the price axis as the last <td> in the first <tr>
+  // of its internal <table>.  We read its actual rendered width.
+  let rightAxisW = 70; // safe fallback
+  const mainTable = panes.main.el && panes.main.el.querySelector('table');
+  if (mainTable && mainTable.rows.length > 0) {
+    const firstRow = mainTable.rows[0];
+    if (firstRow.cells.length >= 2) {
+      const axisCell = firstRow.cells[firstRow.cells.length - 1];
+      if (axisCell && axisCell.offsetWidth > 0) rightAxisW = axisCell.offsetWidth;
+    }
+  }
+
+  // ── Bottom time axis height ──────────────────────────────────
+  // The time scale sits at the very bottom of the last pane.
+  let bottomAxisH = 28; // safe fallback
+  const paneKeys = Object.keys(panes);
+  const lastPane = panes[paneKeys[paneKeys.length - 1]];
+  const lastTable = lastPane && lastPane.el && lastPane.el.querySelector('table');
+  if (lastTable && lastTable.rows.length >= 2) {
+    const lastRow = lastTable.rows[lastTable.rows.length - 1];
+    if (lastRow && lastRow.offsetHeight > 0) bottomAxisH = lastRow.offsetHeight;
+  }
+
+  return { x: 0, y: 0, width: W - rightAxisW, height: H - bottomAxisH };
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  RENDER ALL DRAWINGS
 // ═══════════════════════════════════════════════════════════════
 function redrawAll(){
   if(!panes.main) return;
   const W=drawCv.clientWidth, H=drawCv.clientHeight;
   dCtx.clearRect(0,0,W,H);
+
+  // Clip to chart area — prevents drawings from bleeding into axes
+  const clip = getDrawingClipRect();
+  dCtx.save();
+  if (clip) {
+    dCtx.beginPath();
+    dCtx.rect(clip.x, clip.y, clip.width, clip.height);
+    dCtx.clip();
+  }
+
   drawIchimokuCloud(dCtx,W,H);          // ← cloud fill BEHIND user drawings
   Object.values(drawings).forEach(d=>renderOne(d,dCtx,W,H));
+
+  dCtx.restore();
 }
 
 // ═══════════════════════════════════════════════════════════════
