@@ -674,12 +674,14 @@ class Simulate:
         add_simulation_positions(chart, report, opacity=0.15)
 
         # Show chart (non-blocking so report can open simultaneously)
-        server = chart.show(block=False)
+        chart.show(block=False)
 
         # Give server a moment to start
         _time.sleep(0.4)
 
-        return chart, server
+        # Return (Chart, ChartServer) — note: chart.show() returns `self`
+        # (the Chart object), so we access the underlying server directly.
+        return chart, chart._server
 
     def _render_report(
         self,
