@@ -5,8 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>AlgoTradeKit — Simulation Report</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -163,7 +162,7 @@ table.data-tbl td.dd-max{background:#f8514912;color:var(--red)}
           <button class="toggle-btn on" id="tog-trades" onclick="toggleSeries('trades')">Trades</button>
           <button class="toggle-btn on" id="tog-maxdd" onclick="toggleSeries('maxdd')">Max DD</button>
           <button class="toggle-btn on" id="tog-sigdd" onclick="toggleSeries('sigdd')">Drawdowns</button>
-          <span class="chart-hint">Scroll to zoom · Drag to pan · Double-click to reset</span>
+          <span class="chart-hint">Scroll to zoom · Drag to pan · Dbl-click to reset</span>
         </div>
       </div>
       <div class="section-body">
@@ -612,14 +611,7 @@ function buildEquityChart(d) {
           enabled: false,
           external: externalTooltip,
         },
-        zoom: {
-          pan: {enabled: true, mode: 'x'},
-          zoom: {
-            wheel: {enabled: true},
-            pinch: {enabled: true},
-            mode: 'x',
-          },
-        },
+        // zoom/pan handled manually below (wheel + mouse drag)
       },
       scales: {
         x: {
@@ -648,6 +640,13 @@ function buildEquityChart(d) {
         evt.native.target.style.cursor = elements.length ? 'pointer' : 'crosshair';
       },
       onClick: (evt, elements) => {
+        // Double-click: reset zoom/pan
+        if (evt.native && evt.native.detail === 2) {
+          equityChart.options.scales.x.min = undefined;
+          equityChart.options.scales.x.max = undefined;
+          equityChart.update();
+          return;
+        }
         const tradeEl = elements.find(e => e.datasetIndex === 2);
         if (tradeEl) {
           const trade = equityChart.data.datasets[2].data[tradeEl.index].trade;
@@ -661,6 +660,8 @@ function buildEquityChart(d) {
   // Draw max DD and significant DD as chart background annotations
   // (done via plugin to avoid needing the separate annotation plugin)
   addDrawdownAnnotations(d);
+  // Bind manual pan/zoom after chart is created
+  _bindEquityPanZoom();
 }
 
 function addDrawdownAnnotations(d) {
@@ -802,6 +803,66 @@ function openChart() {
   }
   hideTooltip();
 }
+
+// ── Manual pan & wheel-zoom for equity chart ──────────────────
+let _panActive = false, _panStartX = 0, _panOriginMin = null, _panOriginMax = null;
+
+function _equityCanvas() {
+  return document.getElementById('equity-chart');
+}
+
+function _equityPanStart(clientX) {
+  if (!equityChart) return;
+  _panActive  = true;
+  _panStartX  = clientX;
+  _panOriginMin = equityChart.options.scales.x.min ?? equityChart.scales.x.min;
+  _panOriginMax = equityChart.options.scales.x.max ?? equityChart.scales.x.max;
+}
+
+function _equityPanMove(clientX) {
+  if (!_panActive || !equityChart) return;
+  const chartArea = equityChart.chartArea;
+  if (!chartArea) return;
+  const range    = _panOriginMax - _panOriginMin;
+  const pxRange  = chartArea.right - chartArea.left;
+  if (!pxRange) return;
+  const offset   = ((clientX - _panStartX) / pxRange) * range;
+  equityChart.options.scales.x.min = _panOriginMin - offset;
+  equityChart.options.scales.x.max = _panOriginMax - offset;
+  equityChart.update('none');
+}
+
+function _equityPanEnd() { _panActive = false; }
+
+function _equityWheel(e) {
+  if (!equityChart) return;
+  e.preventDefault();
+  const xScale = equityChart.scales.x;
+  const curMin = xScale.min, curMax = xScale.max;
+  const range  = curMax - curMin;
+  const factor = e.deltaY < 0 ? 0.85 : 1.15;
+  // Zoom toward mouse position
+  const chartArea = equityChart.chartArea;
+  const rect = equityChart.canvas.getBoundingClientRect();
+  const relX = (e.clientX - rect.left - chartArea.left) / (chartArea.right - chartArea.left);
+  const centre = curMin + relX * range;
+  const newRange = range * factor;
+  equityChart.options.scales.x.min = centre - relX * newRange;
+  equityChart.options.scales.x.max = centre + (1 - relX) * newRange;
+  equityChart.update('none');
+}
+
+function _bindEquityPanZoom() {
+  const canvas = _equityCanvas();
+  if (!canvas) return;
+  canvas.addEventListener('mousedown', e => {
+    if (e.button === 0) { _equityPanStart(e.clientX); }
+  });
+  canvas.addEventListener('wheel', _equityWheel, {passive: false});
+}
+
+document.addEventListener('mousemove', e => { if (_panActive) _equityPanMove(e.clientX); });
+document.addEventListener('mouseup',   () => _equityPanEnd());
 
 // ── Series visibility toggles ──────────────────────────────────
 function toggleSeries(key) {
