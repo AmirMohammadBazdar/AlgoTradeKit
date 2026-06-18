@@ -284,12 +284,10 @@ add_ichimoku(chart, Ichimoku(df["high"], df["low"], df["close"]),
 ### Drawings
 
 ```python
-from AlgoTradeKit.visual import HorizontalLine, TrendLine, Box, Signal
-
-chart.add_drawing(HorizontalLine(price=42_000, label="Support"))
-chart.add_drawing(Box(time1=1700000000, price1=41_000,
-                      time2=1700007200, price2=43_000, opacity=0.1))
-chart.add_drawing(Signal(time=1700000000, side="buy"))
+chart.add_hline(price=42_000, label="Support")
+chart.add_box(time1=1700000000, price1=41_000,
+              time2=1700007200, price2=43_000, opacity=0.1)
+chart.add_signal(time=1700000000, side="buy")
 ```
 
 ### Position Boxes (v0.7.0)
