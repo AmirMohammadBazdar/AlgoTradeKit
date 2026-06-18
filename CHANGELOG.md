@@ -7,6 +7,70 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.7.1] — 2026-06-18
+
+### Fixed
+
+#### `visual` module
+- **Canvas clipping** — drawings (h-lines, trend lines, boxes, signals,
+  Ichimoku cloud, position boxes) no longer bleed over the right price axis,
+  the bottom time axis, or adjacent sub-chart pane areas when the chart is
+  panned or zoomed.  A `getDrawingClipRect()` helper measures the actual axis
+  widths from the LWC DOM at render time and applies a canvas `clip()` in
+  both `redrawAll()` and `redrawGhost()`.
+- **`navigate_to_candle` timing** — the chart now replies the last `init` and
+  last `navigate_to_candle` message to every newly-connecting browser tab.
+  Clicking "Open on Candle Chart" in the report now reliably scrolls the
+  chart to the position entry candle even when the chart tab was opened
+  after the navigate command was sent.
+- **`chart_port` not set** — `Simulate._build_simulation_chart()` returned
+  `(chart, chart)` instead of `(chart, chart._server)` because `Chart.show()`
+  returns `self`.  The returned server object is now `chart._server`, so
+  `report_data.chart_port` is set correctly and the "Open on Candle Chart"
+  button in the report opens/focuses the right URL.
+
+#### `report` module
+- **Equity balance chart panning** — replaced `chartjs-plugin-zoom` (which
+  failed to register mouse-drag pan events reliably with Chart.js 4.x) with a
+  direct `mousedown` / `mousemove` / `mouseup` listener.  Holding left-click
+  and dragging now pans the balance chart left/right.  Wheel scroll still
+  zooms.  Double-click still resets to full range.
+
+#### `simulate` module
+- (no functional changes; only the `_build_simulation_chart` fix above)
+
+### Changed
+
+#### `visual` module
+- **Position box: resizable** — `position_box` drawings that are not locked
+  now render five resize handles:
+  - **Left / Right edge** (blue) — drag to change `open_time` / `close_time`
+  - **Entry line** (white) — drag to shift `entry_price` (TP and SL move with it)
+  - **TP line** (green/red) — drag to change `take_profit` / `visual_tp`
+  - **SL line** (red/green) — drag to change `stop_loss`
+  Moving the box interior moves the entire position.  The R:R label updates
+  live as you resize.
+- **Position box: toolbar shape** — a new `posbox` toolbar button (⬜ icon)
+  lets users draw position boxes interactively:
+  - Click once to set `entry_price` and `open_time`
+  - Click a second time to set the TP price and `close_time`
+  - Direction (long/short) is inferred from whether the TP is above or below entry
+  - SL is placed at 1R below/above entry automatically and can be dragged afterwards
+  - User-created boxes are **unlocked** by default; server-created (simulation)
+    boxes remain locked as before
+- **Position box context menu** — right-click works on position boxes just
+  like on other drawings (lock/unlock, rename label, change color, delete).
+
+### Fixed (documentation)
+
+- **README drawings examples** — corrected three code snippets that called
+  the removed `chart.add_drawing()` method:
+  - `chart.add_drawing(HorizontalLine(...))` → `chart.add_hline(...)`
+  - `chart.add_drawing(Box(...))` → `chart.add_box(...)`
+  - `chart.add_drawing(Signal(...))` → `chart.add_signal(...)`
+
+---
+
 ## [0.7.0] — 2026-06-17
 
 ### Added
