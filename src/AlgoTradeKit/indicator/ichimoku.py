@@ -172,6 +172,12 @@ class Ichimoku(_BaseIndicator):
         self.result["chikou"] = chikou
         self.result["cloud_future_a"] = future_a
         self.result["cloud_future_b"] = future_b
+        # Raw (unshifted) Senkou values — useful for strategy logic.
+        # These are the "current-bar" cloud values before the displacement
+        # shift is applied.  senkou_a[i] = (tenkan[i] + kijun[i]) / 2 and
+        # senkou_b[i] = donchian_mid(high, low, senkou_b_period)[i].
+        self.result["span_a_raw"] = span_a_raw
+        self.result["span_b_raw"] = span_b_raw
 
     # ------------------------------------------------------------------
     # Convenience accessors
@@ -196,6 +202,32 @@ class Ichimoku(_BaseIndicator):
     @property
     def chikou(self) -> pd.Series:
         return self.result["chikou"]
+
+    @property
+    def span_a_raw(self) -> pd.Series:
+        """
+        Unshifted Senkou Span A at the **current** bar index.
+
+        Computed as ``(tenkan + kijun) / 2`` without the forward displacement.
+        This is the "live" cloud value at each candle — useful in strategy
+        entry/exit conditions where you need to know where the cloud *is now*
+        rather than where it will appear on the chart 26 bars later.
+
+        Equivalent to ``senkou_span_a_shifted`` in some legacy implementations.
+        """
+        return self.result["span_a_raw"]
+
+    @property
+    def span_b_raw(self) -> pd.Series:
+        """
+        Unshifted Senkou Span B at the **current** bar index.
+
+        Computed as ``(highest_high + lowest_low) / 2`` over ``senkou_b_period``
+        bars without the forward displacement.
+
+        Equivalent to ``senkou_span_b_shifted`` in some legacy implementations.
+        """
+        return self.result["span_b_raw"]
 
     def cloud_df(self) -> pd.DataFrame:
         """
