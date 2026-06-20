@@ -7,6 +7,58 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.7.2] — 2026-06-20
+
+### Added
+
+#### `data` module
+- **`Normalizer`** — new class to ingest non-standard OHLCV CSV files and
+  convert them to the AlgoTradeKit standard format.  Features:
+  - Auto-detects whether timestamps are in **Unix seconds** (`< 10^10`) or
+    **milliseconds** (`≥ 10^10`) and converts to ms automatically.
+  - Fills missing optional columns (`close_time`, `quote_volume`, `trades`,
+    `taker_buy_base`, `taker_buy_quote`) with `None`; `volume` defaults to `0`.
+  - Date-range filtering via `start` / `end` attributes before returning data
+    (integers are also auto-detected as seconds or ms).
+  - Three usage modes: `normalize()` → DataFrame, `save()` → CSV path,
+    `normalize_and_save()` → `(DataFrame, path)`.
+  - `Normalizer` is now exported from `AlgoTradeKit.data`.
+
+#### `indicator` module
+- **`ATR`** — Average True Range using Wilder's RMA smoothing (`alpha = 1 / period`,
+  `min_periods = period`).  Matches TradingView `ta.atr()` output.
+  Exposes `atr` and `tr` properties and result-dict keys.
+  Default period: **14**.  Exported from `AlgoTradeKit.indicator`.
+- **`Ichimoku.span_a_raw`** and **`Ichimoku.span_b_raw`** — two new properties
+  (and `result` dict keys) exposing the **unshifted** Senkou Span A and B values
+  at each bar (i.e. `(tenkan + kijun) / 2` and the Span B donchian mid *before*
+  the displacement shift is applied).  These are required for strategy entry/exit
+  logic where the current cloud position matters, not the displayed future cloud.
+  Fully backward-compatible — no existing keys or properties were changed.
+
+#### `visual` module
+- **`Chart.set_data(candle_range=...)`** — new optional `candle_range` dict
+  parameter filters which candles are rendered.  Five modes:
+  - `{"start": ..., "end": ...}` — inclusive datetime range (either key optional)
+  - `{"start": ...}` — from date to the last available candle
+  - `{"end": ...}` — from the first candle to date
+  - `{"last_n": N}` — last N candles
+  - `{"first_n": N}` — first N candles
+
+  `start` / `end` accept `"YYYY/MM/DD"`, `"YYYY-MM-DD"` strings, `datetime`
+  objects, Unix-second `int`, or Unix-millisecond `int`.
+- **`Chart.from_csv(candle_range=...)`** — `candle_range` forwarded from the
+  factory class method.
+
+### Tests
+- `tests/test_data_normalizer.py` — 25+ unit tests for `Normalizer` covering
+  timestamp detection, date filtering, schema completeness, save/load round-trip,
+  and error paths.
+- `tests/test_indicator.py` — extended with `TestATR` (15 tests) and
+  `TestIchimokuRawSpans` (10 tests) for the new indicator features.
+
+---
+
 ## [0.7.1] — 2026-06-18
 
 ### Fixed

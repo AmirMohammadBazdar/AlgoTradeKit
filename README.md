@@ -69,6 +69,31 @@ import pandas as pd
 data = {"1h": pd.read_csv("data/binance-futures_BTCUSDT_1h.csv")}
 ```
 
+**Normalizing non-standard CSVs** *(v0.7.2)*
+
+Broker / MT5 exports often use Unix-second timestamps and omit optional columns.
+`Normalizer` converts any OHLCV CSV to the library standard automatically:
+
+```python
+from AlgoTradeKit.data import Normalizer
+
+# Accepts: timestamp in seconds OR milliseconds (auto-detected)
+# Required columns: timestamp, open, high, low, close
+# Optional: volume (defaults to 0 if absent)
+norm = Normalizer("USDJPY_1m.csv")
+norm.start = "2022/01/01"   # optional date filter
+norm.end   = "2024/01/01"
+
+# Return as DataFrame (no file written)
+df = norm.normalize()
+
+# Save as library-standard CSV
+path = norm.save(destination="data/")
+
+# One-liner: normalize + save
+df, path = Normalizer("USDJPY_1m.csv").normalize_and_save(destination="data/")
+```
+
 ---
 
 ## indicator — Technical Indicators
@@ -76,20 +101,41 @@ data = {"1h": pd.read_csv("data/binance-futures_BTCUSDT_1h.csv")}
 All indicators are **built from scratch** — no third-party TA wrappers.
 
 ```python
-from AlgoTradeKit.indicator import RSI, MACD, EMA, SMA, BollingerBands, ATR, Ichimoku
+from AlgoTradeKit.indicator import ATR, RSI, MACD, EMA, SMA, Ichimoku
 
 close = df["close"]   # pd.Series
 
-rsi  = RSI(close, length=14)           # rsi.value
+rsi  = RSI(close, length=14)           # rsi.rsi
 macd = MACD(close, fast=12, slow=26, signal=9)
-                                        # macd.macd_line, .signal_line, .histogram
-ema  = EMA(close, length=20)           # ema.value
-sma  = SMA(close, length=50)           # sma.value
-bb   = BollingerBands(close, length=20, std=2.0)
-                                        # bb.upper, .middle, .lower
-atr  = ATR(df["high"], df["low"], close, length=14)  # atr.value
+                                        # macd.macd, .signal, .histogram
+ema  = EMA(close, length=20)           # ema.ema
+sma  = SMA(close, length=50)           # sma.sma
+atr  = ATR(df["high"], df["low"], close, period=14)  # atr.atr, atr.tr
 ichi = Ichimoku(df["high"], df["low"], close)
-                                        # ichi.tenkan/kijun/senkou_a/senkou_b/chikou
+                                        # ichi.tenkan / kijun / senkou_a / senkou_b
+                                        # ichi.chikou / cloud_future_a / cloud_future_b
+                                        # ichi.span_a_raw / span_b_raw  ← v0.7.2
+```
+
+**`ATR` — Average True Range** *(v0.7.2)*
+
+Wilder's smoothing (RMA, `alpha = 1/period`). Matches TradingView `ta.atr()`.
+
+```python
+atr = ATR(df["high"], df["low"], df["close"], period=14)
+df["atr"] = atr.atr.values   # Wilder-smoothed ATR
+df["tr"]  = atr.tr.values    # raw True Range
+```
+
+**`Ichimoku.span_a_raw` / `.span_b_raw`** *(v0.7.2)*
+
+Unshifted Senkou Span A and B (at the current bar, before the displacement shift
+is applied). Useful in strategy logic where you need the live cloud value:
+
+```python
+ichi = Ichimoku(high, low, close, displacement=26)
+# ichi.senkou_a   = span_a_raw.shift(26)  — displayed cloud (forward-shifted)
+# ichi.span_a_raw = (tenkan + kijun) / 2  — current bar value (unshifted)
 ```
 
 ---
@@ -266,6 +312,31 @@ from AlgoTradeKit.visual import Chart
 
 chart = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv")
 chart.show(block=True)
+```
+
+**Candle range filter** *(v0.7.2)*
+
+Restrict which candles are visible without modifying the source data:
+
+```python
+# Show a specific datetime range
+chart = Chart.from_csv("data/btc_1h.csv",
+    candle_range={"start": "2024/01/01", "end": "2024/06/01"})
+
+# From a date to the last candle
+chart = Chart.from_csv("data/btc_1h.csv",
+    candle_range={"start": "2024/06/01"})
+
+# From the first candle to a date
+chart = Chart.from_csv("data/btc_1h.csv",
+    candle_range={"end": "2024/01/01"})
+
+# Last / first N candles
+chart = Chart.from_csv("data/btc_1h.csv", candle_range={"last_n": 500})
+chart = Chart.from_csv("data/btc_1h.csv", candle_range={"first_n": 200})
+
+# Also available on set_data()
+chart.set_data(df, candle_range={"start": "2023/01/01", "end": "2024/01/01"})
 ```
 
 ### Add Indicators
