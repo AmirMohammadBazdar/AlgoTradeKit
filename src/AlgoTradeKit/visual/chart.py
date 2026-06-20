@@ -107,6 +107,7 @@ class Chart:
         theme:         Literal["dark", "light"] = "dark",
         port:          int  = 0,
         volume_in_main: bool = True,
+        candle_range:  "dict | None" = None,
     ) -> "Chart":
         """
         Create a Chart pre-loaded with data from an AlgoTradeKit CSV file.
@@ -120,6 +121,18 @@ class Chart:
             Path to the CSV file.
         title : str
             Chart window title.  Defaults to the filename.
+        candle_range : dict | None
+            Restrict which candles are shown.  Accepted dict shapes:
+
+            * ``{"start": ..., "end": ...}``  — datetime range (both optional)
+            * ``{"start": ...}``              — from date to last candle
+            * ``{"end": ...}``                — from first candle to date
+            * ``{"last_n": 500}``             — last 500 candles
+            * ``{"first_n": 500}``            — first 500 candles
+
+            ``start`` / ``end`` values accept the same formats as
+            ``Collector.starttime``: ``"YYYY/MM/DD"``, ``"YYYY-MM-DD"``,
+            ``datetime``, Unix-seconds ``int``, or Unix-milliseconds ``int``.
 
         Example
         -------
@@ -128,6 +141,15 @@ class Chart:
             # Load a Collector CSV directly — no extra code needed
             c = Chart.from_csv("data/binance-futures_BTCUSDT_1d.csv")
             c.show(block=True)
+
+            # Show only the last 200 candles
+            c = Chart.from_csv("data/btc_1h.csv", candle_range={"last_n": 200})
+
+            # Show a specific date range
+            c = Chart.from_csv(
+                "data/btc_1h.csv",
+                candle_range={"start": "2024/01/01", "end": "2024/06/01"},
+            )
         """
         import os
         df = pd.read_csv(path)
@@ -137,7 +159,7 @@ class Chart:
             title=title, chart_type=chart_type,
             theme=theme, port=port, volume_in_main=volume_in_main,
         )
-        chart.set_data(df)
+        chart.set_data(df, candle_range=candle_range)
         return chart
 
     # -----------------------------------------------------------------------
@@ -148,6 +170,7 @@ class Chart:
         self,
         df:         pd.DataFrame,
         chart_type: Optional[str] = None,
+        candle_range: "dict | None" = None,
     ) -> "Chart":
         """
         Load OHLCV data from a pandas DataFrame.
@@ -167,6 +190,17 @@ class Chart:
             OHLCV data.  May also have a ``DatetimeIndex``.
         chart_type : str | None
             Override the chart type for this data load.
+        candle_range : dict | None
+            Restrict which candles are shown.  Accepted dict shapes:
+
+            * ``{"start": ..., "end": ...}``  — datetime range (both optional)
+            * ``{"start": ...}``              — from date to last candle
+            * ``{"end": ...}``                — from first candle to date
+            * ``{"last_n": 500}``             — last 500 candles
+            * ``{"first_n": 500}``            — first 500 candles
+
+            ``start`` / ``end`` accept: ``"YYYY/MM/DD"``, ``"YYYY-MM-DD"``,
+            ``datetime``, Unix-seconds ``int``, or Unix-milliseconds ``int``.
         """
         df = df.copy()
         df.columns = [c.lower() for c in df.columns]
@@ -219,6 +253,13 @@ class Chart:
         if missing:
             raise ValueError(f"DataFrame missing required columns: {missing}")
 
+        # ── Candle range filter (v0.7.2) ──────────────────────────────────
+        # Applied *after* time is in Unix seconds so start/end comparisons
+        # work uniformly regardless of the original timestamp format.
+        if candle_range is not None:
+            df = self._apply_candle_range(df, candle_range)
+        # ─────────────────────────────────────────────────────────────────
+
         self._bars = [
             {
                 "time":   int(row["time"]),
@@ -235,6 +276,101 @@ class Chart:
             self._send_init()
 
         return self
+
+    # -----------------------------------------------------------------------
+    # Candle range filter (v0.7.2)
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _apply_candle_range(df: pd.DataFrame, candle_range: dict) -> pd.DataFrame:
+        """
+        Filter *df* (which has a ``time`` column in Unix **seconds**) according
+        to *candle_range*.
+
+        Accepted shapes
+        ---------------
+        ``{"start": ..., "end": ...}``   — keep rows in [start, end] (both optional)
+        ``{"start": ...}``               — from date to last candle
+        ``{"end": ...}``                 — from first candle to date
+        ``{"last_n": int}``              — last N candles
+        ``{"first_n": int}``             — first N candles
+        """
+        if not isinstance(candle_range, dict) or not candle_range:
+            return df
+
+        df = df.copy()
+
+        # ── last_n / first_n ──────────────────────────────────────────────
+        if "last_n" in candle_range:
+            n = int(candle_range["last_n"])
+            return df.iloc[-n:].reset_index(drop=True)
+
+        if "first_n" in candle_range:
+            n = int(candle_range["first_n"])
+            return df.iloc[:n].reset_index(drop=True)
+
+        # ── datetime range (start / end) ──────────────────────────────────
+        start_val = candle_range.get("start")
+        end_val   = candle_range.get("end")
+
+        if start_val is not None:
+            start_s = Chart._parse_range_time(start_val)
+            df = df[df["time"] >= start_s]
+
+        if end_val is not None:
+            end_s = Chart._parse_range_time(end_val)
+            df = df[df["time"] <= end_s]
+
+        return df.reset_index(drop=True)
+
+    @staticmethod
+    def _parse_range_time(value) -> int:
+        """
+        Convert a ``candle_range`` start/end value to Unix **seconds**.
+
+        Accepts
+        -------
+        * ``str``      — ``"YYYY/MM/DD"``, ``"YYYY-MM-DD"``,
+                         ``"YYYY/MM/DD HH:MM"``, ``"YYYY-MM-DD HH:MM:SS"``
+        * ``datetime`` — timezone-aware or naive (assumed UTC)
+        * ``int``      — already in seconds if < 10^10; in ms if >= 10^10
+        * ``float``    — treated as seconds
+        """
+        from datetime import datetime, timezone as _tz
+
+        _PARSE_FMTS = [
+            "%Y/%m/%d", "%Y-%m-%d",
+            "%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M",
+            "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+        ]
+        _MS_THRESHOLD = 10_000_000_000
+
+        if isinstance(value, (int, float)):
+            v = int(value)
+            # If the value looks like milliseconds, convert to seconds
+            return v // 1000 if v >= _MS_THRESHOLD else v
+
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=_tz.utc)
+            return int(value.timestamp())
+
+        if isinstance(value, str):
+            for fmt in _PARSE_FMTS:
+                try:
+                    dt = datetime.strptime(value.strip(), fmt)
+                    return int(dt.replace(tzinfo=_tz.utc).timestamp())
+                except ValueError:
+                    continue
+            raise ValueError(
+                f"Cannot parse candle_range datetime string '{value}'. "
+                "Use YYYY/MM/DD or YYYY-MM-DD (optionally with HH:MM or HH:MM:SS)."
+            )
+
+        raise TypeError(
+            f"candle_range start/end must be str, datetime, int, or float; "
+            f"got {type(value).__name__}."
+        )
 
     @staticmethod
     def _to_heikinashi(df: pd.DataFrame) -> pd.DataFrame:

@@ -7,7 +7,8 @@ Tests cover:
 - MA family: SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, VWAP
 - RSI
 - MACD
-- Ichimoku
+- ATR (v0.7.2)
+- Ichimoku (including raw span_a / span_b — v0.7.2)
 """
 
 import math
@@ -15,7 +16,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from AlgoTradeKit.indicator import RSI, MACD, SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, VWAP, Ichimoku
+from AlgoTradeKit.indicator import ATR, RSI, MACD, SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, VWAP, Ichimoku
 from AlgoTradeKit.indicator._base import (
     _to_series,
     _sma_series,
@@ -749,14 +750,234 @@ class TestIntegration:
         rsi = RSI(close, 14)
         macd = MACD(close)
         ichi = Ichimoku(high, low, close)
+        atr = ATR(high, low, close)
 
         for ind, key in [
             (sma, "sma"), (ema, "ema"), (wma, "wma"), (vwma, "vwma"),
             (smma, "smma"), (dema, "dema"), (tema, "tema"), (hma, "hma"),
             (vwap, "vwap"), (rsi, "rsi"), (macd, "macd"), (ichi, "tenkan"),
+            (atr, "atr"),
         ]:
             assert key in ind.result, f"Missing key '{key}' in {ind._NAME}"
 
     def test_indicator_repr(self):
         sma = SMA(_synthetic_close(20), 5)
         assert "SMA" in repr(sma)
+
+
+# ===========================================================================
+# ATR (v0.7.2)
+# ===========================================================================
+
+class TestATR:
+    """Tests for the Average True Range indicator."""
+
+    def test_output_keys_present(self):
+        df = _synthetic_ohlcv(100)
+        atr = ATR(df["high"], df["low"], df["close"])
+        assert "atr" in atr.result
+        assert "tr" in atr.result
+
+    def test_output_length_matches_input(self):
+        df = _synthetic_ohlcv(200)
+        atr = ATR(df["high"], df["low"], df["close"], period=14)
+        assert len(atr.atr) == 200
+        assert len(atr.tr) == 200
+
+    def test_properties_same_as_result(self):
+        df = _synthetic_ohlcv(100)
+        atr = ATR(df["high"], df["low"], df["close"])
+        pd.testing.assert_series_equal(atr.atr, atr.result["atr"])
+        pd.testing.assert_series_equal(atr.tr, atr.result["tr"])
+
+    def test_atr_is_positive(self):
+        df = _synthetic_ohlcv(150)
+        atr = ATR(df["high"], df["low"], df["close"])
+        valid = atr.atr.dropna()
+        assert (valid > 0).all(), "ATR must be strictly positive"
+
+    def test_tr_first_value_is_nan(self):
+        """TR at index 0 equals (high - low) — no previous close is available
+        so only the H-L component is meaningful, but the library returns it
+        as a valid number rather than NaN (same behaviour as TradingView's
+        ta.tr() with handle_na=true)."""
+        df = _synthetic_ohlcv(50)
+        atr = ATR(df["high"], df["low"], df["close"])
+        # TR[0] = H[0] - L[0]  (never NaN)
+        expected_tr0 = float(df["high"].iloc[0] - df["low"].iloc[0])
+        assert not pd.isna(atr.tr.iloc[0])
+        assert atr.tr.iloc[0] == pytest.approx(expected_tr0)
+
+    def test_atr_first_period_minus_one_nan(self):
+        """First (period - 1) ATR values are NaN (RMA warm-up with min_periods).
+        ATR at index (period - 1) is the first valid value."""
+        period = 14
+        df = _synthetic_ohlcv(100)
+        atr = ATR(df["high"], df["low"], df["close"], period=period)
+        # indices 0 .. period-2 must be NaN
+        for i in range(period - 1):
+            assert pd.isna(atr.atr.iloc[i]), f"Expected NaN at index {i}"
+        # index period-1 must be valid (first valid ATR)
+        assert not pd.isna(atr.atr.iloc[period - 1])
+
+    def test_atr_custom_period(self):
+        df = _synthetic_ohlcv(200)
+        atr7  = ATR(df["high"], df["low"], df["close"], period=7)
+        atr21 = ATR(df["high"], df["low"], df["close"], period=21)
+        # Both should have results — just different warm-up lengths
+        assert atr7.atr.notna().sum() > atr21.atr.notna().sum()
+
+    def test_tr_formula_spot_check(self):
+        """
+        Manually verify TR = max(H-L, |H-Cprev|, |L-Cprev|) at index 1.
+        """
+        highs  = [10.0, 12.0, 15.0] + [15.0] * 30
+        lows   = [8.0,  9.0,  11.0] + [11.0] * 30
+        closes = [9.0,  11.0, 14.0] + [14.0] * 30
+
+        atr = ATR(highs, lows, closes, period=3)
+        # Index 1: H=12, L=9, C_prev=9 → max(3, 3, 0) = 3
+        expected_tr1 = max(12.0 - 9.0, abs(12.0 - 9.0), abs(9.0 - 9.0))
+        assert atr.tr.iloc[1] == pytest.approx(expected_tr1)
+
+    def test_list_input_works(self):
+        n = 50
+        highs  = [float(i + 1) for i in range(n)]
+        lows   = [float(i)     for i in range(n)]
+        closes = [float(i) + 0.5 for i in range(n)]
+        atr = ATR(highs, lows, closes, period=10)
+        assert len(atr.atr) == n
+
+    def test_too_short_raises(self):
+        with pytest.raises(ValueError, match="ATR"):
+            ATR([1.0] * 5, [1.0] * 5, [1.0] * 5, period=14)
+
+    def test_length_mismatch_high_raises(self):
+        with pytest.raises(ValueError, match="high"):
+            ATR([1.0] * 50, [1.0] * 100, [1.0] * 100, period=14)
+
+    def test_length_mismatch_low_raises(self):
+        with pytest.raises(ValueError, match="low"):
+            ATR([1.0] * 100, [1.0] * 50, [1.0] * 100, period=14)
+
+    def test_atr_smoothing_wilder(self):
+        """
+        ATR must use Wilder's RMA (alpha = 1/period), not EMA (alpha = 2/(n+1)).
+        We verify by checking that the first valid ATR value equals the simple
+        average of the first `period` TR values (Wilder initialisation).
+
+        With flat H=11, L=9, C=10: TR = H-L = 2.0 for all bars.
+        First valid ATR = mean(TR[0..period-1]) = 2.0.
+        """
+        period = 5
+        highs  = [11.0] * (period + 10)
+        lows   = [9.0]  * (period + 10)
+        closes = [10.0] * (period + 10)
+        atr = ATR(highs, lows, closes, period=period)
+        first_valid_idx = atr.atr.first_valid_index()
+        # All TR = 2.0, so ATR = 2.0 at every valid bar
+        assert atr.atr[first_valid_idx] == pytest.approx(2.0, abs=1e-6)
+
+
+# ===========================================================================
+# Ichimoku raw Senkou Span A / B (v0.7.2)
+# ===========================================================================
+
+class TestIchimokuRawSpans:
+    """Tests for the new span_a_raw / span_b_raw properties."""
+
+    def _make_ichi(self, n: int = 200) -> "Ichimoku":
+        df = _synthetic_ohlcv(n)
+        return Ichimoku(df["high"], df["low"], df["close"])
+
+    def test_span_a_raw_key_in_result(self):
+        ichi = self._make_ichi()
+        assert "span_a_raw" in ichi.result
+
+    def test_span_b_raw_key_in_result(self):
+        ichi = self._make_ichi()
+        assert "span_b_raw" in ichi.result
+
+    def test_property_span_a_raw(self):
+        ichi = self._make_ichi()
+        pd.testing.assert_series_equal(ichi.span_a_raw, ichi.result["span_a_raw"])
+
+    def test_property_span_b_raw(self):
+        ichi = self._make_ichi()
+        pd.testing.assert_series_equal(ichi.span_b_raw, ichi.result["span_b_raw"])
+
+    def test_span_a_raw_length_matches_input(self):
+        n = 300
+        df = _synthetic_ohlcv(n)
+        ichi = Ichimoku(df["high"], df["low"], df["close"])
+        assert len(ichi.span_a_raw) == n
+
+    def test_span_b_raw_length_matches_input(self):
+        n = 300
+        df = _synthetic_ohlcv(n)
+        ichi = Ichimoku(df["high"], df["low"], df["close"])
+        assert len(ichi.span_b_raw) == n
+
+    def test_span_a_raw_is_avg_of_tenkan_and_kijun(self):
+        """span_a_raw must equal (tenkan + kijun) / 2 at every valid row."""
+        df = _synthetic_ohlcv(300)
+        ichi = Ichimoku(df["high"], df["low"], df["close"])
+        expected = (ichi.tenkan + ichi.kijun) / 2.0
+        # Compare only where both are non-NaN
+        mask = expected.notna() & ichi.span_a_raw.notna()
+        pd.testing.assert_series_equal(
+            ichi.span_a_raw[mask].reset_index(drop=True),
+            expected[mask].reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_span_a_raw_vs_senkou_a_shifted_by_displacement(self):
+        """
+        senkou_a (the displayed cloud line) must equal span_a_raw shifted
+        forward by `displacement` bars.
+        """
+        df = _synthetic_ohlcv(300)
+        disp = 26
+        ichi = Ichimoku(df["high"], df["low"], df["close"],
+                        displacement=disp)
+        shifted = ichi.span_a_raw.shift(disp)
+        mask = shifted.notna() & ichi.senkou_a.notna()
+        pd.testing.assert_series_equal(
+            ichi.senkou_a[mask].reset_index(drop=True),
+            shifted[mask].reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_span_b_raw_vs_senkou_b_shifted_by_displacement(self):
+        """senkou_b must equal span_b_raw shifted forward by displacement."""
+        df = _synthetic_ohlcv(300)
+        disp = 26
+        ichi = Ichimoku(df["high"], df["low"], df["close"],
+                        displacement=disp)
+        shifted = ichi.span_b_raw.shift(disp)
+        mask = shifted.notna() & ichi.senkou_b.notna()
+        pd.testing.assert_series_equal(
+            ichi.senkou_b[mask].reset_index(drop=True),
+            shifted[mask].reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_raw_span_a_not_same_as_senkou_a(self):
+        """span_a_raw is NOT the same series as senkou_a (one is shifted)."""
+        df = _synthetic_ohlcv(300)
+        ichi = Ichimoku(df["high"], df["low"], df["close"])
+        # They should differ (displacement > 0)
+        diff = (ichi.span_a_raw - ichi.senkou_a).dropna()
+        # At least some values should be different
+        assert not (diff == 0).all()
+
+    def test_custom_displacement_respected(self):
+        df = _synthetic_ohlcv(300)
+        ichi = Ichimoku(df["high"], df["low"], df["close"], displacement=13)
+        shifted = ichi.span_a_raw.shift(13)
+        mask = shifted.notna() & ichi.senkou_a.notna()
+        pd.testing.assert_series_equal(
+            ichi.senkou_a[mask].reset_index(drop=True),
+            shifted[mask].reset_index(drop=True),
+            check_names=False,
+        )
