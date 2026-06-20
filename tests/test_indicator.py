@@ -854,11 +854,11 @@ class TestATR:
 
     def test_length_mismatch_high_raises(self):
         with pytest.raises(ValueError, match="high"):
-            ATR([1.0] * 100, [1.0] * 50, [1.0] * 100, period=14)
+            ATR([1.0] * 50, [1.0] * 100, [1.0] * 100, period=14)
 
     def test_length_mismatch_low_raises(self):
         with pytest.raises(ValueError, match="low"):
-            ATR([1.0] * 100, [1.0] * 100, [1.0] * 50, period=14)
+            ATR([1.0] * 100, [1.0] * 50, [1.0] * 100, period=14)
 
     def test_atr_smoothing_wilder(self):
         """
