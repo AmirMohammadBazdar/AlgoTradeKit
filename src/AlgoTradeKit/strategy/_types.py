@@ -75,6 +75,25 @@ class Signal:
     metadata : dict
         Any extra data the strategy wants to attach (indicator values,
         sub-mode names, risk-reward ratio, etc.).
+    risk_multiplier : float
+        Scales the position size/risk that ``simulate.SimulateConfig``
+        would otherwise apply to this *specific* signal, relative to the
+        run's global sizing settings.  Default ``1.0`` = normal sizing
+        (fully backward compatible — existing strategies are unaffected).
+
+        Use this when a strategy needs to vary risk per signal instead of
+        using one fixed ``risk_per_trade``/``fixed_amount``/``fixed_lot``
+        for every trade in the run.  Common cases:
+
+        * **Scaling in to one trade idea** — return several ``Signal``s for
+          the same setup, each with ``risk_multiplier = 1/N`` (e.g. three
+          signals at ``1/3`` targeting 1R/2R/3R) so the pieces' risk sums to
+          one full unit instead of N full units.
+        * **Context-dependent risk** — e.g. half size on a lower-confidence
+          "limit" entry (``risk_multiplier=0.5``) vs. full size on a
+          confirmed entry (``risk_multiplier=1.0``), within the same backtest.
+
+        Must be ``> 0``.  Added in v0.7.3.
     """
 
     direction: str          # "long" | "short"
@@ -85,6 +104,7 @@ class Signal:
     candle_index: int
     timeframe: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    risk_multiplier: float = 1.0
 
     def __post_init__(self) -> None:
         if self.direction not in ("long", "short"):
@@ -93,6 +113,10 @@ class Signal:
             )
         if self.stop_loss == self.entry_price:
             raise ValueError("Signal.stop_loss must differ from entry_price.")
+        if self.risk_multiplier <= 0:
+            raise ValueError(
+                f"Signal.risk_multiplier must be > 0, got {self.risk_multiplier!r}."
+            )
 
     @property
     def is_long(self) -> bool:
