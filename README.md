@@ -252,11 +252,47 @@ report = Simulate(config).run(strategy_result)
 | `tp_mode` | `"signal"` | `"signal"/"fixed_rr"/"multi_rr"/"none"` |
 | `tp_rr` | 2.0 | R:R ratio for `fixed_rr` mode |
 | `tp_levels` | [1,2,3] | R levels for `multi_rr` mode |
+| `tp_level_close_fractions` | `None` | **v0.7.3** Fraction of original size to realise at each `tp_levels` entry (`multi_rr` only) — see below |
 | `sl_mode` | `"signal"` | `"signal"` or `"trailing"` |
 | `risk_free_enabled` | False | Move SL to break-even at `risk_free_at_rr` |
 | `show_chart` | **False** | **v0.7.0** Open candle chart after run |
 | `report_mode` | **`"none"`** | **v0.7.0** Post-run report rendering |
 | `report_save_path` | `"report.html"` | **v0.7.0** HTML save path |
+
+### Per-Signal Sizing & Partial Take-Profit (v0.7.3)
+
+`Signal.risk_multiplier` scales one signal's size relative to the run's
+sizing config — useful for varying risk by context, or for splitting one
+trade idea into several sub-positions whose sizes sum to one risk unit:
+
+```python
+# Three signals at the same candle, each risking 1/3 of a normal trade,
+# targeting 1R / 2R / 3R — equivalent to scaling out of one position.
+for i, tp_r in enumerate([1, 2, 3], start=1):
+    signals.append(Signal(
+        direction="long", entry_price=entry, stop_loss=sl,
+        take_profit=entry + tp_r * (entry - sl),
+        timestamp=ts, candle_index=idx, timeframe="1h",
+        risk_multiplier=1 / 3,
+    ))
+```
+
+`SimulateConfig.tp_level_close_fractions` turns `multi_rr` into a true
+scale-out — each level realises a real, partial close instead of only
+moving the SL:
+
+```python
+config = SimulateConfig(
+    ...,
+    tp_mode="multi_rr",
+    tp_levels=[1.0, 2.0, 3.0],
+    tp_level_close_fractions=[1 / 3, 1 / 3, 1 / 3],  # bank 1/3 at each level
+)
+```
+
+Set every fraction to `0.0` instead to get the opposite pattern — SL walks
+through every level but nothing closes until the position is eventually
+stopped out, letting winners run with a trailing stop and no fixed target.
 
 ### Batch Sweep
 
@@ -506,8 +542,19 @@ Two browser tabs open:
 |---|---|---|
 | `TP_MODE_SIGNAL` | `"signal"` | Use Signal's take_profit |
 | `TP_MODE_FIXED_RR` | `"fixed_rr"` | entry ± `tp_rr` × SL distance |
-| `TP_MODE_MULTI_RR` | `"multi_rr"` | Multiple levels, SL trails |
+| `TP_MODE_MULTI_RR` | `"multi_rr"` | Multiple levels, SL trails (and optionally partially closes — see `tp_level_close_fractions` *(v0.7.3)*) |
 | `TP_MODE_NONE` | `"none"` | No TP |
+
+### Close Reason Constants
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `CLOSE_REASON_SL` | `"sl"` | Stop loss hit |
+| `CLOSE_REASON_TP` | `"tp"` | Take profit hit — nothing left open afterwards |
+| `CLOSE_REASON_TP_PARTIAL` | `"tp_rr"` | **v0.7.3** Intermediate `multi_rr` level partially realised — position still open with reduced size |
+| `CLOSE_REASON_RF` | `"rf"` | Risk-free / trailed SL hit |
+| `CLOSE_REASON_FC` | `"force_close"` | Closed by an `ExitSignal` |
+| `CLOSE_REASON_EOD` | `"end_of_data"` | Still open when data ran out |
 
 ### SL Mode Constants
 

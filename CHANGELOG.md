@@ -7,6 +7,65 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.7.3] — 2026-06-21
+
+### Added
+
+#### `strategy` module
+- **`Signal.risk_multiplier`** — new optional field (default `1.0`) that scales
+  the size/risk a single signal receives relative to the run's global
+  `SimulateConfig` sizing (`risk_percent` / `fixed_amount` / `fixed_lot`).
+  Lets a strategy vary risk per signal instead of using one fixed sizing
+  rule for every trade in a backtest — e.g. half size on a tentative
+  "limit" entry vs. full size on a confirmed one, or splitting one trade
+  idea into several sub-positions whose sizes sum to one risk unit
+  (three signals at `1/3` each, targeting 1R/2R/3R, to emulate scaling out
+  of a position). Default `1.0` is fully backward compatible.
+
+#### `simulate` module
+- **`SimulateConfig.tp_level_close_fractions`** — optional list, parallel to
+  `tp_levels`, that turns on **true partial closes** for `tp_mode="multi_rr"`.
+  Each entry is the fraction of the position's *original* size to realise
+  when the corresponding level is reached, instead of only moving the SL.
+  `None` (default) preserves the exact pre-0.7.3 behaviour (SL-only
+  advancement, single full close at the final level). When set:
+  - fractions summing to `1.0` give a full progressive scale-out
+    (e.g. `[1/3, 1/3, 1/3]`) — profit is banked level by level instead of
+    all-or-nothing at the end.
+  - all-zero fractions give a "let it run" position: the SL just walks
+    through every level and the full size stays open, trailing at the
+    last level's price, until eventually stopped out.
+  - any mix is valid — partially bank some levels, let others purely
+    advance the SL.
+
+  Each partial close produces its own `ClosedTrade` sharing the position's
+  `trade_id`, so `SimulateReport` statistics (win rate, profit factor,
+  equity curve) count every realised slice on its own line, the same way
+  a real scaled-out position would appear on a broker statement.
+  Commission (pre-charged once, in full, at entry) is split proportionally
+  across every slice so the total charged across one position's full
+  lifetime never changes.
+- **`CLOSE_REASON_TP_PARTIAL`** is now exported from `AlgoTradeKit.simulate`.
+  It existed on `ClosedTrade` since an earlier release (with `is_tp`
+  already wired to recognise it) but no code path had ever produced it
+  until `tp_level_close_fractions` above.
+- `run_multi()` gained the identical partial-close handling as the
+  single-pair `Simulate` engine, so shared-wallet multi-symbol portfolios
+  behave the same way; `run_batch()` needed no changes (it only wraps
+  `Simulate(cfg).run()`).
+
+### Tests
+- `tests/test_strategy.py` — `TestSignal` extended with 5 tests for
+  `risk_multiplier` (default, custom value, `<= 0` validation, positional-
+  construction backward compatibility).
+- `tests/test_simulate.py` — new `TestEngineRiskMultiplier` (4 tests) and
+  `TestEngineMultiRRPartialClose` (8 tests, including a hand-derived PnL
+  ground truth and an end-to-end wallet-conservation check) and
+  `TestSimulateConfigPartialTPValidation` (8 tests). All 171 pre-existing
+  tests in these two files continue to pass unmodified.
+
+---
+
 ## [0.7.2] — 2026-06-20
 
 ### Added
