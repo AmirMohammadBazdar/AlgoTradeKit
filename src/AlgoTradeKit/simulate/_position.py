@@ -68,6 +68,12 @@ class _InternalPosition:
         Dollar amount that would be lost if initial SL is hit.
     size : float
         Position size: base-asset units for exchange, lots for MT5.
+        Shrinks over time if partial closes occur (multi-RR with
+        ``tp_level_close_fractions``); see ``original_size``.
+    original_size : float
+        ``size`` at the moment the position was opened — never changes.
+        Used to translate ``tp_level_close_fractions`` (fractions of the
+        *original* size) into absolute amounts at each partial close.
     open_time : int
         Candle open-time in UTC ms.
     open_commission : float
@@ -93,7 +99,7 @@ class _InternalPosition:
         "entry_price", "raw_entry_price",
         "stop_loss", "initial_stop_loss",
         "take_profit",
-        "margin_amount", "risk_amount", "size",
+        "margin_amount", "risk_amount", "size", "original_size",
         "open_time", "open_commission",
         "sl_distance", "pnl_per_price_unit",
         "peak_price",
@@ -134,6 +140,7 @@ class _InternalPosition:
         self.margin_amount = margin_amount
         self.risk_amount = risk_amount
         self.size = size
+        self.original_size = size
         self.open_time = open_time
         self.open_commission = open_commission
         self.sl_distance = abs(entry_price - stop_loss)
@@ -220,22 +227,32 @@ class ClosedTrade:
     take_profit : float | None
         TP target at time of entry (may be ``None``).
     size : float
-        Position size: base-asset units (exchange) or lots (MT5).
+        Size realised by **this** close event: base-asset units (exchange)
+        or lots (MT5).  Equal to the position's full size unless this is a
+        partial close (see ``close_reason`` /
+        ``SimulateConfig.tp_level_close_fractions``), in which case it is
+        the fraction of the original size closed at this specific level —
+        several ``ClosedTrade`` rows can share one ``trade_id`` when a
+        position is scaled out of in pieces.
     margin_amount : float
-        Capital that was locked as margin.
+        Capital that was locked as margin for **this** slice.
     risk_amount : float
-        Dollar amount that was at risk (based on initial SL).
+        Dollar amount that was at risk for **this** slice (based on initial SL).
     gross_pnl : float
         PnL before commission.
     commission : float
-        Total commission charged (entry + exit).
+        Commission charged for **this** slice (entry + exit, pre-allocated
+        at entry — see ``SimulateConfig.commission``).
     net_pnl : float
         ``gross_pnl - commission``.
     pnl_r : float
         PnL expressed in R-multiples (net_pnl / risk_amount).
     close_reason : str
         One of: ``"sl"``, ``"tp"``, ``"tp_rr"``, ``"rf"``,
-        ``"force_close"``, ``"end_of_data"``.
+        ``"force_close"``, ``"end_of_data"``.  ``"tp_rr"`` marks a partial
+        realisation at an intermediate multi-RR level (the position is
+        still open afterwards with reduced size); ``"tp"`` always means
+        nothing remains open after this event.
     rr_levels_hit : int
         Number of multi-RR TP levels hit before close (0 for non-multi-RR).
     max_favourable_excursion : float

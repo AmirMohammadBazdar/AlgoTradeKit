@@ -99,6 +99,7 @@ from ._position import (
     CLOSE_REASON_RF,
     CLOSE_REASON_SL,
     CLOSE_REASON_TP,
+    CLOSE_REASON_TP_PARTIAL,
     ClosedTrade,
 )
 from ._report import (
@@ -139,6 +140,7 @@ __all__ = [
     "ClosedTrade",
     "CLOSE_REASON_SL",
     "CLOSE_REASON_TP",
+    "CLOSE_REASON_TP_PARTIAL",
     "CLOSE_REASON_RF",
     "CLOSE_REASON_FC",
     "CLOSE_REASON_EOD",
