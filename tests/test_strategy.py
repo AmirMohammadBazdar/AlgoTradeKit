@@ -195,6 +195,27 @@ class TestSignal:
         s = Signal("short", 100.0, 105.0, None, 0, 0, "1h")
         assert "SHORT" in repr(s)
 
+    def test_risk_multiplier_default_is_one(self):
+        s = Signal("long", 100.0, 95.0, None, 0, 0, "1h")
+        assert s.risk_multiplier == 1.0
+
+    def test_risk_multiplier_can_be_set(self):
+        s = Signal("long", 100.0, 95.0, None, 0, 0, "1h", risk_multiplier=0.25)
+        assert s.risk_multiplier == 0.25
+
+    def test_risk_multiplier_zero_raises(self):
+        with pytest.raises(ValueError, match="risk_multiplier must be > 0"):
+            Signal("long", 100.0, 95.0, None, 0, 0, "1h", risk_multiplier=0.0)
+
+    def test_risk_multiplier_negative_raises(self):
+        with pytest.raises(ValueError, match="risk_multiplier must be > 0"):
+            Signal("long", 100.0, 95.0, None, 0, 0, "1h", risk_multiplier=-0.5)
+
+    def test_risk_multiplier_does_not_break_positional_construction(self):
+        # 7 positional args (the pre-v0.7.3 shape) must still work unchanged.
+        s = Signal("long", 100.0, 95.0, 110.0, 1_000_000, 5, "1h")
+        assert s.risk_multiplier == 1.0
+
 
 # ===========================================================================
 # 2. _types — ExitSignal

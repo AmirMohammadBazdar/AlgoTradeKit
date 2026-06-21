@@ -599,6 +599,105 @@ class TestEngineLeverage:
 
 
 # ===========================================================================
+# 7b. Engine — per-signal risk_multiplier (v0.7.3)
+# ===========================================================================
+
+class TestEngineRiskMultiplier:
+    """
+    Signal.risk_multiplier lets one signal scale its own size relative to
+    the run's global sizing config, independent of other signals in the
+    same run. Default (1.0) must be fully equivalent to pre-v0.7.3 sizing.
+    """
+
+    def _cfg(self, **overrides):
+        defaults = dict(
+            initial_balance=10_000, leverage=1,
+            spread=0.0, commission=0.0, commission_type="fixed",
+            risk_per_trade=1.0, tp_mode="none",
+            primary_timeframe="1h",
+        )
+        defaults.update(overrides)
+        return SimulateConfig(**defaults)
+
+    def test_default_multiplier_unchanged_vs_pre_0_7_3_sizing(self):
+        """A signal with no risk_multiplier set sizes identically to one
+        with risk_multiplier=1.0 explicitly — the new field changes nothing
+        by default."""
+        prices = [100, 101, 102, 103, 104]
+        df     = _make_ohlcv(prices, spread=0.0)
+        sig_default  = _long_signal(0, df, sl_pct=0.05)
+        sig_explicit = Signal(
+            direction="long", entry_price=sig_default.entry_price,
+            stop_loss=sig_default.stop_loss, take_profit=None,
+            timestamp=sig_default.timestamp, candle_index=0, timeframe="1h",
+            risk_multiplier=1.0,
+        )
+        r1 = Simulate(self._cfg()).run(_make_result([sig_default], df))
+        r2 = Simulate(self._cfg()).run(_make_result([sig_explicit], df))
+        assert r1.closed_trades[0].size == pytest.approx(r2.closed_trades[0].size)
+        assert r1.closed_trades[0].risk_amount == pytest.approx(r2.closed_trades[0].risk_amount)
+
+    def test_half_multiplier_halves_risk_percent_sizing(self):
+        prices = [100, 101, 102, 103, 104]
+        df     = _make_ohlcv(prices, spread=0.0)
+        full = _long_signal(0, df, sl_pct=0.05)
+        half = Signal(
+            direction="long", entry_price=full.entry_price, stop_loss=full.stop_loss,
+            take_profit=None, timestamp=full.timestamp, candle_index=0, timeframe="1h",
+            risk_multiplier=0.5,
+        )
+        r_full = Simulate(self._cfg()).run(_make_result([full], df))
+        r_half = Simulate(self._cfg()).run(_make_result([half], df))
+        t_full, t_half = r_full.closed_trades[0], r_half.closed_trades[0]
+        assert t_half.risk_amount == pytest.approx(t_full.risk_amount * 0.5)
+        assert t_half.size        == pytest.approx(t_full.size * 0.5)
+        assert t_half.margin_amount == pytest.approx(t_full.margin_amount * 0.5)
+
+    def test_multiplier_scales_fixed_lot_sizing(self):
+        prices = [100, 101, 102, 103, 104]
+        df     = _make_ohlcv(prices, spread=0.0)
+        full = _long_signal(0, df, sl_pct=0.05)
+        quarter = Signal(
+            direction="long", entry_price=full.entry_price, stop_loss=full.stop_loss,
+            take_profit=None, timestamp=full.timestamp, candle_index=0, timeframe="1h",
+            risk_multiplier=0.25,
+        )
+        cfg = self._cfg(position_sizing="fixed_lot", fixed_lot=2.0)
+        r_full = Simulate(cfg).run(_make_result([full], df))
+        r_qtr  = Simulate(cfg).run(_make_result([quarter], df))
+        assert r_qtr.closed_trades[0].size == pytest.approx(r_full.closed_trades[0].size * 0.25)
+        assert r_qtr.closed_trades[0].size == pytest.approx(0.5)   # 2.0 * 0.25
+
+    def test_split_signals_sum_to_one_full_risk_unit(self):
+        """Three signals at the same candle, each risk_multiplier=1/3,
+        should jointly risk the same total amount as one risk_multiplier=1.0
+        signal — this is the scale-out / multi-sub-position pattern."""
+        prices = [100] * 10
+        df     = _make_ohlcv(prices, spread=0.0)
+
+        def _sig(mult):
+            return Signal(
+                direction="long", entry_price=100.0, stop_loss=95.0,
+                take_profit=100.0 + (5.0 * (mult * 3)),  # arbitrary distinct TPs, unused here
+                timestamp=int(df.iloc[0]["timestamp"]), candle_index=0, timeframe="1h",
+                risk_multiplier=mult,
+            )
+        split_signals = [_sig(1 / 3) for _ in range(3)]
+        full_signal   = [Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0, take_profit=None,
+            timestamp=int(df.iloc[0]["timestamp"]), candle_index=0, timeframe="1h",
+        )]
+
+        cfg = self._cfg(max_long_positions=5, max_positions=5)
+        r_split = Simulate(cfg).run(_make_result(split_signals, df))
+        r_full  = Simulate(cfg).run(_make_result(full_signal, df))
+
+        assert len(r_split.closed_trades) == 3
+        total_split_risk = sum(t.risk_amount for t in r_split.closed_trades)
+        assert total_split_risk == pytest.approx(r_full.closed_trades[0].risk_amount, rel=1e-6)
+
+
+# ===========================================================================
 # 8. Engine — multi-RR TP mode
 # ===========================================================================
 
