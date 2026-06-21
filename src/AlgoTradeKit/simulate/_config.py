@@ -121,6 +121,37 @@ class SimulateConfig:
         For ``"multi_rr"`` mode: list of R-multiples at which TP levels sit
         (default: ``[1.0, 2.0, 3.0]``).  After each level is hit, SL moves
         to the previous level (0.0 = entry, 1.0 = first TP, etc.).
+    tp_level_close_fractions : list[float] | None
+        For ``"multi_rr"`` mode only.  Optional list, same length as
+        ``tp_levels``, giving the fraction of the position's **original**
+        size to actually realise (partially close) when each corresponding
+        level is reached.  Each value must be in ``[0.0, 1.0]`` and the
+        values must sum to ``<= 1.0``.
+
+        ``None`` (default) preserves the exact pre-v0.7.3 behaviour: no
+        level closes anything — the position's SL simply walks forward
+        through the levels, and only the *final* level fully closes the
+        position.  This default is unchanged for full backward compatibility.
+
+        When provided, every level (including the last) closes **only**
+        the fraction you specify — there is no automatic "close everything"
+        special-case for the final level anymore.  Two common patterns:
+
+        * **Scale out completely** — fractions summing to ``1.0``
+          (e.g. ``[1/3, 1/3, 1/3]`` for ``tp_levels=[1, 2, 3]``) realises
+          profit progressively and leaves nothing open after the last level.
+        * **Trail forever, never auto-realise** — all-zero fractions
+          (e.g. ``[0.0] * 20`` for ``tp_levels=[1, 2, ..., 20]``) never
+          partially closes anything; the SL just keeps stepping up through
+          every level and the full size stays open, trailing at the last
+          level's price, until it is eventually stopped out, force-closed,
+          or hits end-of-data.
+
+        Each partial close produces its own ``ClosedTrade`` (sharing the
+        same ``trade_id`` as the rest of that position's closes), so
+        ``SimulateReport`` statistics count each realised slice separately
+        — matching how a real scaled-out position would show up on a
+        broker statement.
     sl_mode : str
         Stop-loss mode: ``"signal"`` (use SL from Signal) or ``"trailing"``
         (default: ``"signal"``).
@@ -199,6 +230,7 @@ class SimulateConfig:
     tp_mode: str = TP_MODE_SIGNAL
     tp_rr: float = 2.0
     tp_levels: list[float] = field(default_factory=lambda: [1.0, 2.0, 3.0])
+    tp_level_close_fractions: list[float] | None = None
 
     # ------------------------------------------------------------------
     # Stop-loss
@@ -291,6 +323,26 @@ class SimulateConfig:
             raise ValueError(
                 "SimulateConfig.tp_levels must be a non-empty list when tp_mode='multi_rr'."
             )
+        if self.tp_level_close_fractions is not None:
+            if self.tp_mode != TP_MODE_MULTI_RR:
+                raise ValueError(
+                    "SimulateConfig.tp_level_close_fractions requires tp_mode='multi_rr'."
+                )
+            if len(self.tp_level_close_fractions) != len(self.tp_levels):
+                raise ValueError(
+                    "SimulateConfig.tp_level_close_fractions must be the same length as "
+                    f"tp_levels ({len(self.tp_levels)}), got "
+                    f"{len(self.tp_level_close_fractions)}."
+                )
+            if any(not (0.0 <= f <= 1.0) for f in self.tp_level_close_fractions):
+                raise ValueError(
+                    "SimulateConfig.tp_level_close_fractions values must all be in [0.0, 1.0]."
+                )
+            if sum(self.tp_level_close_fractions) > 1.0 + 1e-9:
+                raise ValueError(
+                    "SimulateConfig.tp_level_close_fractions must sum to <= 1.0, got "
+                    f"{sum(self.tp_level_close_fractions)!r}."
+                )
         if not self.config_id:
             self.config_id = self._auto_id()
         if self.report_mode not in (

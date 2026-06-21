@@ -40,12 +40,14 @@ from ..strategy._types import StrategyMode, StrategyResult
 from ._config import SimulateConfig
 from ._engine import (
     Simulate,
+    _apply_partial_close,
     _can_open_position,
     _check_close,
     _check_risk_free,
     _compute_position_params,
     _make_closed_trade,
     _update_trailing_sl,
+    _SIZE_EPSILON,
 )
 from ._position import (
     CLOSE_REASON_EOD,
@@ -327,15 +329,16 @@ def run_multi(
                 for pos in open_positions:
                     _check_risk_free(pos, c_high, c_low, cfg)
 
-            # SL/TP close
+            # SL/TP close (may yield zero, one, or several partial+final events)
             newly_closed = []
             for pos in open_positions:
-                result = _check_close(pos, c_open, c_high, c_low, c_close)
-                if result is not None:
-                    exit_price, reason = result
-                    ct = _make_closed_trade(pos, exit_price, reason, ts, cfg)
-                    wallet += pos.margin_amount + ct.gross_pnl
+                events = _check_close(pos, c_open, c_high, c_low, c_close, cfg)
+                for exit_price, reason, closed_size in events:
+                    ct = _make_closed_trade(pos, exit_price, reason, ts, cfg, closed_size)
+                    wallet += ct.margin_amount + ct.gross_pnl
                     closed_trades.append(ct)
+                    _apply_partial_close(pos, closed_size)
+                if pos.size <= _SIZE_EPSILON:
                     newly_closed.append(pos)
             for pos in newly_closed:
                 open_positions.remove(pos)

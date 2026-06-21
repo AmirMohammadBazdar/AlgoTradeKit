@@ -30,6 +30,7 @@ from AlgoTradeKit.simulate import (
     CLOSE_REASON_RF,
     CLOSE_REASON_SL,
     CLOSE_REASON_TP,
+    CLOSE_REASON_TP_PARTIAL,
     EXCHANGE_TYPE_EXCHANGE,
     EXCHANGE_TYPE_METATRADER,
     Simulate,
@@ -599,6 +600,105 @@ class TestEngineLeverage:
 
 
 # ===========================================================================
+# 7b. Engine — per-signal risk_multiplier (v0.7.3)
+# ===========================================================================
+
+class TestEngineRiskMultiplier:
+    """
+    Signal.risk_multiplier lets one signal scale its own size relative to
+    the run's global sizing config, independent of other signals in the
+    same run. Default (1.0) must be fully equivalent to pre-v0.7.3 sizing.
+    """
+
+    def _cfg(self, **overrides):
+        defaults = dict(
+            initial_balance=10_000, leverage=1,
+            spread=0.0, commission=0.0, commission_type="fixed",
+            risk_per_trade=1.0, tp_mode="none",
+            primary_timeframe="1h",
+        )
+        defaults.update(overrides)
+        return SimulateConfig(**defaults)
+
+    def test_default_multiplier_unchanged_vs_pre_0_7_3_sizing(self):
+        """A signal with no risk_multiplier set sizes identically to one
+        with risk_multiplier=1.0 explicitly — the new field changes nothing
+        by default."""
+        prices = [100, 101, 102, 103, 104]
+        df     = _make_ohlcv(prices, spread=0.0)
+        sig_default  = _long_signal(0, df, sl_pct=0.05)
+        sig_explicit = Signal(
+            direction="long", entry_price=sig_default.entry_price,
+            stop_loss=sig_default.stop_loss, take_profit=None,
+            timestamp=sig_default.timestamp, candle_index=0, timeframe="1h",
+            risk_multiplier=1.0,
+        )
+        r1 = Simulate(self._cfg()).run(_make_result([sig_default], df))
+        r2 = Simulate(self._cfg()).run(_make_result([sig_explicit], df))
+        assert r1.closed_trades[0].size == pytest.approx(r2.closed_trades[0].size)
+        assert r1.closed_trades[0].risk_amount == pytest.approx(r2.closed_trades[0].risk_amount)
+
+    def test_half_multiplier_halves_risk_percent_sizing(self):
+        prices = [100, 101, 102, 103, 104]
+        df     = _make_ohlcv(prices, spread=0.0)
+        full = _long_signal(0, df, sl_pct=0.05)
+        half = Signal(
+            direction="long", entry_price=full.entry_price, stop_loss=full.stop_loss,
+            take_profit=None, timestamp=full.timestamp, candle_index=0, timeframe="1h",
+            risk_multiplier=0.5,
+        )
+        r_full = Simulate(self._cfg()).run(_make_result([full], df))
+        r_half = Simulate(self._cfg()).run(_make_result([half], df))
+        t_full, t_half = r_full.closed_trades[0], r_half.closed_trades[0]
+        assert t_half.risk_amount == pytest.approx(t_full.risk_amount * 0.5)
+        assert t_half.size        == pytest.approx(t_full.size * 0.5)
+        assert t_half.margin_amount == pytest.approx(t_full.margin_amount * 0.5)
+
+    def test_multiplier_scales_fixed_lot_sizing(self):
+        prices = [100, 101, 102, 103, 104]
+        df     = _make_ohlcv(prices, spread=0.0)
+        full = _long_signal(0, df, sl_pct=0.05)
+        quarter = Signal(
+            direction="long", entry_price=full.entry_price, stop_loss=full.stop_loss,
+            take_profit=None, timestamp=full.timestamp, candle_index=0, timeframe="1h",
+            risk_multiplier=0.25,
+        )
+        cfg = self._cfg(position_sizing="fixed_lot", fixed_lot=2.0)
+        r_full = Simulate(cfg).run(_make_result([full], df))
+        r_qtr  = Simulate(cfg).run(_make_result([quarter], df))
+        assert r_qtr.closed_trades[0].size == pytest.approx(r_full.closed_trades[0].size * 0.25)
+        assert r_qtr.closed_trades[0].size == pytest.approx(0.5)   # 2.0 * 0.25
+
+    def test_split_signals_sum_to_one_full_risk_unit(self):
+        """Three signals at the same candle, each risk_multiplier=1/3,
+        should jointly risk the same total amount as one risk_multiplier=1.0
+        signal — this is the scale-out / multi-sub-position pattern."""
+        prices = [100] * 10
+        df     = _make_ohlcv(prices, spread=0.0)
+
+        def _sig(mult):
+            return Signal(
+                direction="long", entry_price=100.0, stop_loss=95.0,
+                take_profit=100.0 + (5.0 * (mult * 3)),  # arbitrary distinct TPs, unused here
+                timestamp=int(df.iloc[0]["timestamp"]), candle_index=0, timeframe="1h",
+                risk_multiplier=mult,
+            )
+        split_signals = [_sig(1 / 3) for _ in range(3)]
+        full_signal   = [Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0, take_profit=None,
+            timestamp=int(df.iloc[0]["timestamp"]), candle_index=0, timeframe="1h",
+        )]
+
+        cfg = self._cfg(max_long_positions=5, max_positions=5)
+        r_split = Simulate(cfg).run(_make_result(split_signals, df))
+        r_full  = Simulate(cfg).run(_make_result(full_signal, df))
+
+        assert len(r_split.closed_trades) == 3
+        total_split_risk = sum(t.risk_amount for t in r_split.closed_trades)
+        assert total_split_risk == pytest.approx(r_full.closed_trades[0].risk_amount, rel=1e-6)
+
+
+# ===========================================================================
 # 8. Engine — multi-RR TP mode
 # ===========================================================================
 
@@ -650,6 +750,258 @@ class TestEngineMultiRR:
         # Close reason should be "rf" (risk-free SL hit after TP1)
         assert ct.close_reason == CLOSE_REASON_RF
         assert ct.rr_levels_hit == 1
+
+
+# ===========================================================================
+# 8b. Engine — multi-RR TRUE partial closes via tp_level_close_fractions (v0.7.3)
+# ===========================================================================
+
+class TestEngineMultiRRPartialClose:
+    """
+    SimulateConfig.tp_level_close_fractions lets each multi-RR level
+    realise a real, partial close (reduced size, proportional PnL/
+    commission/margin) instead of only moving the SL. All scenarios below
+    use the same entry=100 / sl=95 (sl_distance=5) / levels=[1,2,3] →
+    TP prices [105, 110, 115] shape as the existing TestEngineMultiRR
+    tests, for direct comparability.
+    """
+
+    def _cfg(self, fractions, levels=None, commission=0.0, commission_type="fixed"):
+        return SimulateConfig(
+            initial_balance=10_000,
+            leverage=1,
+            spread=0.0,
+            commission=commission, commission_type=commission_type,
+            risk_per_trade=1.0,
+            tp_mode="multi_rr",
+            tp_levels=levels or [1.0, 2.0, 3.0],
+            tp_level_close_fractions=fractions,
+            sl_mode="signal",
+            primary_timeframe="1h",
+        )
+
+    def _signal(self, df):
+        return Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+
+    def test_equal_three_way_split_realises_progressively(self):
+        """fractions=[1/3,1/3,1/3]: each level banks 1/3 of the ORIGINAL
+        size; the last level's slice exactly exhausts the remainder, so it
+        is labelled 'tp' (full) while the first two are 'tp_rr' (partial).
+        Same price path as test_multi_rr_closes_at_final_level."""
+        prices = [100, 103, 106, 110, 116, 112]
+        df     = _make_ohlcv(prices, spread=0.0)
+        cfg    = self._cfg(fractions=[1 / 3, 1 / 3, 1 / 3])
+        report = Simulate(cfg).run(_make_result([self._signal(df)], df))
+
+        trades = report.closed_trades
+        assert len(trades) == 3
+        assert all(t.trade_id == trades[0].trade_id for t in trades), \
+            "all slices of one scaled-out entry must share one trade_id"
+        assert [t.close_reason for t in trades] == [
+            CLOSE_REASON_TP_PARTIAL, CLOSE_REASON_TP_PARTIAL, CLOSE_REASON_TP,
+        ]
+        assert [t.exit_price for t in trades] == [105.0, 110.0, 115.0]
+
+        original_size = trades[0].size * 3   # each slice ≈ 1/3 of the original
+        assert sum(t.size for t in trades) == pytest.approx(original_size)
+        assert sum(t.risk_amount for t in trades) == pytest.approx(100.0)  # 1% of 10,000
+        # Hand-derived ground truth: 1/3 of size closed at +5, +10, +15
+        # respectively, with pnl_per_price_unit=20 → (5+10+15)*20/3 = 200.
+        assert report.total_pnl == pytest.approx(200.0, rel=1e-6)
+
+    def test_wallet_conserved_no_leakage_or_double_counting(self):
+        """initial_balance + sum(net_pnl) must equal final_balance exactly —
+        margin released and commission charged must each be counted once
+        across however many partial-close events one position produces."""
+        prices = [100, 103, 106, 110, 116, 112]
+        df     = _make_ohlcv(prices, spread=0.0)
+        cfg    = self._cfg(fractions=[1 / 3, 1 / 3, 1 / 3], commission=10.0)
+        report = Simulate(cfg).run(_make_result([self._signal(df)], df))
+
+        assert len(report.closed_trades) == 3
+        manual_total_pnl = sum(t.net_pnl for t in report.closed_trades)
+        assert report.final_balance == pytest.approx(
+            cfg.initial_balance + manual_total_pnl, rel=1e-9
+        )
+
+    def test_commission_split_across_partials_sums_to_one_round_trip(self):
+        """Commission is pre-charged once at entry; partial closes must each
+        take a proportional slice, summing back to exactly one round-trip
+        charge — never 3x, never 0."""
+        prices = [100, 103, 106, 110, 116, 112]
+        df     = _make_ohlcv(prices, spread=0.0)
+        cfg_split = self._cfg(fractions=[1 / 3, 1 / 3, 1 / 3], commission=9.0)
+        cfg_whole = self._cfg(fractions=None, commission=9.0)
+
+        report_split = Simulate(cfg_split).run(_make_result([self._signal(df)], df))
+        report_whole = Simulate(cfg_whole).run(_make_result([self._signal(df)], df))
+
+        assert sum(t.commission for t in report_split.closed_trades) == pytest.approx(
+            sum(t.commission for t in report_whole.closed_trades), rel=1e-9
+        )
+
+    def test_partial_then_trailing_remainder_closes_via_sl(self):
+        """fractions=[0.5, 0.0] over 2 levels: half is banked at level 1,
+        the other half realises NOTHING at level 2 (SL just steps to the
+        level-1 price and next_tp goes away) and is only closed later when
+        price reverses onto that pinned SL."""
+        cfg = self._cfg(fractions=[0.5, 0.0], levels=[1.0, 2.0])
+        prices = [100, 103, 106, 111, 107, 103]
+        df = _make_ohlcv(prices, spread=0.0)
+        report = Simulate(cfg).run(_make_result([self._signal(df)], df))
+
+        trades = report.closed_trades
+        assert len(trades) == 2
+        assert trades[0].close_reason == CLOSE_REASON_TP_PARTIAL
+        assert trades[0].exit_price == 105.0
+        assert trades[1].close_reason == CLOSE_REASON_RF
+        assert trades[1].exit_price == 105.0    # SL pinned at level-1 price
+        assert trades[0].size == pytest.approx(trades[1].size)   # 50 / 50
+        assert trades[0].trade_id == trades[1].trade_id
+
+    def test_all_zero_fractions_never_partially_closes(self):
+        """All-zero fractions reproduce the 'let it run, never bank early'
+        pattern: SL just walks through every level and nothing closes
+        until the position is eventually stopped out with its FULL size —
+        one single ClosedTrade, just like the pre-v0.7.3 default, but the
+        final exit is via the trailed SL rather than a final TP level."""
+        cfg = self._cfg(fractions=[0.0, 0.0, 0.0])
+        prices = [100, 103, 106, 110, 116, 112, 108]
+        df = _make_ohlcv(prices, spread=0.0)
+        report = Simulate(cfg).run(_make_result([self._signal(df)], df))
+
+        assert len(report.closed_trades) == 1
+        ct = report.closed_trades[0]
+        assert ct.close_reason == CLOSE_REASON_RF
+        assert ct.rr_levels_hit == 3
+        assert ct.exit_price == 110.0          # pinned at the 2nd level price
+        assert ct.net_pnl > 0                  # still a winner: SL trailed above entry
+
+    def test_default_none_is_byte_for_byte_unchanged(self):
+        """tp_level_close_fractions=None (the default) must reproduce
+        test_multi_rr_closes_at_final_level's exact result — one full
+        close, nothing partial."""
+        prices = [100, 103, 106, 110, 116, 112]
+        df     = _make_ohlcv(prices, spread=0.0)
+        cfg    = self._cfg(fractions=None)
+        report = Simulate(cfg).run(_make_result([self._signal(df)], df))
+        assert len(report.closed_trades) == 1
+        assert report.closed_trades[0].close_reason == CLOSE_REASON_TP
+
+    def test_gap_spanning_two_levels_in_one_candle_with_fractions(self):
+        """A single candle that gaps straight through two levels at once
+        must still realise both partial fractions correctly (exercises the
+        gap → body fallthrough path introduced for partial closes). The
+        first level fills at the gap-open price (no trading occurred at
+        the level itself); the second is caught by the body-check
+        fallthrough and fills at its exact level price — this mirrors
+        exactly how a non-partial multi_rr gap-then-body sequence already
+        behaved pre-v0.7.3."""
+        cfg = self._cfg(fractions=[0.5, 0.5], levels=[1.0, 2.0])
+        # Candle 1: small move. Candle 2: opens at 112 — past both
+        # TP1 (105) and TP2 (110) in one gap.
+        df = pd.DataFrame({
+            "timestamp": [_BASE_TS, _BASE_TS + _1H_MS, _BASE_TS + 2 * _1H_MS],
+            "open":      [100.0, 100.0, 112.0],
+            "high":      [100.0, 103.0, 112.0],
+            "low":       [100.0, 100.0, 112.0],
+            "close":     [100.0, 103.0, 112.0],
+            "volume":    [1000.0, 1000.0, 1000.0],
+        })
+        report = Simulate(cfg).run(_make_result([self._signal(df)], df))
+        trades = report.closed_trades
+        assert len(trades) == 2
+        assert trades[0].exit_price == pytest.approx(112.0)   # gap fill at open
+        assert trades[1].exit_price == pytest.approx(110.0)   # body-check: exact level price
+        assert trades[0].close_reason == CLOSE_REASON_TP_PARTIAL
+        assert trades[1].close_reason == CLOSE_REASON_TP
+        assert trades[0].size == pytest.approx(trades[1].size)
+        assert trades[0].trade_id == trades[1].trade_id
+
+    def test_run_multi_supports_partial_closes(self):
+        """run_multi's independently-maintained loop must reproduce the
+        same partial-close behaviour as the single-pair Simulate engine."""
+        prices = [100, 103, 106, 110, 116, 112]
+        df     = _make_ohlcv(prices, spread=0.0)
+        cfg    = self._cfg(fractions=[1 / 3, 1 / 3, 1 / 3])
+
+        class _OneShot(BaseStrategy):
+            primary_timeframe = "1h"
+            def setup(self, data): pass
+            def prepare_indicators(self, data): return data
+            def generate_signals(self, candle_index, data):
+                if candle_index == 0:
+                    return [self._sig]
+                return []
+
+        strat = _OneShot()
+        strat._sig = self._signal(df)
+        report = run_multi([(strat, {"1h": df}, cfg)])
+
+        trades = report.closed_trades
+        assert len(trades) == 3
+        assert [t.close_reason for t in trades] == [
+            CLOSE_REASON_TP_PARTIAL, CLOSE_REASON_TP_PARTIAL, CLOSE_REASON_TP,
+        ]
+
+
+# ===========================================================================
+# 8c. SimulateConfig — tp_level_close_fractions validation (v0.7.3)
+# ===========================================================================
+
+class TestSimulateConfigPartialTPValidation:
+
+    def _base(self, **overrides):
+        defaults = dict(tp_mode="multi_rr", tp_levels=[1.0, 2.0, 3.0])
+        defaults.update(overrides)
+        return defaults
+
+    def test_none_is_valid_default(self):
+        cfg = SimulateConfig(**self._base())
+        assert cfg.tp_level_close_fractions is None
+
+    def test_equal_thirds_summing_to_one_is_valid(self):
+        cfg = SimulateConfig(**self._base(
+            tp_level_close_fractions=[1 / 3, 1 / 3, 1 / 3]
+        ))
+        assert sum(cfg.tp_level_close_fractions) == pytest.approx(1.0)
+
+    def test_all_zero_is_valid(self):
+        cfg = SimulateConfig(**self._base(tp_level_close_fractions=[0.0, 0.0, 0.0]))
+        assert cfg.tp_level_close_fractions == [0.0, 0.0, 0.0]
+
+    def test_wrong_length_raises(self):
+        with pytest.raises(ValueError, match="same length"):
+            SimulateConfig(**self._base(tp_level_close_fractions=[0.5, 0.5]))
+
+    def test_fraction_above_one_raises(self):
+        with pytest.raises(ValueError, match=r"\[0\.0, 1\.0\]"):
+            SimulateConfig(**self._base(
+                tp_level_close_fractions=[1.5, 0.0, 0.0]
+            ))
+
+    def test_negative_fraction_raises(self):
+        with pytest.raises(ValueError, match=r"\[0\.0, 1\.0\]"):
+            SimulateConfig(**self._base(
+                tp_level_close_fractions=[-0.1, 0.5, 0.5]
+            ))
+
+    def test_sum_above_one_raises(self):
+        with pytest.raises(ValueError, match="sum to <= 1.0"):
+            SimulateConfig(**self._base(
+                tp_level_close_fractions=[0.5, 0.5, 0.5]
+            ))
+
+    def test_requires_multi_rr_mode(self):
+        with pytest.raises(ValueError, match="requires tp_mode='multi_rr'"):
+            SimulateConfig(
+                tp_mode="fixed_rr",
+                tp_level_close_fractions=[0.5, 0.5],
+            )
 
 
 # ===========================================================================

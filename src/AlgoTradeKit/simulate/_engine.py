@@ -60,10 +60,15 @@ from ._position import (
     CLOSE_REASON_RF,
     CLOSE_REASON_SL,
     CLOSE_REASON_TP,
+    CLOSE_REASON_TP_PARTIAL,
     ClosedTrade,
     _InternalPosition,
 )
 from ._report import SimulateReport, build_report
+
+# Tolerance below which a position's remaining size is treated as fully
+# closed (avoids float dust keeping a ~0-size position open forever).
+_SIZE_EPSILON = 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -207,50 +212,66 @@ def _check_close(
     candle_high: float,
     candle_low: float,
     candle_close: float,
-) -> tuple[float, str] | None:
+    config: SimulateConfig,
+) -> list[tuple[float, str, float]]:
     """
-    Determine whether *pos* should close on this candle.
+    Determine whether *pos* should close (fully or partially) on this candle.
 
     Returns
     -------
-    tuple[float, str] | None
-        ``(exit_price, close_reason)`` if a close is triggered,
-        ``None`` otherwise.
+    list[tuple[float, str, float]]
+        Zero or more ``(exit_price, close_reason, closed_size)`` events, in
+        the order they occurred this candle.  Empty list = stays open.
+        ``closed_size`` is always an absolute amount; summed across every
+        event ever returned for one position (across all candles), it
+        equals ``pos.original_size``.
 
-    Priority / ordering
-    -------------------
+        When ``config.tp_level_close_fractions`` is ``None`` (default) this
+        returns **at most one** event whose ``closed_size`` always equals
+        the position's full remaining size at that point — i.e. exactly the
+        pre-v0.7.3 "one full close" behaviour, just wrapped in a list.
+
+    Priority / ordering (unchanged from pre-v0.7.3)
+    ------------------------------------------------
     1. Gap opens (candle opens past SL or TP) → fill at ``candle_open``.
-    2. TP hit (``pos.next_tp``): last level → close; intermediate → advance SL.
+    2. TP hit (``pos.next_tp``): last level → close; intermediate → advance SL
+       (and, if configured, partially close) — see ``_handle_tp_level_hit``.
     3. SL hit.
     """
     direction = pos.direction
     is_long = direction == "long"
+    events: list[tuple[float, str, float]] = []
+    remaining = pos.size   # this candle's running size total; pos itself is
+                            # mutated by the caller once per event afterwards
 
     # ------------------------------------------------------------------
-    # 1. Gap open past SL (unfavourable gap)
+    # 1. Gap open past SL (unfavourable gap) — always closes everything left
     # ------------------------------------------------------------------
     if is_long and candle_open <= pos.stop_loss:
-        return candle_open, _sl_reason(pos)
+        events.append((candle_open, _sl_reason(pos), remaining))
+        return events
     if not is_long and candle_open >= pos.stop_loss:
-        return candle_open, _sl_reason(pos)
+        events.append((candle_open, _sl_reason(pos), remaining))
+        return events
 
     # ------------------------------------------------------------------
     # 2. Gap open past TP (favourable gap — fill at open)
     # ------------------------------------------------------------------
     if pos.next_tp is not None:
         if is_long and candle_open >= pos.next_tp:
-            is_last = pos.last_rr_hit + 1 >= len(pos.tp_level_prices)
-            if is_last:
-                return candle_open, CLOSE_REASON_TP
-            # Intermediate TP gapped: advance and continue
-            _advance_multi_rr(pos)
-            # After advancing, SL may now be hit at new level (checked below)
-
+            fully_closed, remaining = _handle_tp_level_hit(
+                pos, candle_open, config, events, remaining
+            )
+            if fully_closed:
+                return events
+            # Intermediate level, position still open: fall through to step 3
+            # in case the candle also reaches the (now-updated) next level.
         elif not is_long and candle_open <= pos.next_tp:
-            is_last = pos.last_rr_hit + 1 >= len(pos.tp_level_prices)
-            if is_last:
-                return candle_open, CLOSE_REASON_TP
-            _advance_multi_rr(pos)
+            fully_closed, remaining = _handle_tp_level_hit(
+                pos, candle_open, config, events, remaining
+            )
+            if fully_closed:
+                return events
 
     # ------------------------------------------------------------------
     # 3. TP hit within candle body
@@ -262,39 +283,36 @@ def _check_close(
                  (not is_long and candle_high >= pos.stop_loss)
 
         if tp_hit:
-            is_last = pos.last_rr_hit + 1 >= len(pos.tp_level_prices)
-
             if sl_hit:
                 # Both TP and SL triggered on same candle.
                 # Tiebreaker: bullish candle → TP first; bearish → SL first.
                 tp_first = candle_close > candle_open
 
                 if not tp_first:
-                    return pos.stop_loss, _sl_reason(pos)
-                # TP wins:
-                if is_last:
-                    return pos.next_tp, CLOSE_REASON_TP
-                _advance_multi_rr(pos)
-                # SL at new level is checked in step 4 below
-                return None
+                    events.append((pos.stop_loss, _sl_reason(pos), remaining))
+                    return events
+                # TP wins this candle:
+                _handle_tp_level_hit(pos, pos.next_tp, config, events, remaining)
+                # Matches pre-v0.7.3: stop here even if SL (now possibly at a
+                # new level) would also be hit within this same candle body —
+                # that is only re-checked on the next candle.
+                return events
 
             # Only TP hit (no SL conflict)
-            if is_last:
-                return pos.next_tp, CLOSE_REASON_TP
-            # Intermediate multi-RR TP → advance, do NOT close
-            _advance_multi_rr(pos)
-            return None
+            _handle_tp_level_hit(pos, pos.next_tp, config, events, remaining)
+            return events
 
     # ------------------------------------------------------------------
-    # 4. SL hit within candle body
+    # 4. SL hit within candle body — closes whatever remains
     # ------------------------------------------------------------------
     sl_hit = (is_long and candle_low <= pos.stop_loss) or \
              (not is_long and candle_high >= pos.stop_loss)
 
     if sl_hit:
-        return pos.stop_loss, _sl_reason(pos)
+        events.append((pos.stop_loss, _sl_reason(pos), remaining))
+        return events
 
-    return None  # Position stays open
+    return events  # Position stays open (empty list)
 
 
 def _make_closed_trade(
@@ -303,15 +321,41 @@ def _make_closed_trade(
     reason: str,
     close_time: int,
     config: SimulateConfig,
+    closed_size: float | None = None,
 ) -> ClosedTrade:
     """
     Build an immutable ``ClosedTrade`` from a live position and exit info.
+
+    Parameters
+    ----------
+    closed_size : float | None
+        Absolute size realised by *this* close event.  ``None`` (default)
+        closes ``pos``'s entire current remaining size — the original,
+        pre-v0.7.3 behaviour, byte-for-byte (the fraction below evaluates
+        to ``1.0`` and every field reduces to the old formula exactly).
+
+        A value less than ``pos.size`` builds a record for a *partial*
+        close: every dollar figure (risk, margin, gross PnL, commission)
+        is scaled by ``closed_size / pos.size``.  The caller is responsible
+        for shrinking ``pos`` itself afterwards via ``_apply_partial_close``
+        — this function only reads from ``pos``, it never mutates it.
     """
+    if closed_size is None or closed_size >= pos.size:
+        frac = 1.0
+        closed_size = pos.size
+    elif pos.size > 0:
+        frac = closed_size / pos.size
+    else:
+        frac = 1.0
+
     direction_factor = 1.0 if pos.direction == "long" else -1.0
-    gross_pnl = direction_factor * (exit_price - pos.entry_price) * pos.pnl_per_price_unit
-    net_pnl = gross_pnl - pos.open_commission
-    pnl_r = net_pnl / pos.risk_amount if pos.risk_amount > 0 else 0.0
-    spread_paid = config.spread * pos.pnl_per_price_unit
+    slice_pnl_per_price_unit = pos.pnl_per_price_unit * frac
+    gross_pnl = direction_factor * (exit_price - pos.entry_price) * slice_pnl_per_price_unit
+    slice_commission = pos.open_commission * frac
+    net_pnl = gross_pnl - slice_commission
+    slice_risk_amount = pos.risk_amount * frac
+    pnl_r = net_pnl / slice_risk_amount if slice_risk_amount > 0 else 0.0
+    spread_paid = config.spread * slice_pnl_per_price_unit
 
     return ClosedTrade(
         trade_id=pos.trade_id,
@@ -324,11 +368,11 @@ def _make_closed_trade(
         initial_stop_loss=pos.initial_stop_loss,
         final_stop_loss=pos.stop_loss,
         take_profit=pos.take_profit,
-        size=pos.size,
-        margin_amount=pos.margin_amount,
-        risk_amount=pos.risk_amount,
+        size=closed_size,
+        margin_amount=pos.margin_amount * frac,
+        risk_amount=slice_risk_amount,
         gross_pnl=gross_pnl,
-        commission=pos.open_commission,
+        commission=slice_commission,
         net_pnl=net_pnl,
         pnl_r=pnl_r,
         close_reason=reason,
@@ -342,6 +386,95 @@ def _make_closed_trade(
     )
 
 
+def _apply_partial_close(pos: _InternalPosition, closed_size: float) -> None:
+    """
+    Shrink *pos* in place after realising *closed_size* units of profit/loss.
+
+    Scales ``size``, ``risk_amount``, ``margin_amount``, ``pnl_per_price_unit``,
+    and the not-yet-charged ``open_commission`` all by the same remaining
+    fraction, so:
+
+    * the position continues to behave as a smaller version of itself for
+      every subsequent candle, and
+    * commission/risk recorded across every ``ClosedTrade`` that shares this
+      ``trade_id`` sums back to the original totals (nothing is charged
+      twice, nothing is lost).
+    """
+    if pos.size <= 0:
+        return
+    frac = min(closed_size / pos.size, 1.0)
+    remaining_frac = max(1.0 - frac, 0.0)
+    pos.size *= remaining_frac
+    pos.risk_amount *= remaining_frac
+    pos.margin_amount *= remaining_frac
+    pos.pnl_per_price_unit *= remaining_frac
+    pos.open_commission *= remaining_frac
+
+
+def _handle_tp_level_hit(
+    pos: _InternalPosition,
+    price: float,
+    config: SimulateConfig,
+    events: list[tuple[float, str, float]],
+    remaining: float,
+) -> tuple[bool, float]:
+    """
+    Process one multi-RR TP level being reached at *price*.
+
+    Always advances SL / ``next_tp`` / ``last_rr_hit`` bookkeeping via
+    ``_advance_multi_rr`` (this part is independent of size and must stay
+    live for both this candle's later checks and every future candle).
+
+    Whether anything actually *closes* here depends on
+    ``config.tp_level_close_fractions``:
+
+    * ``None`` (default) — reproduces the pre-v0.7.3 behaviour exactly:
+      intermediate levels close nothing (SL only advances), the final
+      level closes 100 % of whatever remains.
+    * configured — closes exactly ``tp_level_close_fractions[level]`` of
+      the position's *original* size at every level, including the last
+      (no more automatic "close everything" special-case for the final
+      level — any unspecified remainder stays open, trailing at the last
+      level's SL forever).
+
+    Note this function does **not** mutate ``pos.size``/``risk_amount``/
+    ``margin_amount`` — it only threads *remaining* (this candle's running
+    size total, local to one ``_check_close`` call) so that a gap spanning
+    more than one level still computes each event's ``closed_size`` against
+    the correct just-reduced amount. The caller applies the real
+    ``_apply_partial_close`` to ``pos`` once per returned event, in order,
+    right after building that event's ``ClosedTrade``.
+
+    Returns
+    -------
+    tuple[bool, float]
+        ``(fully_closed, new_remaining)`` — ``fully_closed`` is ``True``
+        when *new_remaining* is ~0 (caller should stop and return).
+    """
+    level_idx = pos.last_rr_hit
+    is_last = level_idx + 1 >= len(pos.tp_level_prices)
+
+    if config.tp_level_close_fractions is not None:
+        frac = config.tp_level_close_fractions[level_idx]
+    else:
+        frac = 1.0 if is_last else 0.0
+
+    _advance_multi_rr(pos)
+
+    if frac <= 0.0:
+        return False, remaining
+
+    closed_size = min(frac * pos.original_size, remaining)
+    if closed_size <= 0.0:
+        return False, remaining
+
+    new_remaining = remaining - closed_size
+    fully_closed = new_remaining <= _SIZE_EPSILON
+    reason = CLOSE_REASON_TP if fully_closed else CLOSE_REASON_TP_PARTIAL
+    events.append((price, reason, closed_size))
+    return fully_closed, new_remaining
+
+
 def _compute_position_params(
     sig,                   # Signal
     config: SimulateConfig,
@@ -349,6 +482,9 @@ def _compute_position_params(
 ) -> tuple | None:
     """
     Compute all sizing parameters for a new position.
+
+    ``sig.risk_multiplier`` (default ``1.0``) scales whatever size/risk this
+    signal would otherwise receive from *config* — see ``Signal.risk_multiplier``.
 
     Returns
     -------
@@ -382,7 +518,10 @@ def _compute_position_params(
 
     if config.position_sizing == SIZING_FIXED_LOT:
         # ---- Fixed-lot: size is specified directly ----
-        fixed_l = config.fixed_lot
+        # risk_multiplier (default 1.0) lets a strategy scale an individual
+        # signal's size relative to the configured fixed_lot — e.g. to split
+        # one trade idea into several proportionally-sized sub-positions.
+        fixed_l = config.fixed_lot * sig.risk_multiplier
 
         if is_mt5:
             pip_size, pip_value = get_mt5_pip_info(config.symbol, fill_price)
@@ -416,11 +555,13 @@ def _compute_position_params(
 
     else:
         # ---- Risk-based sizing: compute risk_amount first ----
+        # risk_multiplier (default 1.0) scales this specific signal's risk
+        # relative to the run's configured risk_per_trade / fixed_amount.
         if config.position_sizing == SIZING_RISK_PERCENT:
             balance_ref = wallet if config.compound else config.initial_balance
-            risk_amount = balance_ref * config.risk_per_trade / 100.0
+            risk_amount = balance_ref * config.risk_per_trade / 100.0 * sig.risk_multiplier
         else:  # SIZING_FIXED_AMOUNT
-            risk_amount = config.fixed_amount
+            risk_amount = config.fixed_amount * sig.risk_multiplier
 
         if risk_amount <= 0:
             return None
@@ -782,15 +923,17 @@ class Simulate:
 
             # -------------------------------------------------------
             # C. Check SL / TP close for all open positions
+            #    (may yield zero, one, or several partial+final events)
             # -------------------------------------------------------
             newly_closed: list[_InternalPosition] = []
             for pos in open_positions:
-                result = _check_close(pos, c_open, c_high, c_low, c_close)
-                if result is not None:
-                    exit_price, reason = result
-                    ct = _make_closed_trade(pos, exit_price, reason, ts, config)
-                    wallet += pos.margin_amount + ct.gross_pnl
+                events = _check_close(pos, c_open, c_high, c_low, c_close, config)
+                for exit_price, reason, closed_size in events:
+                    ct = _make_closed_trade(pos, exit_price, reason, ts, config, closed_size)
+                    wallet += ct.margin_amount + ct.gross_pnl
                     closed_trades.append(ct)
+                    _apply_partial_close(pos, closed_size)
+                if pos.size <= _SIZE_EPSILON:
                     newly_closed.append(pos)
 
             for pos in newly_closed:
