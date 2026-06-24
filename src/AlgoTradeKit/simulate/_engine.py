@@ -123,7 +123,7 @@ def _build_tp_level_prices(
     return []
 
 
-def _advance_multi_rr(pos: _InternalPosition) -> None:
+def _advance_multi_rr(pos: _InternalPosition, timestamp: int) -> None:
     """
     Mutate *pos* to advance to the next TP level after the current one is hit.
 
@@ -133,6 +133,8 @@ def _advance_multi_rr(pos: _InternalPosition) -> None:
 
     ``pos.next_tp`` is updated to the next price, or ``None`` when the final
     level was just hit (engine should close the position in that case).
+
+    Also records the new SL state in ``pos.sl_history`` (v0.7.4).
     """
     # Move SL
     if pos.last_rr_hit == 0:
@@ -148,18 +150,29 @@ def _advance_multi_rr(pos: _InternalPosition) -> None:
     else:
         pos.next_tp = None  # all levels consumed
 
+    # Record SL state change (v0.7.4)
+    pos.sl_history.append({
+        "time": timestamp,
+        "sl": pos.stop_loss,
+        "next_tp": pos.next_tp,
+    })
+
 
 def _update_trailing_sl(
     pos: _InternalPosition,
-    candle_high: float,
-    candle_low: float,
     config: SimulateConfig,
+    timestamp: int,
 ) -> None:
     """
-    Update the trailing stop-loss for *pos* if ``sl_mode`` is ``"trailing"``.
+    Recompute and apply the trailing stop-loss from *pos.peak_price*.
 
-    The trailing SL is placed ``trailing_sl_percent`` % below the running
-    peak for longs and above the running trough for shorts.
+    Called AFTER ``pos.update_trailing_peak()`` has already updated the
+    running peak for the current candle, and AFTER the gap-open close check
+    has passed (so the SL advance cannot falsely trigger a "gap" close on a
+    candle that opened between the old and new SL levels).
+
+    Records a SL-state change in ``pos.sl_history`` whenever the SL
+    actually advances (v0.7.4).
     """
     if config.sl_mode != SL_MODE_TRAILING:
         return
@@ -167,17 +180,23 @@ def _update_trailing_sl(
     trail_pct = config.trailing_sl_percent / 100.0
 
     if pos.direction == "long":
-        if candle_high > pos.peak_price:
-            pos.peak_price = candle_high
         new_sl = pos.peak_price * (1.0 - trail_pct)
         if new_sl > pos.stop_loss:
             pos.stop_loss = new_sl
+            pos.sl_history.append({
+                "time": timestamp,
+                "sl": new_sl,
+                "next_tp": pos.next_tp,
+            })
     else:  # short
-        if candle_low < pos.peak_price:
-            pos.peak_price = candle_low
         new_sl = pos.peak_price * (1.0 + trail_pct)
         if new_sl < pos.stop_loss:
             pos.stop_loss = new_sl
+            pos.sl_history.append({
+                "time": timestamp,
+                "sl": new_sl,
+                "next_tp": pos.next_tp,
+            })
 
 
 def _check_risk_free(
@@ -213,6 +232,7 @@ def _check_close(
     candle_low: float,
     candle_close: float,
     config: SimulateConfig,
+    timestamp: int,
 ) -> list[tuple[float, str, float]]:
     """
     Determine whether *pos* should close (fully or partially) on this candle.
@@ -220,32 +240,24 @@ def _check_close(
     Returns
     -------
     list[tuple[float, str, float]]
-        Zero or more ``(exit_price, close_reason, closed_size)`` events, in
-        the order they occurred this candle.  Empty list = stays open.
-        ``closed_size`` is always an absolute amount; summed across every
-        event ever returned for one position (across all candles), it
-        equals ``pos.original_size``.
+        Zero or more ``(exit_price, close_reason, closed_size)`` events.
 
-        When ``config.tp_level_close_fractions`` is ``None`` (default) this
-        returns **at most one** event whose ``closed_size`` always equals
-        the position's full remaining size at that point — i.e. exactly the
-        pre-v0.7.3 "one full close" behaviour, just wrapped in a list.
-
-    Priority / ordering (unchanged from pre-v0.7.3)
-    ------------------------------------------------
-    1. Gap opens (candle opens past SL or TP) → fill at ``candle_open``.
-    2. TP hit (``pos.next_tp``): last level → close; intermediate → advance SL
-       (and, if configured, partially close) — see ``_handle_tp_level_hit``.
-    3. SL hit.
+    Priority / ordering
+    -------------------
+    1. Gap opens past SL → fill at ``candle_open``.
+    2. Trailing SL advance from current candle peak (AFTER gap check, so the
+       newly-advanced SL cannot falsely trigger a gap-open close on a candle
+       that simply opened between the old and new SL levels).
+    3. TP hit (``pos.next_tp``): last level → close; intermediate → advance SL.
+    4. SL hit within candle body.
     """
     direction = pos.direction
     is_long = direction == "long"
     events: list[tuple[float, str, float]] = []
-    remaining = pos.size   # this candle's running size total; pos itself is
-                            # mutated by the caller once per event afterwards
+    remaining = pos.size
 
     # ------------------------------------------------------------------
-    # 1. Gap open past SL (unfavourable gap) — always closes everything left
+    # 1. Gap open past SL (uses SL as it stood at END of previous candle)
     # ------------------------------------------------------------------
     if is_long and candle_open <= pos.stop_loss:
         events.append((candle_open, _sl_reason(pos), remaining))
@@ -255,26 +267,30 @@ def _check_close(
         return events
 
     # ------------------------------------------------------------------
-    # 2. Gap open past TP (favourable gap — fill at open)
+    # 2. Advance trailing SL from this candle's peak
+    #    (peak already updated in step A of the main loop)
+    # ------------------------------------------------------------------
+    _update_trailing_sl(pos, config, timestamp)
+
+    # ------------------------------------------------------------------
+    # 3. Gap open past TP (favourable gap — fill at open)
     # ------------------------------------------------------------------
     if pos.next_tp is not None:
         if is_long and candle_open >= pos.next_tp:
             fully_closed, remaining = _handle_tp_level_hit(
-                pos, candle_open, config, events, remaining
+                pos, candle_open, config, events, remaining, timestamp
             )
             if fully_closed:
                 return events
-            # Intermediate level, position still open: fall through to step 3
-            # in case the candle also reaches the (now-updated) next level.
         elif not is_long and candle_open <= pos.next_tp:
             fully_closed, remaining = _handle_tp_level_hit(
-                pos, candle_open, config, events, remaining
+                pos, candle_open, config, events, remaining, timestamp
             )
             if fully_closed:
                 return events
 
     # ------------------------------------------------------------------
-    # 3. TP hit within candle body
+    # 4. TP hit within candle body
     # ------------------------------------------------------------------
     if pos.next_tp is not None:
         tp_hit = (is_long and candle_high >= pos.next_tp) or \
@@ -284,26 +300,17 @@ def _check_close(
 
         if tp_hit:
             if sl_hit:
-                # Both TP and SL triggered on same candle.
-                # Tiebreaker: bullish candle → TP first; bearish → SL first.
                 tp_first = candle_close > candle_open
-
                 if not tp_first:
                     events.append((pos.stop_loss, _sl_reason(pos), remaining))
                     return events
-                # TP wins this candle:
-                _handle_tp_level_hit(pos, pos.next_tp, config, events, remaining)
-                # Matches pre-v0.7.3: stop here even if SL (now possibly at a
-                # new level) would also be hit within this same candle body —
-                # that is only re-checked on the next candle.
+                _handle_tp_level_hit(pos, pos.next_tp, config, events, remaining, timestamp)
                 return events
-
-            # Only TP hit (no SL conflict)
-            _handle_tp_level_hit(pos, pos.next_tp, config, events, remaining)
+            _handle_tp_level_hit(pos, pos.next_tp, config, events, remaining, timestamp)
             return events
 
     # ------------------------------------------------------------------
-    # 4. SL hit within candle body — closes whatever remains
+    # 5. SL hit within candle body
     # ------------------------------------------------------------------
     sl_hit = (is_long and candle_low <= pos.stop_loss) or \
              (not is_long and candle_high >= pos.stop_loss)
@@ -312,7 +319,7 @@ def _check_close(
         events.append((pos.stop_loss, _sl_reason(pos), remaining))
         return events
 
-    return events  # Position stays open (empty list)
+    return events
 
 
 def _make_closed_trade(
@@ -383,6 +390,10 @@ def _make_closed_trade(
         spread_paid=spread_paid,
         signal_metadata=dict(pos.signal_metadata),
         signal_candle_index=pos.signal_candle_index,
+        # v0.7.4 — snapshot SL trajectory + closing-moment info
+        sl_history=tuple(pos.sl_history),
+        final_next_tp=pos.next_tp,
+        peak_price=pos.peak_price,
     )
 
 
@@ -417,6 +428,7 @@ def _handle_tp_level_hit(
     config: SimulateConfig,
     events: list[tuple[float, str, float]],
     remaining: float,
+    timestamp: int,
 ) -> tuple[bool, float]:
     """
     Process one multi-RR TP level being reached at *price*.
@@ -435,7 +447,8 @@ def _handle_tp_level_hit(
       the position's *original* size at every level, including the last
       (no more automatic "close everything" special-case for the final
       level — any unspecified remainder stays open, trailing at the last
-      level's SL forever).
+      level's price, until it is eventually stopped out, force-closed,
+      or hits end-of-data).
 
     Note this function does **not** mutate ``pos.size``/``risk_amount``/
     ``margin_amount`` — it only threads *remaining* (this candle's running
@@ -459,7 +472,7 @@ def _handle_tp_level_hit(
     else:
         frac = 1.0 if is_last else 0.0
 
-    _advance_multi_rr(pos)
+    _advance_multi_rr(pos, timestamp)
 
     if frac <= 0.0:
         return False, remaining
@@ -518,9 +531,6 @@ def _compute_position_params(
 
     if config.position_sizing == SIZING_FIXED_LOT:
         # ---- Fixed-lot: size is specified directly ----
-        # risk_multiplier (default 1.0) lets a strategy scale an individual
-        # signal's size relative to the configured fixed_lot — e.g. to split
-        # one trade idea into several proportionally-sized sub-positions.
         fixed_l = config.fixed_lot * sig.risk_multiplier
 
         if is_mt5:
@@ -555,8 +565,6 @@ def _compute_position_params(
 
     else:
         # ---- Risk-based sizing: compute risk_amount first ----
-        # risk_multiplier (default 1.0) scales this specific signal's risk
-        # relative to the run's configured risk_per_trade / fixed_amount.
         if config.position_sizing == SIZING_RISK_PERCENT:
             balance_ref = wallet if config.compound else config.initial_balance
             risk_amount = balance_ref * config.risk_per_trade / 100.0 * sig.risk_multiplier
@@ -802,17 +810,12 @@ class Simulate:
         )
         chart.set_data(primary_df)
 
-        # Add MACD / MA / RSI if the strategy put them in the data
-        # (strategy_result.data columns beyond OHLCV are available for
-        #  reference but we don't auto-add them — strategies should
-        #  add their own drawings or call add_macd/add_rsi explicitly)
-
         # Add strategy-defined drawings (support/resistance, signal zones, etc.)
         if strategy_result.drawings:
             add_strategy_drawings(chart, strategy_result)
 
-        # Add position boxes
-        add_simulation_positions(chart, report, opacity=0.15)
+        # Add position boxes (and dynamic SL/TP lines for multi_rr / trailing)
+        add_simulation_positions(chart, report, opacity=0.15, config=self.config)
 
         # Show chart (non-blocking so report can open simultaneously)
         chart.show(block=False)
@@ -820,8 +823,6 @@ class Simulate:
         # Give server a moment to start
         _time.sleep(0.4)
 
-        # Return (Chart, ChartServer) — note: chart.show() returns `self`
-        # (the Chart object), so we access the underlying server directly.
         return chart, chart._server
 
     def _render_report(
@@ -907,10 +908,12 @@ class Simulate:
             c_close  = float(row.close)
 
             # -------------------------------------------------------
-            # A. Update trailing SL peak prices + excursion tracking
+            # A. Update trailing peak + excursion tracking
+            #    Trailing SL is applied later inside _check_close, AFTER
+            #    the gap-open check, so a freshly-advanced SL cannot
+            #    falsely trigger a "gap" close on the same candle.
             # -------------------------------------------------------
             for pos in open_positions:
-                _update_trailing_sl(pos, c_high, c_low, config)
                 pos.update_trailing_peak(c_high if pos.direction == "long" else c_low)
                 pos.update_excursion(c_close)
 
@@ -927,7 +930,7 @@ class Simulate:
             # -------------------------------------------------------
             newly_closed: list[_InternalPosition] = []
             for pos in open_positions:
-                events = _check_close(pos, c_open, c_high, c_low, c_close, config)
+                events = _check_close(pos, c_open, c_high, c_low, c_close, config, ts)
                 for exit_price, reason, closed_size in events:
                     ct = _make_closed_trade(pos, exit_price, reason, ts, config, closed_size)
                     wallet += ct.margin_amount + ct.gross_pnl
@@ -993,6 +996,12 @@ class Simulate:
                     signal_candle_index=sig.candle_index,
                     tp_level_prices=tp_prices,
                 )
+                # Initialise SL history with the entry state (v0.7.4)
+                pos.sl_history.append({
+                    "time": ts,
+                    "sl": sig.stop_loss,
+                    "next_tp": tp_prices[0] if tp_prices else None,
+                })
                 open_positions.append(pos)
                 trade_id_seq += 1
 
