@@ -46,7 +46,7 @@ from ._engine import (
     _check_risk_free,
     _compute_position_params,
     _make_closed_trade,
-    _update_trailing_sl,
+    _update_trailing_sl,  # noqa: F401 — re-exported for multi-loop callers
     _SIZE_EPSILON,
 )
 from ._position import (
@@ -318,9 +318,9 @@ def run_multi(
             c_low   = candle["low"]
             c_close = candle["close"]
 
-            # Trailing SL + excursion
+            # Trailing peak + excursion
+            # (trailing SL is applied inside _check_close, after gap check)
             for pos in open_positions:
-                _update_trailing_sl(pos, c_high, c_low, cfg)
                 pos.update_trailing_peak(c_high if pos.direction == "long" else c_low)
                 pos.update_excursion(c_close)
 
@@ -332,7 +332,7 @@ def run_multi(
             # SL/TP close (may yield zero, one, or several partial+final events)
             newly_closed = []
             for pos in open_positions:
-                events = _check_close(pos, c_open, c_high, c_low, c_close, cfg)
+                events = _check_close(pos, c_open, c_high, c_low, c_close, cfg, ts)
                 for exit_price, reason, closed_size in events:
                     ct = _make_closed_trade(pos, exit_price, reason, ts, cfg, closed_size)
                     wallet += ct.margin_amount + ct.gross_pnl

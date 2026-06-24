@@ -433,7 +433,119 @@ def add_ichimoku(
 
 
 # ---------------------------------------------------------------------------
-# Simulation positions (v0.7.0)
+# Dynamic SL/TP line helpers (v0.7.4)
+# ---------------------------------------------------------------------------
+
+# Segment colours based on SL position relative to entry
+_COLOR_SL_LOSS      = "#f85149"  # red   — SL is in the loss zone
+_COLOR_SL_BREAKEVEN = "#e3b341"  # amber — SL is at break-even (entry)
+_COLOR_SL_PROFIT    = "#22d3ee"  # cyan  — SL is in profit territory
+_COLOR_NEXT_TP      = "#3fb950"  # green — next TP target line
+
+
+def _sl_segment_color(sl: float, entry: float, direction: str) -> str:
+    """
+    Return the colour for a SL horizontal line segment based on whether
+    the stop-loss is in the loss zone, at break-even, or in profit.
+
+    Loss zone (red)  : for a long, SL < entry; for a short, SL > entry
+    Break-even (yellow): SL is within a tiny epsilon of entry
+    Profit zone (cyan): for a long, SL > entry; for a short, SL < entry
+    """
+    factor = 1.0 if direction == "long" else -1.0
+    profit_margin = factor * (sl - entry)
+    eps = abs(entry) * 1e-7 or 1e-9    # relative epsilon
+    if profit_margin > eps:
+        return _COLOR_SL_PROFIT
+    elif profit_margin > -eps:
+        return _COLOR_SL_BREAKEVEN
+    else:
+        return _COLOR_SL_LOSS
+
+
+def _draw_sl_line(chart: "Chart", t1: int, t2: int, price: float, color: str) -> None:
+    """Draw a horizontal SL line segment as a TrendLine."""
+    from .models import TrendLine
+    line = TrendLine(
+        time1=t1, price1=price,
+        time2=t2, price2=price,
+        color=color, line_width=2, label="",
+    )
+    chart._drawings.append(line)
+    if chart._shown:
+        chart._server.send({"type": "add_drawing", "drawing": line.to_dict()})
+
+
+def _draw_tp_line(chart: "Chart", t1: int, t2: int, price: float) -> None:
+    """Draw a horizontal next-TP line segment (green) as a TrendLine."""
+    from .models import TrendLine
+    line = TrendLine(
+        time1=t1, price1=price,
+        time2=t2, price2=price,
+        color=_COLOR_NEXT_TP, line_width=1, label="",
+    )
+    chart._drawings.append(line)
+    if chart._shown:
+        chart._server.send({"type": "add_drawing", "drawing": line.to_dict()})
+
+
+def _draw_dynamic_sl_tp_lines(
+    chart: "Chart",
+    marker: dict,
+    close_time_ms: int,
+    draw_tp_lines: bool,
+) -> None:
+    """
+    Draw coloured horizontal SL line segments (and optionally TP lines) for
+    a position whose SL moved during its lifetime.
+
+    ``marker["sl_history"]`` is an ordered list of dicts::
+
+        [{"time": int_ms, "sl": float, "next_tp": float | None}, ...]
+
+    Each entry represents a moment when the SL changed.  Between consecutive
+    entries the SL was constant.  The last segment runs to ``close_time_ms``.
+
+    SL line colour is determined by position relative to entry price:
+    - RED    → SL is below entry (long) / above entry (short): loss zone
+    - YELLOW → SL is at entry price: break-even
+    - CYAN   → SL is above entry (long) / below entry (short): profit zone
+
+    TP lines (green, drawn only when ``draw_tp_lines=True``) show the next
+    TP target for each segment, matching the SL segment's time range.
+    """
+    sl_history = marker.get("sl_history", [])
+    if not sl_history:
+        return
+
+    entry_price = marker["entry_price"]
+    direction   = marker["direction"]
+    n = len(sl_history)
+
+    for i, event in enumerate(sl_history):
+        t_start_ms = event["time"]
+        t_end_ms   = sl_history[i + 1]["time"] if i + 1 < n else close_time_ms
+
+        t1 = t_start_ms // 1000
+        t2 = t_end_ms   // 1000
+
+        if t2 <= t1:
+            continue
+
+        sl_price = event["sl"]
+        next_tp  = event.get("next_tp")
+
+        # SL line
+        color = _sl_segment_color(sl_price, entry_price, direction)
+        _draw_sl_line(chart, t1, t2, sl_price, color)
+
+        # TP line (multi_rr only)
+        if draw_tp_lines and next_tp is not None:
+            _draw_tp_line(chart, t1, t2, next_tp)
+
+
+# ---------------------------------------------------------------------------
+# Simulation positions (v0.7.0, enhanced v0.7.4)
 # ---------------------------------------------------------------------------
 
 def add_simulation_positions(
@@ -441,6 +553,7 @@ def add_simulation_positions(
     report: "SimulateReport",
     opacity: float = 0.15,
     max_trades: int | None = None,
+    config=None,
 ) -> "Chart":
     """
     Overlay all simulated trades on a candle chart as position boxes.
@@ -448,6 +561,29 @@ def add_simulation_positions(
     For each completed trade in *report* a :class:`PositionBox` is added
     showing the loss zone (SL→entry) and profit zone (entry→TP), plus
     entry and exit signal markers.
+
+    v0.7.4 enhancements
+    --------------------
+    * **multi_rr positions** — each time the SL advances (after a TP level
+      is hit) a new coloured horizontal line segment is drawn:
+
+      - RED    → SL in loss zone (below entry for long)
+      - YELLOW → SL at break-even (entry price)
+      - CYAN   → SL in profit territory (above entry for long)
+
+      A GREEN TP-target line is drawn alongside each SL segment showing
+      the next TP the position was aiming at.
+
+    * **trailing SL positions** — same coloured SL line treatment (no TP
+      line), plus the position box top is set to ``peak_price`` (the
+      highest price the position ever saw, which is also the price that
+      drove the trailing SL to its final level).
+
+    * **posbox TP fix** — the profit-zone boundary now uses
+      ``final_next_tp`` (the TP target active *at the moment of closing*)
+      instead of the initial TP at entry.  For example, if a position hit
+      TP3 and the next target was TP4 before the SL was hit, the box shows
+      TP4.
 
     Parameters
     ----------
@@ -459,6 +595,10 @@ def add_simulation_positions(
         Fill opacity for position boxes (default 0.15).
     max_trades : int | None
         Limit the number of trades drawn.  ``None`` draws all.
+    config : SimulateConfig | None
+        When provided, used to detect ``tp_mode`` and ``sl_mode`` so the
+        correct line style is applied automatically.  If ``None``, both
+        dynamic SL and TP lines are drawn whenever ``sl_history`` is non-empty.
 
     Returns
     -------
@@ -473,34 +613,103 @@ def add_simulation_positions(
         from AlgoTradeKit.visual.indicator_renderer import add_simulation_positions
 
         chart = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv")
-        add_simulation_positions(chart, report)
+        add_simulation_positions(chart, report, config=sim_config)
         chart.show(block=True)
     """
-    # Lazy import to avoid circular dependency at module level
-    from AlgoTradeKit.simulate._report import SimulateReport  # noqa: F401 (type hint only)
+    from AlgoTradeKit.simulate._report import SimulateReport  # noqa: F401
 
-    markers = report.trade_markers
-    if max_trades is not None:
-        markers = markers[:max_trades]
+    # Determine active modes from config if provided
+    tp_mode = getattr(config, "tp_mode", None) if config is not None else None
+    sl_mode = getattr(config, "sl_mode", None) if config is not None else None
 
-    for m in markers:
-        open_sec  = m["open_time"]  // 1000
-        close_sec = m["close_time"] // 1000
-        rr = m.get("pnl_r", 0.0)
+    is_multi_rr = (tp_mode == "multi_rr") if tp_mode is not None else None
+    is_trailing  = (sl_mode == "trailing") if sl_mode is not None else None
 
+    # Group markers by trade_id so that partial-close positions (multiple
+    # ClosedTrade rows per trade) are rendered as a single posbox + SL lines.
+    groups: dict[int, list[dict]] = {}
+    for m in report.trade_markers:
+        groups.setdefault(m["trade_id"], []).append(m)
+
+    drawn = 0
+    for tid, g_markers in groups.items():
+        if max_trades is not None and drawn >= max_trades:
+            break
+
+        # First marker carries entry data; last marker carries exit data and
+        # the most-complete sl_history snapshot.
+        first = g_markers[0]
+        last  = g_markers[-1]
+
+        open_ms   = first["open_time"]
+        close_ms  = last["close_time"]
+        open_sec  = open_ms  // 1000
+        close_sec = close_ms // 1000
+
+        entry_price  = first["entry_price"]
+        initial_sl   = first["initial_stop_loss"]
+        direction    = first["direction"]
+        net_pnl      = sum(m["net_pnl"] for m in g_markers)
+        close_reason = last["close_reason"]
+        rr           = last.get("pnl_r", 0.0)
+        sl_history   = last.get("sl_history", [])
+        final_next_tp = last.get("final_next_tp")
+        peak_price   = last.get("peak_price", entry_price)
+
+        # ---- Determine posbox TP (v0.7.4 fix) ----
+        # For trailing SL, the top of the profit zone is the peak price
+        # (the furthest price the trailing SL ever chased).
+        # For multi_rr, use the final_next_tp so the box shows the TP target
+        # that was active at the moment the position closed.
+        visual_tp = first.get("take_profit")   # initial TP (fallback)
+
+        if is_trailing or (is_trailing is None and sl_mode == "trailing"
+                           and len(sl_history) > 1):
+            # Peak-based profit zone for trailing positions
+            visual_tp = peak_price
+        elif final_next_tp is not None:
+            # Use the closing-moment next-TP for multi_rr and other modes
+            visual_tp = final_next_tp
+        elif last.get("close_reason") == "tp" and last.get("exit_price"):
+            # Position closed exactly at the final TP — use exit price
+            visual_tp = last["exit_price"]
+
+        # ---- Position box ----
         chart.add_position_box(
             open_time    = open_sec,
             close_time   = close_sec,
-            entry_price  = m["entry_price"],
-            stop_loss    = m["initial_stop_loss"],
-            take_profit  = m.get("take_profit"),
-            direction    = m["direction"],
-            net_pnl      = m["net_pnl"],
-            close_reason = m["close_reason"],
-            trade_id     = m["trade_id"],
+            entry_price  = entry_price,
+            stop_loss    = initial_sl,
+            take_profit  = visual_tp,
+            direction    = direction,
+            net_pnl      = net_pnl,
+            close_reason = close_reason,
+            trade_id     = tid,
             rr_ratio     = rr,
             opacity      = opacity,
         )
+
+        # ---- Dynamic SL/TP lines (v0.7.4) ----
+        has_sl_history = bool(sl_history) and len(sl_history) > 1
+
+        draw_dynamic = (
+            has_sl_history
+            and (
+                is_multi_rr is True
+                or is_trailing is True
+                or is_multi_rr is None  # config not provided: draw if data present
+            )
+        )
+
+        if draw_dynamic:
+            # For multi_rr: draw SL lines + green TP lines
+            # For trailing: draw SL lines only (no TP line)
+            draw_tp_lines = not is_trailing   # True for multi_rr / unknown
+            _draw_dynamic_sl_tp_lines(
+                chart, last, close_ms, draw_tp_lines=draw_tp_lines
+            )
+
+        drawn += 1
 
     return chart
 

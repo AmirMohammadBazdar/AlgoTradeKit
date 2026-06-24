@@ -212,6 +212,40 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .stog input:checked+.stog-slider{background:var(--accent)}
 .stog input:checked+.stog-slider::before{transform:translateX(16px)}
 
+/* ── Indicator-add panel (v0.7.4) ────────────────────────────── */
+#ind-overlay{
+  display:none;position:fixed;inset:0;z-index:400;
+  background:#0006;align-items:flex-start;justify-content:flex-end;
+  padding-top:52px;padding-right:12px;
+}
+#ind-overlay.open{display:flex}
+#ind-panel{
+  background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+  width:330px;padding:18px 20px 20px;box-shadow:0 12px 40px #0009;
+  display:flex;flex-direction:column;gap:14px;max-height:calc(100vh - 70px);overflow-y:auto;
+}
+#ind-panel h3{font-size:13px;font-weight:700;color:var(--text);
+  display:flex;align-items:center;justify-content:space-between;margin:0}
+#ind-panel h3 button{background:none;border:none;cursor:pointer;color:var(--text2);
+  font-size:16px;line-height:1;padding:2px 4px;border-radius:4px}
+#ind-panel h3 button:hover{color:var(--text)}
+.ind-section{display:flex;flex-direction:column;gap:10px}
+.ind-row{display:flex;flex-direction:column;gap:4px}
+.ind-row label{font-size:10px;font-weight:700;color:var(--text2);
+  letter-spacing:.06em;text-transform:uppercase}
+.ind-row select,.ind-row input[type=number],.ind-row input[type=color]{
+  background:var(--bg3);border:1px solid var(--border);border-radius:5px;
+  color:var(--text);padding:5px 8px;font-size:12px;outline:none;width:100%;box-sizing:border-box}
+.ind-row select:hover,.ind-row input[type=number]:hover{border-color:var(--accent)}
+.ind-row input[type=color]{height:30px;padding:2px 4px;cursor:pointer}
+.ind-params-group{display:flex;flex-direction:column;gap:10px}
+#ind-add-btn{
+  background:var(--accent);border:none;border-radius:6px;color:#fff;
+  font-size:12px;font-weight:700;padding:9px 0;cursor:pointer;
+  letter-spacing:.04em;margin-top:4px;width:100%;transition:opacity .15s}
+#ind-add-btn:hover{opacity:.85}
+.ind-hint{font-size:10px;color:var(--text2);margin-top:2px;line-height:1.4}
+
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 </style>
@@ -277,12 +311,149 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
       <path d="M6.5 1v1.5M6.5 10.5V12M1 6.5h1.5M10.5 6.5H12M2.6 2.6l1 1M9.4 9.4l1 1M9.4 3.6l-1 1M3.6 9.4l-1 1" stroke="currentColor" stroke-width="1"/>
     </svg>
   </button>
+  <button class="tb" id="ind-btn" onclick="toggleIndPanel()" title="Add Indicator">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <polyline points="1,11 4,7 7,9 10,4 13,6" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>
+      <circle cx="13" cy="2" r="1.5" fill="currentColor"/>
+      <line x1="13" y1="3.5" x2="13" y2="6" stroke="currentColor" stroke-width="1.2"/>
+    </svg>
+  </button>
   <button class="tb" id="settings-btn" onclick="toggleSettings()" title="Settings">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
       <circle cx="7" cy="7" r="2.2" stroke="currentColor" stroke-width="1.3"/>
       <path d="M7 1v1.8M7 11.2V13M1 7h1.8M11.2 7H13M2.9 2.9l1.3 1.3M9.8 9.8l1.3 1.3M11.1 2.9l-1.3 1.3M4.2 9.8l-1.3 1.3" stroke="currentColor" stroke-width="1.2"/>
     </svg>
   </button>
+</div>
+
+<!-- ── Indicator-add overlay (v0.7.4) ─────────────────────────── -->
+<div id="ind-overlay" onclick="onIndOverlayClick(event)">
+  <div id="ind-panel">
+    <h3>Add Indicator <button onclick="closeIndPanel()">✕</button></h3>
+    <div class="sdivider"></div>
+
+    <div class="ind-section">
+      <div class="ind-row">
+        <label>Type</label>
+        <select id="ind-type" onchange="onIndTypeChange()">
+          <optgroup label="Moving Averages">
+            <option value="ema">EMA — Exponential</option>
+            <option value="sma">SMA — Simple</option>
+            <option value="wma">WMA — Weighted</option>
+            <option value="smma">SMMA — Smoothed</option>
+            <option value="dema">DEMA — Double EMA</option>
+            <option value="tema">TEMA — Triple EMA</option>
+            <option value="hma">HMA — Hull</option>
+            <option value="vwma">VWMA — Volume-Weighted</option>
+            <option value="vwap">VWAP — Vol-Weighted Avg Price</option>
+          </optgroup>
+          <optgroup label="Oscillators">
+            <option value="rsi">RSI — Relative Strength</option>
+            <option value="macd">MACD</option>
+            <option value="atr">ATR — Avg True Range</option>
+          </optgroup>
+          <optgroup label="Trend">
+            <option value="ichimoku">Ichimoku Cloud</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <!-- MA params -->
+      <div id="ind-p-ma" class="ind-params-group">
+        <div class="ind-row" id="ind-row-period">
+          <label>Period</label>
+          <input type="number" id="ind-period" value="20" min="1" max="500"/>
+        </div>
+        <div class="ind-row">
+          <label>Source</label>
+          <select id="ind-source">
+            <option value="close">Close</option>
+            <option value="open">Open</option>
+            <option value="high">High</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- RSI params -->
+      <div id="ind-p-rsi" class="ind-params-group" style="display:none">
+        <div class="ind-row">
+          <label>Period</label>
+          <input type="number" id="ind-rsi-period" value="14" min="2" max="300"/>
+        </div>
+        <div class="ind-row">
+          <label>Source</label>
+          <select id="ind-rsi-source">
+            <option value="close">Close</option>
+            <option value="open">Open</option>
+            <option value="high">High</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+        <div class="ind-row">
+          <label>MA on RSI</label>
+          <select id="ind-rsi-ma-type" onchange="onRsiMaChange()">
+            <option value="none">None</option>
+            <option value="sma">SMA</option>
+            <option value="ema">EMA</option>
+          </select>
+        </div>
+        <div class="ind-row" id="ind-rsi-ma-period-row" style="display:none">
+          <label>MA Period</label>
+          <input type="number" id="ind-rsi-ma-period" value="14" min="2" max="200"/>
+        </div>
+      </div>
+
+      <!-- MACD params -->
+      <div id="ind-p-macd" class="ind-params-group" style="display:none">
+        <div class="ind-row">
+          <label>Fast Period</label>
+          <input type="number" id="ind-macd-fast" value="12" min="2" max="200"/>
+        </div>
+        <div class="ind-row">
+          <label>Slow Period</label>
+          <input type="number" id="ind-macd-slow" value="26" min="2" max="500"/>
+        </div>
+        <div class="ind-row">
+          <label>Signal Period</label>
+          <input type="number" id="ind-macd-signal" value="9" min="2" max="200"/>
+        </div>
+      </div>
+
+      <!-- ATR params -->
+      <div id="ind-p-atr" class="ind-params-group" style="display:none">
+        <div class="ind-row">
+          <label>Period</label>
+          <input type="number" id="ind-atr-period" value="14" min="1" max="500"/>
+        </div>
+      </div>
+
+      <!-- Ichimoku params -->
+      <div id="ind-p-ichimoku" class="ind-params-group" style="display:none">
+        <div class="ind-row">
+          <label>Tenkan Period</label>
+          <input type="number" id="ind-ichi-tenkan" value="9" min="2" max="200"/>
+        </div>
+        <div class="ind-row">
+          <label>Kijun Period</label>
+          <input type="number" id="ind-ichi-kijun" value="26" min="2" max="200"/>
+        </div>
+        <div class="ind-row">
+          <label>Senkou B Period</label>
+          <input type="number" id="ind-ichi-senkou-b" value="52" min="2" max="500"/>
+        </div>
+      </div>
+
+      <!-- Color (for MA / RSI / ATR) -->
+      <div class="ind-row" id="ind-color-row">
+        <label>Colour</label>
+        <input type="color" id="ind-color" value="#2962ff"/>
+        <span class="ind-hint">Leave default to use indicator's built-in colour</span>
+      </div>
+    </div>
+
+    <button id="ind-add-btn" onclick="submitIndicator()">Add to Chart</button>
+  </div>
 </div>
 
 <!-- ── Settings overlay ───────────────────────────────────────── -->
@@ -2270,6 +2441,102 @@ function closeSettings(){
   document.getElementById('settings-btn').classList.remove('on');
 }
 function onOverlayClick(e){ if(e.target.id==='settings-overlay') closeSettings(); }
+
+// ── Indicator-add panel (v0.7.4) ─────────────────────────────────────────
+const _IND_DEFAULT_COLORS = {
+  ema:'#2962ff', sma:'#ff6d00', wma:'#00897b', smma:'#6a1b9a',
+  dema:'#c62828', tema:'#4527a0', hma:'#0d47a1', vwma:'#558b2f',
+  vwap:'#1565c0', rsi:'#7b1fa2', macd:'#2962ff', atr:'#ff9800',
+  ichimoku:'#26c6da',
+};
+// Which indicator kinds show the color picker
+const _IND_SHOW_COLOR = new Set(['ema','sma','wma','smma','dema','tema','hma','vwma','vwap','rsi','atr']);
+
+function toggleIndPanel(){
+  const ov=document.getElementById('ind-overlay');
+  if(ov.classList.contains('open')){ closeIndPanel(); return; }
+  ov.classList.add('open');
+  document.getElementById('ind-btn').classList.add('on');
+  onIndTypeChange();   // initialise form for current selection
+}
+function closeIndPanel(){
+  document.getElementById('ind-overlay').classList.remove('open');
+  document.getElementById('ind-btn').classList.remove('on');
+}
+function onIndOverlayClick(e){ if(e.target.id==='ind-overlay') closeIndPanel(); }
+
+function onIndTypeChange(){
+  const kind = document.getElementById('ind-type').value;
+  // Hide all param groups
+  ['ma','rsi','macd','atr','ichimoku'].forEach(k=>{
+    document.getElementById('ind-p-'+k).style.display='none';
+  });
+  // Show relevant group
+  const groupMap = {
+    ema:'ma',sma:'ma',wma:'ma',smma:'ma',dema:'ma',tema:'ma',
+    hma:'ma',vwma:'ma',vwap:'ma',
+    rsi:'rsi', macd:'macd', atr:'atr', ichimoku:'ichimoku'
+  };
+  const g = groupMap[kind] || 'ma';
+  document.getElementById('ind-p-'+g).style.display='flex';
+
+  // VWAP has no period
+  const periodRow = document.getElementById('ind-row-period');
+  if(periodRow) periodRow.style.display = (kind==='vwap') ? 'none' : '';
+
+  // Color picker visibility
+  const colorRow = document.getElementById('ind-color-row');
+  colorRow.style.display = _IND_SHOW_COLOR.has(kind) ? '' : 'none';
+
+  // Update default colour
+  const colorInput = document.getElementById('ind-color');
+  if(_IND_DEFAULT_COLORS[kind]) colorInput.value = _IND_DEFAULT_COLORS[kind];
+}
+
+function onRsiMaChange(){
+  const v = document.getElementById('ind-rsi-ma-type').value;
+  document.getElementById('ind-rsi-ma-period-row').style.display = (v==='none') ? 'none' : '';
+}
+
+function _gv(id){ return document.getElementById(id).value; }
+function _gi(id){ return parseInt(_gv(id),10); }
+
+function submitIndicator(){
+  const kind = _gv('ind-type');
+  const color = _gv('ind-color');
+  let params = { kind, color };
+
+  const MA_KINDS = ['ema','sma','wma','smma','dema','tema','hma','vwma','vwap'];
+  if(MA_KINDS.includes(kind)){
+    params.period = _gi('ind-period');
+    params.source = _gv('ind-source');
+  } else if(kind==='rsi'){
+    params.period    = _gi('ind-rsi-period');
+    params.source    = _gv('ind-rsi-source');
+    params.ma_type   = _gv('ind-rsi-ma-type');
+    params.ma_period = _gi('ind-rsi-ma-period');
+  } else if(kind==='macd'){
+    params.fast          = _gi('ind-macd-fast');
+    params.slow          = _gi('ind-macd-slow');
+    params.signal_period = _gi('ind-macd-signal');
+  } else if(kind==='atr'){
+    params.period = _gi('ind-atr-period');
+  } else if(kind==='ichimoku'){
+    params.tenkan   = _gi('ind-ichi-tenkan');
+    params.kijun    = _gi('ind-ichi-kijun');
+    params.senkou_b = _gi('ind-ichi-senkou-b');
+  }
+
+  // Disable button while computing
+  const btn = document.getElementById('ind-add-btn');
+  btn.disabled = true;
+  btn.textContent = 'Computing…';
+
+  sendMsg({ type:'compute_indicator', params });
+
+  // Re-enable after short delay (server responds via add_indicator message)
+  setTimeout(()=>{ btn.disabled=false; btn.textContent='Add to Chart'; }, 2000);
+}
 
 function applyFonts(){
   axisFont        = document.getElementById('sf-axis').value;

@@ -1404,3 +1404,331 @@ class TestRunMulti:
         assert isinstance(report, SimulateReport)
         # Two separate trades (one per symbol) should have been opened
         assert report.total_trades >= 1
+
+
+# ===========================================================================
+# 16. v0.7.4 — SL history, dynamic lines, posbox TP fix
+# ===========================================================================
+
+class TestSlHistory:
+    """
+    ClosedTrade.sl_history, final_next_tp, and peak_price fields added in
+    v0.7.4.  These drive the dynamic SL/TP lines on the candle chart.
+    """
+
+    _BASE_TS = 1_700_000_000_000  # ms
+    _1H_MS   = 3_600_000
+
+    def _cfg_multi_rr(self, levels=None):
+        return SimulateConfig(
+            initial_balance=10_000,
+            leverage=1,
+            spread=0.0,
+            commission=0.0, commission_type="fixed",
+            risk_per_trade=1.0,
+            tp_mode="multi_rr",
+            tp_levels=levels or [1.0, 2.0, 3.0],
+            sl_mode="signal",
+            primary_timeframe="1h",
+            show_chart=False,
+            report_mode="none",
+        )
+
+    def _cfg_trailing(self, pct=2.0):
+        return SimulateConfig(
+            initial_balance=10_000,
+            leverage=1,
+            spread=0.0,
+            commission=0.0, commission_type="fixed",
+            risk_per_trade=1.0,
+            tp_mode="none",
+            sl_mode="trailing",
+            trailing_sl_percent=pct,
+            primary_timeframe="1h",
+            show_chart=False,
+            report_mode="none",
+        )
+
+    # ------------------------------------------------------------------
+    # multi_rr: sl_history is populated at entry + after each TP hit
+    # ------------------------------------------------------------------
+
+    def test_multi_rr_sl_history_initial_entry(self):
+        """sl_history must have at least one entry (the position open state)."""
+        prices = [100, 101, 102, 98]   # TP1=105 never hit → closed by SL
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_multi_rr()).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        assert len(ct.sl_history) >= 1
+        first = ct.sl_history[0]
+        assert first["sl"] == pytest.approx(95.0)
+        assert first["next_tp"] == pytest.approx(105.0)   # 100 + 1*5
+
+    def test_multi_rr_sl_history_grows_on_tp_hit(self):
+        """After TP1 hit SL advances to entry; sl_history should have 2 entries."""
+        # entry=100, sl=95 → sl_dist=5 → tp1=105, tp2=110, tp3=115
+        prices = [100, 106, 104, 98]   # crosses 105 on bar2, then drops below 100
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_multi_rr()).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        # sl_history: [entry-state, post-TP1-state]
+        assert len(ct.sl_history) >= 2
+        # After TP1 hit: SL should be at entry (break-even = 100)
+        second = ct.sl_history[1]
+        assert second["sl"] == pytest.approx(100.0)
+        assert second["next_tp"] == pytest.approx(110.0)  # TP2
+
+    def test_multi_rr_sl_history_has_timestamp(self):
+        """Each sl_history entry must have a 'time' key in UTC ms."""
+        prices = [100, 106, 111, 116]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_multi_rr()).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        for entry in ct.sl_history:
+            assert "time" in entry
+            assert entry["time"] > 1_000_000_000_000   # plausibly ms-range
+
+    def test_multi_rr_sl_history_after_two_tp_hits(self):
+        """Two TP levels hit → sl_history has 3 entries (open + TP1 + TP2)."""
+        # tp1=105 (SL→100), tp2=110 (SL→105), tp3=115 never hit → SL at 105 hit
+        prices = [100, 106, 111, 108, 104]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_multi_rr()).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        assert len(ct.sl_history) >= 3
+        # Third entry: SL at TP1=105, next_tp=TP3=115
+        third = ct.sl_history[2]
+        assert third["sl"] == pytest.approx(105.0)
+
+    # ------------------------------------------------------------------
+    # multi_rr: final_next_tp is the TP target at close time
+    # ------------------------------------------------------------------
+
+    def test_final_next_tp_after_one_level(self):
+        """Closed after TP1 hit (SL at entry → SL hit): final_next_tp = TP2."""
+        prices = [100, 106, 103, 99]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_multi_rr()).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        assert ct.final_next_tp == pytest.approx(110.0)   # TP2
+
+    def test_final_next_tp_none_when_all_levels_consumed(self):
+        """Closed at final TP: final_next_tp should be None (all consumed)."""
+        prices = [100, 106, 111, 116]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_multi_rr()).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        assert ct.final_next_tp is None
+
+    # ------------------------------------------------------------------
+    # multi_rr: trade_markers include sl_history and final_next_tp
+    # ------------------------------------------------------------------
+
+    def test_trade_markers_include_sl_history(self):
+        prices = [100, 106, 104, 98]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_multi_rr()).run(_make_result([sig], df))
+        marker = report.trade_markers[0]
+        assert "sl_history" in marker
+        assert isinstance(marker["sl_history"], list)
+        assert "final_next_tp" in marker
+        assert "peak_price" in marker
+
+    # ------------------------------------------------------------------
+    # trailing SL: sl_history records each SL advance
+    # ------------------------------------------------------------------
+
+    def test_trailing_sl_history_records_advance(self):
+        """
+        Trailing SL at 2% below peak.  As price rises, the SL must advance;
+        each advance should be recorded in sl_history.
+        """
+        # entry=100, initial_sl=98 (2% below). Prices rise to 110 → trailing
+        # SL chases up.  Then price drops → position closed.
+        prices = [100, 103, 107, 110, 105, 100, 95]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0,
+            stop_loss=100.0 * 0.98,   # 98
+            take_profit=None,
+            timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_trailing(pct=2.0)).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        # At least one SL advance should have been recorded beyond the initial entry
+        assert len(ct.sl_history) >= 2
+        # SL values should be strictly increasing (longs: SL only moves up)
+        sl_vals = [e["sl"] for e in ct.sl_history]
+        for a, b in zip(sl_vals, sl_vals[1:]):
+            assert b >= a
+
+    def test_trailing_sl_peak_price_stored(self):
+        """peak_price in ClosedTrade = highest high during the trade (long)."""
+        prices = [100, 105, 112, 109, 95]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0,
+            stop_loss=98.0,
+            take_profit=None,
+            timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        report = Simulate(self._cfg_trailing(pct=2.0)).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        # peak_price must be >= max seen close price
+        max_close = max(prices[:4])   # 112 (before final close candle)
+        assert ct.peak_price >= max_close
+
+    # ------------------------------------------------------------------
+    # Backward-compatibility: non-moving SL positions have sl_history
+    # with exactly one entry
+    # ------------------------------------------------------------------
+
+    def test_signal_sl_mode_single_entry(self):
+        """Plain signal-SL (no trailing, no multi_rr): sl_history has 1 entry."""
+        prices = [100, 102, 98]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=105.0,
+            timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        cfg = SimulateConfig(
+            initial_balance=10_000, leverage=1, spread=0.0,
+            commission=0.0, commission_type="fixed",
+            risk_per_trade=1.0, tp_mode="signal", sl_mode="signal",
+            primary_timeframe="1h", show_chart=False, report_mode="none",
+        )
+        report = Simulate(cfg).run(_make_result([sig], df))
+        ct = report.closed_trades[0]
+        # Exactly one entry: the initial open state
+        assert len(ct.sl_history) == 1
+        assert ct.sl_history[0]["sl"] == pytest.approx(95.0)
+
+    # ------------------------------------------------------------------
+    # indicator_renderer: add_simulation_positions (smoke test)
+    # ------------------------------------------------------------------
+
+    def test_add_simulation_positions_smoke(self):
+        """
+        add_simulation_positions must not raise and must add exactly one
+        position box per unique trade_id (even for multi_rr).
+        """
+        from AlgoTradeKit.visual import Chart
+        from AlgoTradeKit.visual.indicator_renderer import add_simulation_positions
+
+        prices = [100, 106, 111, 116]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        cfg = self._cfg_multi_rr()
+        report = Simulate(cfg).run(_make_result([sig], df))
+
+        chart = Chart(title="test")
+        chart.set_data(df)
+        add_simulation_positions(chart, report, config=cfg)
+
+        from AlgoTradeKit.visual.models import PositionBox
+        boxes = [d for d in chart._drawings if isinstance(d, PositionBox)]
+        unique_tids = {m["trade_id"] for m in report.trade_markers}
+        # One posbox per unique trade
+        assert len(boxes) == len(unique_tids)
+
+    def test_add_simulation_positions_draws_sl_lines(self):
+        """
+        For multi_rr with sl_history length > 1, dynamic SL TrendLine
+        drawings must be added to the chart.
+        """
+        from AlgoTradeKit.visual import Chart
+        from AlgoTradeKit.visual.indicator_renderer import add_simulation_positions
+        from AlgoTradeKit.visual.models import TrendLine
+
+        # hit TP1 so SL moves → sl_history length ≥ 2
+        prices = [100, 106, 104, 98]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        cfg = self._cfg_multi_rr()
+        report = Simulate(cfg).run(_make_result([sig], df))
+
+        chart = Chart(title="test")
+        chart.set_data(df)
+        add_simulation_positions(chart, report, config=cfg)
+
+        trendlines = [d for d in chart._drawings if isinstance(d, TrendLine)]
+        assert len(trendlines) >= 1   # at least one SL line segment drawn
+
+    def test_posbox_uses_final_next_tp(self):
+        """
+        Position box TP boundary must reflect the final_next_tp, not the
+        initial take_profit (TP1).  After TP1 hit (next_tp→TP2) the box
+        should show TP2 as the profit-zone top.
+        """
+        from AlgoTradeKit.visual import Chart
+        from AlgoTradeKit.visual.indicator_renderer import add_simulation_positions
+        from AlgoTradeKit.visual.models import PositionBox
+
+        # entry=100, SL=95 → tp1=105, tp2=110, tp3=115
+        # Price hits TP1 → SL→100, next_tp→110; then price drops to 99 (SL hit)
+        prices = [100, 106, 104, 98]
+        df  = _make_ohlcv(prices, spread=0.0)
+        sig = Signal(
+            direction="long", entry_price=100.0, stop_loss=95.0,
+            take_profit=None, timestamp=int(df.iloc[0]["timestamp"]),
+            candle_index=0, timeframe="1h",
+        )
+        cfg = self._cfg_multi_rr()
+        report = Simulate(cfg).run(_make_result([sig], df))
+
+        chart = Chart(title="test")
+        chart.set_data(df)
+        add_simulation_positions(chart, report, config=cfg)
+
+        boxes = [d for d in chart._drawings if isinstance(d, PositionBox)]
+        assert boxes
+        box = boxes[0]
+        # TP shown on the box must be TP2 (110) not TP1 (105)
+        assert box.take_profit == pytest.approx(110.0)
