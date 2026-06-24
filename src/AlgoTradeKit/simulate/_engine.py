@@ -70,6 +70,67 @@ from ._report import SimulateReport, build_report
 # closed (avoids float dust keeping a ~0-size position open forever).
 _SIZE_EPSILON = 1e-9
 
+# ---------------------------------------------------------------------------
+# Keep-alive: prevent the process from exiting while browser tabs are open
+# ---------------------------------------------------------------------------
+
+_keep_alive_registered = False   # register only once per process
+
+
+def _register_keep_alive() -> None:
+    """
+    Register a one-time ``atexit`` handler that keeps the Python process
+    alive (blocking on ``while True: sleep(1)``) until the user presses
+    Ctrl+C.
+
+    **Why this is necessary**
+
+    Both ``ChartServer`` and ``ReportServer`` run in *daemon* threads.
+    Python's process exits as soon as the main thread finishes, and daemon
+    threads are killed at that point — before the browser has had any
+    meaningful time to connect, receive data, or let the user interact.
+    This caused the chart/report to show "disconnected" immediately after
+    the script finished.
+
+    **Why atexit (not blocking inside Simulate.run)**
+
+    Blocking inside ``Simulate.run()`` would prevent the caller from doing
+    anything after the simulation — printing stats, saving CSV history, or
+    running a second backtest.  An ``atexit`` handler runs *after* all user
+    code has finished but *before* Python kills daemon threads, so:
+
+    1. ``Simulate.run()`` returns immediately → caller code runs normally.
+    2. When the caller's script finishes, Python queues shutdown.
+    3. The atexit handler fires → the daemon server threads are still alive.
+    4. The handler blocks → servers stay up, browser tabs remain interactive.
+    5. User presses Ctrl+C → handler unblocks → Python kills daemon threads.
+
+    The handler is registered at most once per process invocation, so
+    multiple ``Simulate.run()`` calls (e.g., a parameter sweep) register
+    only a single blocking handler.
+    """
+    global _keep_alive_registered
+    if _keep_alive_registered:
+        return
+    _keep_alive_registered = True
+
+    import atexit
+    import time as _t
+
+    def _block() -> None:
+        print(
+            "\n  \033[90m[AlgoTradeKit] Browser UI open — "
+            "press Ctrl+C to exit\033[0m",
+            flush=True,
+        )
+        try:
+            while True:
+                _t.sleep(1)
+        except KeyboardInterrupt:
+            print("\n  \033[90m[AlgoTradeKit] Shutting down…\033[0m", flush=True)
+
+    atexit.register(_block)
+
 
 # ---------------------------------------------------------------------------
 # Module-level private helpers
@@ -769,22 +830,47 @@ class Simulate:
 
         Called automatically by ``run()`` when the config has
         ``show_chart=True`` or ``report_mode != "none"``.
+
+        v0.7.4 fix
+        ----------
+        Both servers (chart and report) run in daemon threads.  Daemon threads
+        are killed the moment the Python process's main thread exits, which
+        previously caused the browser tabs to show "disconnected" immediately
+        after the user's script finished (e.g. after printing stats and saving
+        history).
+
+        The fix: register an ``atexit`` handler that blocks with
+        ``while True: sleep(1)`` after all user code has run.  ``atexit``
+        handlers execute *before* daemon threads are killed, so the servers
+        stay up until the user presses Ctrl+C.
         """
         config = self.config
         tf = config.primary_timeframe
 
         chart = None
         chart_server = None
+        report_server = None
+        has_browser_ui = False
 
         # ---- 1. Build candle chart with positions ----
         if config.show_chart:
             chart, chart_server = self._build_simulation_chart(
                 strategy_result, report, tf
             )
+            has_browser_ui = True
 
         # ---- 2. Report page ----
         if config.report_mode != REPORT_MODE_NONE:
-            self._render_report(report, strategy_result, chart, chart_server)
+            report_server = self._render_report(
+                report, strategy_result, chart, chart_server
+            )
+            # report_server is None for save-only mode (no browser tab)
+            if report_server is not None:
+                has_browser_ui = True
+
+        # ---- 3. Keep process alive while browser tabs are open ----
+        if has_browser_ui:
+            _register_keep_alive()
 
     def _build_simulation_chart(
         self,
@@ -831,8 +917,16 @@ class Simulate:
         strategy_result: "StrategyResult",
         chart,
         chart_server,
-    ) -> None:
-        """Build and display/save the report page."""
+    ):
+        """Build and display/save the report page.
+
+        Returns
+        -------
+        ReportServer | None
+            The running server when a browser tab is opened
+            (``report_mode`` is ``"webpage"`` or ``"both"``);
+            ``None`` for save-only mode (no browser UI to keep alive).
+        """
         import time as _time
         from ..report._builder import build_report_payload
         from ..report._server import ReportServer
@@ -860,6 +954,7 @@ class Simulate:
             if marker:
                 chart.navigate_to_candle(marker["open_time"])
 
+        report_server = None
         if open_browser:
             report_server = ReportServer(
                 title=f"AlgoTradeKit Report — {config.config_id}",
@@ -872,6 +967,8 @@ class Simulate:
         if save_file:
             out_path = save_report_html(report, path=config.report_save_path)
             print(f"[AlgoTradeKit] Report saved → {out_path}")
+
+        return report_server
 
     # ------------------------------------------------------------------
     # Core loop (extracted for reuse in _runner.py multi-pair engine)
