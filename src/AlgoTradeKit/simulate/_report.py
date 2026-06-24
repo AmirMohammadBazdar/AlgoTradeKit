@@ -721,6 +721,16 @@ def _build_trade_markers(trades: list[ClosedTrade]) -> list[dict[str, Any]]:
 
     Each dict contains everything the chart widget needs to render a dot on
     the balance curve and open the visual chart on click.
+
+    v0.7.4 additions
+    -----------------
+    ``sl_history`` — ordered list of SL-state snapshots (time, sl, next_tp)
+        recorded whenever the SL moved during the trade.  Used by the visual
+        module to draw dynamic SL / TP line segments on the candle chart.
+    ``final_next_tp`` — the next-TP target that was active at closing time.
+        Used to set the correct TP boundary on the position box.
+    ``peak_price`` — the best price reached during the trade.  Used as the
+        top of the position box when sl_mode is "trailing".
     """
     markers = []
     for t in trades:
@@ -748,5 +758,10 @@ def _build_trade_markers(trades: list[ClosedTrade]) -> list[dict[str, Any]]:
             "risk_amount":        t.risk_amount,
             "max_adverse_excursion":    t.max_adverse_excursion,
             "max_favourable_excursion": t.max_favourable_excursion,
+            # v0.7.4 — dynamic SL/TP visualisation fields
+            "sl_history":         list(t.sl_history),
+            "final_next_tp":      t.final_next_tp,
+            "peak_price":         t.peak_price,
+            "rr_levels_hit":      t.rr_levels_hit,
         })
     return markers
