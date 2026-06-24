@@ -83,7 +83,7 @@ class _InternalPosition:
     pnl_per_price_unit : float
         ``risk_amount / sl_distance`` — scales price move to dollar PnL.
     peak_price : float
-        Most favourable price seen since entry (for trailing SL).
+        Most favourable price seen since entry (for trailing SL and posbox).
     next_tp : float | None
         In ``"multi_rr"`` mode: the next TP level price to watch for.
     last_rr_hit : int
@@ -92,6 +92,14 @@ class _InternalPosition:
         Original signal metadata forwarded to the closed-trade record.
     signal_candle_index : int
         ``Signal.candle_index`` — used for report visual linking.
+    sl_history : list
+        Ordered list of SL-state snapshots, each as a dict::
+
+            {"time": int, "sl": float, "next_tp": float | None}
+
+        Populated at position open and whenever the SL moves (multi-RR TP
+        hit or trailing update).  Consumed by the visual module to draw
+        dynamic SL/TP line segments on the candle chart.
     """
 
     __slots__ = (
@@ -109,6 +117,7 @@ class _InternalPosition:
         "risk_free_triggered",      # bool — break-even already activated?
         "_max_favourable",          # float — best unrealised PnL seen
         "_max_adverse",             # float — worst unrealised PnL seen (abs)
+        "sl_history",               # list[dict] — SL-state change log (v0.7.4)
     )
 
     def __init__(
@@ -154,6 +163,8 @@ class _InternalPosition:
         self.risk_free_triggered: bool = False
         self._max_favourable: float = 0.0
         self._max_adverse: float = 0.0
+        # SL history — initialised with the entry state (v0.7.4)
+        self.sl_history: list = []
 
     # ------------------------------------------------------------------
     # PnL helpers
@@ -267,6 +278,27 @@ class ClosedTrade:
         Original Signal metadata.
     signal_candle_index : int
         Signal candle position in the primary TF DataFrame.
+    sl_history : tuple
+        Ordered snapshot of SL-state changes for this position, as a tuple
+        of dicts ``{"time": int_ms, "sl": float, "next_tp": float | None}``.
+        Populated by the engine whenever the SL moves (multi-RR TP hit or
+        trailing SL advance).  The LAST ClosedTrade in a partial-close group
+        contains the most complete history.  Consumed by the visual module.
+        Empty tuple for positions that never moved their SL.  (v0.7.4)
+    final_next_tp : float | None
+        The next TP price target that was active at the moment this trade
+        closed.  For a position that closed by SL after hitting TP1 and TP2
+        (with TP3 as the next target), this is the TP3 price.  ``None``
+        when all TP levels were consumed (position closed at the final TP)
+        or when no TP was configured.  Used by the visual module to display
+        the correct TP boundary in the position box.  (v0.7.4)
+    peak_price : float
+        The most favourable price reached during the lifetime of the
+        position.  For a long, this is the highest high seen while the
+        position was open; for a short, the lowest low.  Used by the
+        visual module as the top of the position box when ``sl_mode`` is
+        ``"trailing"`` (the peak marks where the trailing SL last moved
+        to its highest / tightest level).  (v0.7.4)
     """
 
     trade_id: int
@@ -302,6 +334,11 @@ class ClosedTrade:
 
     signal_metadata: dict[str, Any] = field(default_factory=dict)
     signal_candle_index: int = 0
+
+    # v0.7.4 — SL trajectory and closing-moment TP info
+    sl_history: tuple = field(default_factory=tuple)
+    final_next_tp: float | None = None
+    peak_price: float = 0.0
 
     # ------------------------------------------------------------------
     # Convenience
