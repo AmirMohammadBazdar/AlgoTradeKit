@@ -317,26 +317,28 @@ class PositionBox:
         When ``True`` the drawing cannot be moved in the browser.
     """
 
-    open_time:    int           # Unix seconds
-    close_time:   int           # Unix seconds
-    entry_price:  float
-    stop_loss:    float
-    take_profit:  Optional[float]
-    direction:    str           # "long" | "short"
-    net_pnl:      float
-    close_reason: str
-    trade_id:     int  = -1
-    rr_ratio:     float = 0.0
-    win_color:    str  = "#3fb950"
-    loss_color:   str  = "#f85149"
-    opacity:      float = 0.15
-    locked:       bool  = True
-    id:           str   = field(default_factory=lambda: _new_id("posbox"))
+    open_time:        int           # Unix seconds
+    close_time:       int           # Unix seconds
+    entry_price:      float
+    stop_loss:        float
+    take_profit:      Optional[float]
+    direction:        str           # "long" | "short"
+    net_pnl:          float
+    close_reason:     str
+    trade_id:         int   = -1
+    rr_ratio:         float = 0.0
+    win_color:        str   = "#3fb950"
+    loss_color:       str   = "#f85149"
+    opacity:          float = 0.15
+    locked:           bool  = True
+    id:               str   = field(default_factory=lambda: _new_id("posbox"))
 
     def to_dict(self) -> dict:
         sl_dist = abs(self.entry_price - self.stop_loss)
 
-        # Compute a visual TP if none provided (2R placeholder)
+        # Compute a visual TP if none provided (2R placeholder).
+        # indicator_renderer already passes the corrected closing-moment TP
+        # as take_profit, so this fallback is only for direct API users.
         if self.take_profit is not None:
             visual_tp = self.take_profit
         else:
