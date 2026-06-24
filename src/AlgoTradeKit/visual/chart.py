@@ -832,6 +832,228 @@ class Chart:
                 if callable(self.on_indicator_removed):
                     self.on_indicator_removed(name)
 
+        elif msg_type == "compute_indicator":
+            params = msg.get("params", {})
+            self._compute_and_send_indicator(params)
+
+    # -----------------------------------------------------------------------
+    # On-demand indicator computation (v0.7.4)
+    # -----------------------------------------------------------------------
+
+    def _compute_and_send_indicator(self, params: dict) -> None:
+        """
+        Compute an indicator from the stored OHLCV data and broadcast the
+        result to the browser as one or more ``add_indicator`` messages.
+
+        Called when the browser toolbar sends a ``compute_indicator`` event
+        (e.g. user picks EMA(20) from the indicator panel).
+
+        Parameters accepted in *params*
+        --------------------------------
+        kind : str
+            One of ``"sma"``, ``"ema"``, ``"wma"``, ``"smma"``, ``"dema"``,
+            ``"tema"``, ``"hma"``, ``"vwma"``, ``"vwap"``,
+            ``"rsi"``, ``"macd"``, ``"atr"``, ``"ichimoku"``.
+        period : int      (MA, RSI, ATR)
+        source : str      ``"close"`` | ``"open"`` | ``"high"`` | ``"low"``  (MA, RSI)
+        fast   : int      (MACD fast period, default 12)
+        slow   : int      (MACD slow period, default 26)
+        signal_period : int  (MACD signal, default 9)
+        ma_type : str     MA type applied to RSI (``"none"`` | ``"sma"`` | ``"ema"``)
+        ma_period : int   MA period on RSI (default 14)
+        tenkan  : int     Ichimoku tenkan period (default 9)
+        kijun   : int     Ichimoku kijun period (default 26)
+        senkou_b : int    Ichimoku senkou B period (default 52)
+        color   : str     Hex color override for the first series
+        """
+        if self.df.empty:
+            return
+
+        kind   = params.get("kind", "ema").lower()
+        color  = params.get("color") or None  # None → use indicator default
+
+        from .indicator_renderer import (
+            add_ma, add_rsi, add_macd, add_ichimoku, _next_pane, _push,
+            _series_to_tv, _series_to_hist,
+        )
+
+        ts = self.df["timestamp"]
+
+        # ----------------------------------------------------------------
+        # Moving Averages
+        # ----------------------------------------------------------------
+        _MA_KINDS = {"sma", "ema", "wma", "smma", "dema", "tema", "hma", "vwma", "vwap"}
+        if kind in _MA_KINDS:
+            period  = int(params.get("period", 20))
+            src_col = params.get("source", "close")
+            src     = self.df[src_col] if src_col in self.df.columns else self.df["close"]
+
+            ma = self._build_ma(kind, src, period)
+            if ma is None:
+                return
+            add_ma(self, ma, timestamps=ts, color=color)
+            # Broadcast all freshly-added indicators
+            self._broadcast_last_indicators(_next_pane(self))
+            return
+
+        # ----------------------------------------------------------------
+        # RSI
+        # ----------------------------------------------------------------
+        if kind == "rsi":
+            from AlgoTradeKit.indicator.rsi import RSI as _RSI
+            period    = int(params.get("period", 14))
+            src_col   = params.get("source", "close")
+            ma_type   = params.get("ma_type", "none")
+            ma_period = int(params.get("ma_period", 14))
+            src = self.df[src_col] if src_col in self.df.columns else self.df["close"]
+
+            ma_arg = None if ma_type == "none" else ma_type
+            rsi = _RSI(src, period, ma_type=ma_arg, ma_length=ma_period)
+            add_rsi(self, rsi, timestamps=ts)
+            self._broadcast_last_indicators(_next_pane(self))
+            return
+
+        # ----------------------------------------------------------------
+        # MACD
+        # ----------------------------------------------------------------
+        if kind == "macd":
+            from AlgoTradeKit.indicator.macd import MACD as _MACD
+            fast   = int(params.get("fast",   12))
+            slow   = int(params.get("slow",   26))
+            signal = int(params.get("signal_period", 9))
+            src    = self.df["close"]
+
+            macd = _MACD(src, fast, slow, signal)
+            add_macd(self, macd, timestamps=ts)
+            self._broadcast_last_indicators(_next_pane(self))
+            return
+
+        # ----------------------------------------------------------------
+        # ATR  (custom, no third-party ta lib)
+        # ----------------------------------------------------------------
+        if kind == "atr":
+            period  = int(params.get("period", 14))
+            atr_ser = self._compute_atr(period)
+            if atr_ser is None:
+                return
+            pane  = _next_pane(self)
+            label = f"ATR({period})"
+            _push(self, label, {
+                "name":       label,
+                "data":       _series_to_tv(atr_ser, ts),
+                "color":      color or "#ff9800",
+                "overlay":    False,
+                "pane":       pane,
+                "lineWidth":  1,
+                "seriesType": "line",
+                "group":      label,
+            })
+            self._broadcast_last_indicators(pane)
+            return
+
+        # ----------------------------------------------------------------
+        # Ichimoku
+        # ----------------------------------------------------------------
+        if kind == "ichimoku":
+            from AlgoTradeKit.indicator.ichimoku import Ichimoku as _Ichi
+            tenkan   = int(params.get("tenkan",   9))
+            kijun    = int(params.get("kijun",   26))
+            senkou_b = int(params.get("senkou_b", 52))
+
+            ichi = _Ichi(
+                self.df["close"], self.df["high"], self.df["low"],
+                tenkan_period=tenkan, kijun_period=kijun,
+                senkou_b_period=senkou_b,
+            )
+            add_ichimoku(self, ichi, timestamps=ts)
+            self._broadcast_last_indicators(0)
+            return
+
+    # ------------------------------------------------------------------
+    # Indicator computation helpers
+    # ------------------------------------------------------------------
+
+    def _build_ma(self, kind: str, src, period: int):
+        """Instantiate the right MA class from the indicator module."""
+        from AlgoTradeKit.indicator.ma import (
+            SMA, EMA, WMA, SMMA, DEMA, TEMA, HullMA, VWMA, VWAP,
+        )
+        import pandas as pd
+        _MAP = {
+            "sma":  lambda: SMA(src, period),
+            "ema":  lambda: EMA(src, period),
+            "wma":  lambda: WMA(src, period),
+            "smma": lambda: SMMA(src, period),
+            "dema": lambda: DEMA(src, period),
+            "tema": lambda: TEMA(src, period),
+            "hma":  lambda: HullMA(src, period),
+            "vwma": lambda: VWMA(src, period,
+                                  volume=self.df.get("volume",
+                                  pd.Series([1.0] * len(src)))),
+            "vwap": lambda: VWAP(src,
+                                  high=self.df.get("high", src),
+                                  low=self.df.get("low", src),
+                                  volume=self.df.get("volume",
+                                  pd.Series([1.0] * len(src)))),
+        }
+        factory = _MAP.get(kind)
+        return factory() if factory else None
+
+    def _compute_atr(self, period: int):
+        """
+        Compute Average True Range (pure pandas, no third-party TA lib).
+
+        True Range = max(high-low, |high-prev_close|, |low-prev_close|)
+        ATR        = Wilder smoothed average of TR over *period* bars.
+        """
+        import pandas as pd
+        df = self.df
+        if not {"high", "low", "close"}.issubset(df.columns):
+            return None
+
+        high  = df["high"].astype(float)
+        low   = df["low"].astype(float)
+        close = df["close"].astype(float)
+        prev  = close.shift(1)
+
+        tr = pd.concat([
+            high - low,
+            (high - prev).abs(),
+            (low  - prev).abs(),
+        ], axis=1).max(axis=1)
+
+        # Wilder smoothing (equivalent to EMA with alpha = 1/period)
+        atr = pd.Series(index=tr.index, dtype=float)
+        alpha = 1.0 / period
+        atr_val = float("nan")
+        for i, v in enumerate(tr):
+            if i < period - 1:
+                atr.iloc[i] = float("nan")
+            elif i == period - 1:
+                atr_val = float(tr.iloc[:period].mean())
+                atr.iloc[i] = atr_val
+            else:
+                atr_val = atr_val * (1 - alpha) + float(v) * alpha
+                atr.iloc[i] = atr_val
+        return atr
+
+    def _broadcast_last_indicators(self, up_to_pane: int) -> None:
+        """
+        Send the most recently added indicator(s) to the browser.
+
+        We track the count before/after via a sentinel — the helpers above
+        always append to ``self._indicators``.  We simply send everything
+        that was added since the last call to this method.
+        """
+        if not self._shown:
+            return
+        # Find newly added: anything without a "_sent" mark
+        for ind in self._indicators:
+            if not getattr(ind, "_sent_to_browser", False):
+                payload = ind.to_dict() if hasattr(ind, "to_dict") else ind.payload
+                self._server.send({"type": "add_indicator", "indicator": payload})
+                ind._sent_to_browser = True  # type: ignore[attr-defined]
+
     # -----------------------------------------------------------------------
     # Layout persistence
     # -----------------------------------------------------------------------
