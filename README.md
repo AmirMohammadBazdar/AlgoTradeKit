@@ -405,9 +405,24 @@ TradingView-style position boxes showing SL/TP zones with R:R labels:
 from AlgoTradeKit.visual.indicator_renderer import add_simulation_positions
 
 chart = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv")
-add_simulation_positions(chart, report, opacity=0.15)
+add_simulation_positions(chart, report, opacity=0.15, config=sim_config)
 chart.show(block=True)
 ```
+
+**Dynamic SL/TP lines *(v0.7.4)*** — when `config` is passed, coloured
+horizontal lines are drawn on the chart for every trade where the SL moved:
+
+| Colour | Meaning |
+|--------|---------|
+| 🔴 Red | SL is in the loss zone (below entry for long) |
+| 🟡 Amber | SL is at break-even (entry price) |
+| 🔵 Cyan | SL is in profit territory |
+| 🟢 Green | Next TP target (`multi_rr` only) |
+
+The position box's profit-zone boundary is also corrected to show the TP
+target that was active at the *moment of closing* rather than the initial TP
+at entry.  For trailing-SL trades the box top is set to `peak_price` (the
+highest price the trailing SL ever chased).
 
 Manual single box:
 ```python
@@ -418,6 +433,21 @@ chart.add_position_box(
     trade_id=1, rr_ratio=2.0,
 )
 ```
+
+### Indicator Toolbar *(v0.7.4)*
+
+The chart toolbar now has an **Add Indicator** (📈) button.  Clicking it
+opens a panel where indicators can be added interactively at runtime — no
+code required:
+
+- **Moving averages**: EMA, SMA, WMA, SMMA, DEMA, TEMA, HMA, VWMA, VWAP
+- **Oscillators**: RSI (with optional MA), MACD, ATR
+- **Trend**: Ichimoku Cloud
+
+Each type shows its own parameter form.  After clicking *Add to Chart*, the
+server computes the indicator from the OHLCV data and the chart updates
+immediately.  Indicators added this way work exactly like those added via
+`add_ma()` / `add_rsi()` / etc. in Python code.
 
 ### Strategy Drawings (v0.7.0)
 

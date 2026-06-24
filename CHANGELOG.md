@@ -7,6 +7,118 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.7.4] — 2026-06-24
+
+### Added
+
+#### `simulate` module — dynamic SL/TP visualisation
+
+- **`ClosedTrade.sl_history`** — new `tuple` field recording every SL-state
+  change throughout a trade's lifetime as an ordered sequence of dicts
+  `{"time": int_ms, "sl": float, "next_tp": float | None}`.  An entry is
+  appended at position open (initial state) and again every time the SL
+  advances: after each `multi_rr` TP level hit (SL walks to break-even /
+  previous TP) or whenever the trailing SL moves to a new high-water mark.
+  An empty history means the SL never moved; a single entry means the
+  position opened but the SL never advanced before closing.
+
+- **`ClosedTrade.final_next_tp`** — new `float | None` field that records
+  the TP target that was active at the exact moment the trade closed.  For
+  a `multi_rr` position that hit TP3 (moving next target to TP4) and was
+  then stopped out at the TP3-advanced SL, this is TP4.  `None` when all
+  levels were consumed (position closed at the final TP) or no TP was
+  configured.
+
+- **`ClosedTrade.peak_price`** — new `float` field storing the most
+  favourable price reached during the trade (highest high for longs, lowest
+  low for shorts).  Used by the visual module as the top of the position box
+  for trailing-SL trades (the peak marks the last price that drove the
+  trailing SL to its tightest level).
+
+- **`SimulateReport.trade_markers`** now includes `sl_history`, `final_next_tp`,
+  `peak_price`, and `rr_levels_hit` for every marker, enabling the
+  chart-side rendering of dynamic SL/TP lines.
+
+#### `visual` module — dynamic SL/TP lines on chart
+
+- **`add_simulation_positions`** (in `indicator_renderer.py`) enhanced with:
+  - **Dynamic SL line segments** — for `multi_rr` and `trailing` positions,
+    coloured horizontal `TrendLine` drawings are added alongside each position
+    box showing where the stop-loss was at each stage of the trade:
+    - **Red** — SL is in the loss zone (below entry for long)
+    - **Amber/yellow** — SL is at break-even (entry price)
+    - **Cyan** — SL is in profit territory (above entry for long)
+  - **Green TP lines** (`multi_rr` only) — for each SL segment, a matching
+    green horizontal line shows the next TP target that was being aimed at.
+  - **Posbox TP fix** — the profit-zone boundary of the position box now
+    shows `final_next_tp` (the TP at closing time) rather than the initial
+    TP at entry.  After hitting TP3 with next target TP4, the box correctly
+    displays TP4 instead of staying stuck at TP1.
+  - **Trailing posbox top** — for `sl_mode="trailing"`, the top of the
+    position box is set to `peak_price` (the highest price the trailing SL
+    ever chased), giving a natural view of the profit zone that was available.
+  - **Partial-close grouping** — multiple `ClosedTrade` rows sharing a
+    `trade_id` (from `tp_level_close_fractions`) are now collapsed into a
+    single position box (one box per unique trade, not one per slice).
+  - New `config` parameter on `add_simulation_positions` — pass the
+    `SimulateConfig` used for the simulation to enable automatic mode
+    detection (`tp_mode`/`sl_mode`) for the correct line style.
+
+- **Indicator toolbar** — a new 📈 button in the chart toolbar opens an
+  "Add Indicator" panel where the user can add technical indicators to the
+  live candle chart without writing any code:
+  - **Moving averages**: EMA, SMA, WMA, SMMA, DEMA, TEMA, HMA, VWMA, VWAP
+  - **Oscillators**: RSI (with optional MA), MACD, ATR (pure Python — no
+    third-party TA library)
+  - **Trend**: Ichimoku Cloud
+  - Each indicator type shows its own parameter form (period, source, MA
+    type, fast/slow/signal periods, Tenkan/Kijun/Senkou B, etc.).
+  - A colour picker lets the user override the default series colour.
+  - The "Add to Chart" button sends a `compute_indicator` WebSocket message
+    to the `Chart` server, which computes the indicator from the stored OHLCV
+    `DataFrame` and broadcasts the result as one or more `add_indicator`
+    messages; the chart renders them immediately.
+
+### Fixed
+
+- **Trailing SL false gap-open trigger** — the trailing SL was previously
+  advanced in step A (before close checks), which could cause a "gap open
+  past SL" close on the very candle that caused the SL to jump, when the
+  candle's open price was between the old and new SL levels.  The trailing
+  SL is now advanced inside `_check_close` *after* the gap-open test, so
+  the gap check always uses the SL from the end of the previous candle.
+  This fix applies to both the single-pair `Simulate` engine and the
+  multi-pair `run_multi` engine (`_runner.py`).
+
+- **Chart and report tabs disconnecting immediately** — the
+  `ChartServer` and `ReportServer` both run in daemon threads, which Python
+  kills the instant the script's main thread exits.  Previously,
+  `Simulate.run()` started both servers non-blocking and returned, so all
+  user code after the call (printing stats, saving CSV history, etc.) ran
+  normally — but as soon as `main()` returned the process died, closing both
+  browser tabs before the user could interact with them.  A one-time `atexit`
+  handler is now registered whenever a browser UI is opened; it blocks with
+  a `while True: sleep(1)` loop (identical to `chart.show(block=True)`) after
+  all user code has finished, keeping the process alive until the user presses
+  **Ctrl+C**.  The handler registers only once per process invocation, so
+  multiple `Simulate.run()` calls (batch/multi-symbol) produce a single
+  blocking handler at exit.
+
+### Tests
+
+- `tests/test_simulate.py` — new `TestSlHistory` class (13 tests) covering:
+  - `sl_history` length and content after 0, 1, and 2 `multi_rr` TP hits
+  - timestamp presence and ordering in `sl_history`
+  - `final_next_tp` value after partial and final TP consumption
+  - `peak_price` captured correctly for trailing-SL trades
+  - backward-compatibility: plain `signal` SL mode produces exactly one
+    `sl_history` entry (no SL movement)
+  - `add_simulation_positions` smoke test: one posbox per unique `trade_id`
+  - dynamic SL `TrendLine` drawings added when `sl_history` length > 1
+  - posbox `take_profit` uses `final_next_tp` not initial TP
+
+---
+
 ## [0.7.3] — 2026-06-21
 
 ### Added
