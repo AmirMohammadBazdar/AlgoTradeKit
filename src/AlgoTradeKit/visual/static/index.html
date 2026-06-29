@@ -215,8 +215,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 /* ── Indicator-add panel (v0.7.4) ────────────────────────────── */
 #ind-overlay{
   display:none;position:fixed;inset:0;z-index:400;
-  background:#0006;align-items:flex-start;justify-content:flex-end;
-  padding-top:52px;padding-right:12px;
+  background:#0006;align-items:flex-start;justify-content:flex-start;
+  padding-top:52px;padding-left:12px;    /* opens on the LEFT, beside the moved button */
 }
 #ind-overlay.open{display:flex}
 #ind-panel{
@@ -262,6 +262,16 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 </div>
 
 <div id="tbar">
+  <button class="tb" id="ind-btn" onclick="toggleIndPanel()" title="Add / edit indicators"
+          style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em;gap:5px">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <polyline points="1,11 4,7 7,9 10,4 13,6" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>
+      <circle cx="13" cy="2" r="1.5" fill="currentColor"/>
+      <line x1="13" y1="3.5" x2="13" y2="6" stroke="currentColor" stroke-width="1.2"/>
+    </svg>
+    INDICATORS
+  </button>
+  <div class="tsep"></div>
   <button class="tb on" id="ct-btn" onclick="toggleChartType()"
           style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em">CANDLE</button>
   <div class="tsep"></div>
@@ -311,13 +321,6 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
       <path d="M6.5 1v1.5M6.5 10.5V12M1 6.5h1.5M10.5 6.5H12M2.6 2.6l1 1M9.4 9.4l1 1M9.4 3.6l-1 1M3.6 9.4l-1 1" stroke="currentColor" stroke-width="1"/>
     </svg>
   </button>
-  <button class="tb" id="ind-btn" onclick="toggleIndPanel()" title="Add Indicator">
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-      <polyline points="1,11 4,7 7,9 10,4 13,6" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linejoin="round"/>
-      <circle cx="13" cy="2" r="1.5" fill="currentColor"/>
-      <line x1="13" y1="3.5" x2="13" y2="6" stroke="currentColor" stroke-width="1.2"/>
-    </svg>
-  </button>
   <button class="tb" id="settings-btn" onclick="toggleSettings()" title="Settings">
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
       <circle cx="7" cy="7" r="2.2" stroke="currentColor" stroke-width="1.3"/>
@@ -329,7 +332,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 <!-- ── Indicator-add overlay (v0.7.4) ─────────────────────────── -->
 <div id="ind-overlay" onclick="onIndOverlayClick(event)">
   <div id="ind-panel">
-    <h3>Add Indicator <button onclick="closeIndPanel()">✕</button></h3>
+    <h3><span id="ind-panel-title">Add Indicator</span> <button onclick="closeIndPanel()">✕</button></h3>
     <div class="sdivider"></div>
 
     <div class="ind-section">
@@ -441,6 +444,10 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
         <div class="ind-row">
           <label>Senkou B Period</label>
           <input type="number" id="ind-ichi-senkou-b" value="52" min="2" max="500"/>
+        </div>
+        <div class="ind-row">
+          <label>Displacement</label>
+          <input type="number" id="ind-ichi-displacement" value="26" min="1" max="200"/>
         </div>
       </div>
 
@@ -837,6 +844,9 @@ function streamBar(bar){
 let ichimokuCloud = null;
 
 function addIndicator(ind){
+  // Remember the backend spec for this group so the gear icon can re-open the
+  // panel pre-filled and edits can recompute through the same code path.
+  if(ind.spec){ indSpecs[ind.group || ind.name] = ind.spec; }
   // ── Ichimoku cloud fill: canvas-drawn, no LWC series ─────────────────
   if(ind.name==='Cloud (Bull)'){
     if(!ichimokuCloud) ichimokuCloud={spanA:[],spanB:[],colorUp:'rgba(38,166,154,0.15)',colorDown:'rgba(239,83,80,0.15)',hiddenA:false,hiddenB:false};
@@ -916,6 +926,8 @@ function _addCloudLegendRow(name, color, grpName){
               onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
         <span class="il-dot" style="background:${color}"></span>
         <span class="il-group-name">${grpName}</span>
+        <button class="il-btn" title="Edit settings"
+                onclick="openEditPanel('${grpName.replace(/'/g,"\\'")}')">⚙</button>
         <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
                 onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
           <svg width="12" height="9" viewBox="0 0 12 9">
@@ -1029,6 +1041,8 @@ function addLegendRow(name, color, group){
               onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
         <span class="il-dot" style="background:${existingColor}"></span>
         <span class="il-group-name">${grpName}</span>
+        <button class="il-btn" title="Edit settings"
+                onclick="openEditPanel('${grpName.replace(/'/g,"\\'")}')">⚙</button>
         <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
                 onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
           <svg width="12" height="9" viewBox="0 0 12 9">
@@ -1045,9 +1059,9 @@ function addLegendRow(name, color, group){
       ch.id = 'ilgrpch-'+CSS.escape(grpName);
       grpDiv.appendChild(ch);
 
-      ch.appendChild(_makeIndRow(g.names[0], existingColor, true));
+      ch.appendChild(_makeIndRow(g.names[0], existingColor, true, grpName));
       g.names.push(name);
-      ch.appendChild(_makeIndRow(name, color, true));
+      ch.appendChild(_makeIndRow(name, color, true, grpName));
       leg.appendChild(grpDiv);
       return;
     }
@@ -1055,25 +1069,28 @@ function addLegendRow(name, color, group){
     // ── Already ≥2 members — append child ────────────────────
     g.names.push(name);
     const ch = document.getElementById('ilgrpch-'+CSS.escape(grpName));
-    if(ch) ch.appendChild(_makeIndRow(name, color, true));
+    if(ch) ch.appendChild(_makeIndRow(name, color, true, grpName));
     return;
   }
 
   // ── First line — flat row (no group wrapper yet) ──────────
   indGroups[grpName] = {names:[name], collapsed:false, hidden:false};
-  const flat = _makeIndRow(name, color, false);
+  const flat = _makeIndRow(name, color, false, grpName);
   flat.dataset.group = grpName;
   leg.appendChild(flat);
 }
 
-function _makeIndRow(name, color, isChild){
+function _makeIndRow(name, color, isChild, grpName){
+  const g = (grpName||name).replace(/'/g,"\\'");
   const row = document.createElement('div');
-  row.className = 'il-row' + (isChild ? '' : '');
+  row.className = 'il-row';
   row.id = 'ilrow-'+CSS.escape(name);
   row.innerHTML = `
     <span class="il-dot" style="background:${color}"></span>
     <span class="il-name">${name}</span>
     <span class="il-val" id="ilval-${CSS.escape(name)}">—</span>
+    ${isChild ? '' : `<button class="il-btn" title="Edit settings"
+            onclick="openEditPanel('${g}')">⚙</button>`}
     <button class="il-btn" title="Hide/Show"
             onclick="toggleIndVisibility('${name.replace(/'/g,"\\'")}')">
       <svg width="12" height="9" viewBox="0 0 12 9" id="ilvis-${CSS.escape(name)}">
@@ -1143,6 +1160,7 @@ function removeIndicatorGroup(grpName){
   const grpDiv = document.getElementById('ilgrp-'+CSS.escape(grpName));
   if(grpDiv) grpDiv.remove();
   delete indGroups[grpName];
+  delete indSpecs[grpName];
   redrawAll();
 }
 
@@ -1174,6 +1192,8 @@ function addSubPaneChip(name, color, paneId, group){
         <span style="font-size:9px;cursor:pointer"
               onclick="toggleSubGrpCollapse('${paneId}','${grpName.replace(/'/g,"\\'")}')">▶</span>
         <span>${grpName}</span>
+        <button class="iact" title="Edit settings"
+                onclick="openEditPanel('${grpName.replace(/'/g,"\\'")}')">⚙</button>
         <button class="iact" title="Hide/Show all"
                 onclick="toggleSubGrpVisibility('${paneId}','${grpName.replace(/'/g,"\\'")}')">◉</button>
         <button class="iact" title="Remove all" style="color:var(--red)"
@@ -1183,8 +1203,8 @@ function addSubPaneChip(name, color, paneId, group){
       const children = document.createElement('span');
       children.className = 'ind-chip-group-children';
       children.id = 'chipgrpch-'+CSS.escape(paneId+'-'+grpName);
-      children.appendChild(_makeSubChip(g.names[0], existingColor));
-      children.appendChild(_makeSubChip(name, color));
+      children.appendChild(_makeSubChip(g.names[0], existingColor, true, grpName));
+      children.appendChild(_makeSubChip(name, color, true, grpName));
       grpChip.appendChild(children);
 
       g.names.push(name);
@@ -1195,21 +1215,24 @@ function addSubPaneChip(name, color, paneId, group){
     // Already ≥2 — add child chip
     g.names.push(name);
     const ch = document.getElementById('chipgrpch-'+CSS.escape(paneId+'-'+grpName));
-    if(ch) ch.appendChild(_makeSubChip(name, color));
+    if(ch) ch.appendChild(_makeSubChip(name, color, true, grpName));
     return;
   }
 
   // First line — flat chip
   paneGrps[grpName] = {names:[name], collapsed:false, hidden:false};
-  lbl.appendChild(_makeSubChip(name, color));
+  lbl.appendChild(_makeSubChip(name, color, false, grpName));
 }
 
-function _makeSubChip(name, color){
+function _makeSubChip(name, color, isChild, grpName){
+  const g = (grpName||name).replace(/'/g,"\\'");
   const chip = document.createElement('span');
   chip.className = 'ind-chip';
   chip.id = 'chip-'+CSS.escape(name);
   chip.style.cssText = `background:${color}22;color:${color};border:1px solid ${color}44`;
   chip.innerHTML = `${name}
+    ${isChild ? '' : `<button class="iact" title="Edit settings"
+            onclick="openEditPanel('${g}')">⚙</button>`}
     <button class="iact" title="Hide/Show"
             onclick="toggleIndVisibility('${name.replace(/'/g,"\\'")}')">◉</button>
     <button class="iact" title="Remove" style="color:var(--red)"
@@ -1246,6 +1269,7 @@ function removeSubGrp(paneId, grpName){
   const grpChip = document.getElementById('chipgrp-'+CSS.escape(paneId+'-'+grpName));
   if(grpChip) grpChip.remove();
   delete subPaneGroups[paneId][grpName];
+  delete indSpecs[grpName];
 }
 
 // ── Toggle visibility (hide/show — no data removed) ───────────
@@ -1284,7 +1308,7 @@ function removeIndicator(name){
       if(grpDiv){
         const remainingName = g.names[0];
         const remainingColor = indMeta[remainingName] ? indMeta[remainingName].color : '#fff';
-        const flat = _makeIndRow(remainingName, remainingColor, false);
+        const flat = _makeIndRow(remainingName, remainingColor, false, grpName);
         flat.dataset.group = grpName;
         grpDiv.replaceWith(flat);
       }
@@ -1313,7 +1337,7 @@ function removeIndicator(name){
         if(grpChip){
           const rName = sg.names[0];
           const rColor = indMeta[rName] ? indMeta[rName].color : '#fff';
-          grpChip.replaceWith(_makeSubChip(rName, rColor));
+          grpChip.replaceWith(_makeSubChip(rName, rColor, false, gn));
         }
         delete pg[gn];
       }
@@ -2452,6 +2476,18 @@ const _IND_DEFAULT_COLORS = {
 // Which indicator kinds show the color picker
 const _IND_SHOW_COLOR = new Set(['ema','sma','wma','smma','dema','tema','hma','vwma','vwap','rsi','atr']);
 
+// ── Backend round-trip helper ────────────────────────────────────────────
+// All indicator math runs server-side: the panel only ships a spec and the
+// server replies with one or more `add_indicator` messages.  (Previously this
+// helper was missing, so the "Add to Chart" button silently threw.)
+function sendMsg(m){ if(ws && ws.readyState===1) ws.send(JSON.stringify(m)); }
+
+// Group-name → spec map, so the gear icon can re-open the panel pre-filled
+// and an edit can recompute with the same backend code path.
+const indSpecs = {};
+// Non-null while the panel is editing an existing indicator group.
+let _editingGroup = null;
+
 function toggleIndPanel(){
   const ov=document.getElementById('ind-overlay');
   if(ov.classList.contains('open')){ closeIndPanel(); return; }
@@ -2462,8 +2498,51 @@ function toggleIndPanel(){
 function closeIndPanel(){
   document.getElementById('ind-overlay').classList.remove('open');
   document.getElementById('ind-btn').classList.remove('on');
+  // Leave edit mode whenever the panel closes
+  _editingGroup = null;
+  document.getElementById('ind-panel-title').textContent = 'Add Indicator';
+  const addBtn = document.getElementById('ind-add-btn');
+  addBtn.textContent = 'Add to Chart';
 }
 function onIndOverlayClick(e){ if(e.target.id==='ind-overlay') closeIndPanel(); }
+
+// ── Open the panel pre-filled to EDIT an existing indicator group ─────────
+function openEditPanel(grpName){
+  const spec = indSpecs[grpName];
+  if(!spec){ toggleIndPanel(); return; }   // no stored spec — fall back to add
+  const ov = document.getElementById('ind-overlay');
+  ov.classList.add('open');
+  document.getElementById('ind-btn').classList.add('on');
+  _editingGroup = grpName;
+  document.getElementById('ind-type').value = spec.kind;
+  onIndTypeChange();          // show the right param group for this kind
+  _prefillIndForm(spec);      // populate the inputs from the stored spec
+  document.getElementById('ind-panel-title').textContent = 'Edit Indicator';
+  document.getElementById('ind-add-btn').textContent = 'Save Changes';
+}
+
+// Populate the panel inputs from a stored indicator spec.
+function _prefillIndForm(s){
+  const kind = s.kind;
+  const set = (id,v)=>{ const el=document.getElementById(id); if(el!=null && v!=null) el.value=v; };
+  if(s.color) set('ind-color', s.color);
+  const MA_KINDS = ['ema','sma','wma','smma','dema','tema','hma','vwma','vwap'];
+  if(MA_KINDS.includes(kind)){
+    set('ind-period', s.period); set('ind-source', s.source);
+  } else if(kind==='rsi'){
+    set('ind-rsi-period', s.period); set('ind-rsi-source', s.source);
+    set('ind-rsi-ma-type', s.ma_type || 'none'); set('ind-rsi-ma-period', s.ma_period);
+    onRsiMaChange();
+  } else if(kind==='macd'){
+    set('ind-macd-fast', s.fast); set('ind-macd-slow', s.slow);
+    set('ind-macd-signal', s.signal_period);
+  } else if(kind==='atr'){
+    set('ind-atr-period', s.period);
+  } else if(kind==='ichimoku'){
+    set('ind-ichi-tenkan', s.tenkan); set('ind-ichi-kijun', s.kijun);
+    set('ind-ichi-senkou-b', s.senkou_b); set('ind-ichi-displacement', s.displacement);
+  }
+}
 
 function onIndTypeChange(){
   const kind = document.getElementById('ind-type').value;
@@ -2522,20 +2601,42 @@ function submitIndicator(){
   } else if(kind==='atr'){
     params.period = _gi('ind-atr-period');
   } else if(kind==='ichimoku'){
-    params.tenkan   = _gi('ind-ichi-tenkan');
-    params.kijun    = _gi('ind-ichi-kijun');
-    params.senkou_b = _gi('ind-ichi-senkou-b');
+    params.tenkan       = _gi('ind-ichi-tenkan');
+    params.kijun        = _gi('ind-ichi-kijun');
+    params.senkou_b     = _gi('ind-ichi-senkou-b');
+    params.displacement = _gi('ind-ichi-displacement');
   }
 
-  // Disable button while computing
+  // Edit mode: drop the old group (frontend + backend) first, then recompute
+  // with the new params via the exact same backend code path.
+  const editing = _editingGroup;
+  if(editing){ _removeWholeIndicator(editing); }
+
   const btn = document.getElementById('ind-add-btn');
   btn.disabled = true;
-  btn.textContent = 'Computing…';
+  btn.textContent = editing ? 'Saving…' : 'Computing…';
 
   sendMsg({ type:'compute_indicator', params });
 
-  // Re-enable after short delay (server responds via add_indicator message)
-  setTimeout(()=>{ btn.disabled=false; btn.textContent='Add to Chart'; }, 2000);
+  // Server responds asynchronously with add_indicator message(s); close the
+  // panel so the freshly computed series is visible right away.
+  setTimeout(()=>{ btn.disabled=false; closeIndPanel(); }, 250);
+}
+
+// Remove an entire indicator group regardless of where it lives (price-pane
+// legend group / flat row, or oscillator sub-pane chip group).
+function _removeWholeIndicator(grpName){
+  if(indGroups[grpName]){
+    removeIndicatorGroup(grpName);
+  } else {
+    for(const paneId in subPaneGroups){
+      if(subPaneGroups[paneId] && subPaneGroups[paneId][grpName]){
+        removeSubGrp(paneId, grpName);
+        break;
+      }
+    }
+  }
+  delete indSpecs[grpName];
 }
 
 function applyFonts(){

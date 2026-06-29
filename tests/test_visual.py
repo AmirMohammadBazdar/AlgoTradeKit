@@ -636,3 +636,147 @@ class TestRepr:
         c.add_hline(1000)
         r = repr(c)
         assert "1" in r
+
+
+# ===========================================================================
+# Group 12 — add_indicator_spec()  (v0.8.0 backend indicator toolbar)
+# ===========================================================================
+
+def _make_big_df(n: int = 120) -> pd.DataFrame:
+    """OHLCV with a `timestamp` (ms) column and enough bars for warmups."""
+    ts = [ANCHOR_MS + i * 900_000 for i in range(n)]          # 15m bars (ms)
+    rng = np.random.default_rng(7)
+    close = 100 + np.cumsum(rng.normal(0, 0.5, n))
+    return pd.DataFrame({
+        "timestamp": ts,
+        "open":   close + rng.normal(0, 0.1, n),
+        "high":   close + np.abs(rng.normal(0.5, 0.2, n)),
+        "low":    close - np.abs(rng.normal(0.5, 0.2, n)),
+        "close":  close,
+        "volume": np.abs(rng.normal(10, 2, n)),
+    })
+
+
+class TestIndicatorSpec:
+    """Server-side indicator computation feeding the chart toolbar / config."""
+
+    def _chart(self) -> Chart:
+        c = Chart(title="spec")
+        c.set_data(_make_big_df())
+        return c
+
+    @pytest.mark.parametrize("spec,n_series", [
+        ({"kind": "ema",  "period": 20}, 1),
+        ({"kind": "sma",  "period": 30}, 1),
+        ({"kind": "wma",  "period": 10}, 1),
+        ({"kind": "smma", "period": 15}, 1),
+        ({"kind": "dema", "period": 21}, 1),
+        ({"kind": "tema", "period": 9},  1),
+        ({"kind": "hma",  "period": 16}, 1),
+        ({"kind": "vwma", "period": 20}, 1),
+        ({"kind": "atr",  "period": 14}, 1),
+        ({"kind": "macd", "fast": 12, "slow": 26, "signal_period": 9}, 3),
+    ])
+    def test_kinds_compute_and_tag_spec(self, spec, n_series):
+        c = self._chart()
+        before = len(c._indicators)
+        out = c.add_indicator_spec(dict(spec))
+        added = c._indicators[before:]
+        assert out is not None
+        assert len(added) == n_series
+        for ind in added:
+            assert ind.payload.get("spec", {}).get("kind") == spec["kind"]
+
+    def test_vwap_builds(self):
+        c = self._chart()
+        out = c.add_indicator_spec({"kind": "vwap"})
+        assert out["kind"] == "vwap"
+        assert any(p.payload["name"] == "VWAP" for p in c._indicators)
+
+    def test_rsi_default_none_ma_does_not_crash(self):
+        # ma_type defaults to "none"; pre-0.8.0 this raised None.upper().
+        c = self._chart()
+        out = c.add_indicator_spec({"kind": "rsi", "period": 14})
+        assert out["ma_type"] == "none"
+        rsi_lines = [p for p in c._indicators if p.payload["name"].startswith("RSI")]
+        assert len(rsi_lines) == 1
+
+    def test_rsi_with_ma_adds_two_series(self):
+        c = self._chart()
+        c.add_indicator_spec(
+            {"kind": "rsi", "period": 14, "ma_type": "sma", "ma_period": 9}
+        )
+        names = [p.payload["name"] for p in c._indicators]
+        assert any(n.startswith("RSI") for n in names)
+        assert any(n.startswith("SMA") for n in names)
+
+    def test_ichimoku_arg_order_matches_direct(self):
+        from AlgoTradeKit.indicator import Ichimoku
+        c = self._chart()
+        c.add_indicator_spec({
+            "kind": "ichimoku", "tenkan": 8, "kijun": 22,
+            "senkou_b": 44, "displacement": 22,
+        })
+        df = c.df
+        ichi = Ichimoku(
+            df["high"], df["low"], df["close"],
+            tenkan_period=8, kijun_period=22,
+            senkou_b_period=44, displacement=22,
+        )
+        ten = [p for p in c._indicators
+               if p.payload["name"] == "Tenkan(8)"][0].payload["data"]
+        got = [d["value"] for d in ten]
+        exp = ichi.tenkan.dropna().tolist()
+        assert len(got) == len(exp)
+        assert got == pytest.approx(exp, abs=1e-9)
+
+    def test_ichimoku_displacement_kept_in_spec(self):
+        c = self._chart()
+        out = c.add_indicator_spec({
+            "kind": "ichimoku", "tenkan": 9, "kijun": 26,
+            "senkou_b": 52, "displacement": 30,
+        })
+        assert out["displacement"] == 30
+
+    def test_unknown_kind_returns_none(self):
+        c = self._chart()
+        assert c.add_indicator_spec({"kind": "nope"}) is None
+
+    def test_empty_chart_returns_none(self):
+        c = Chart(title="empty")
+        assert c.add_indicator_spec({"kind": "ema", "period": 20}) is None
+
+    def test_spec_present_in_init_payload(self):
+        c = self._chart()
+        c.add_indicator_spec({"kind": "ema", "period": 50})
+        init = c._build_init_payload()
+        assert any("spec" in i for i in init["indicators"])
+
+    def test_time_seconds_column_fallback(self):
+        # A chart built from a 'time' (seconds) DataFrame still computes.
+        c = Chart(title="t")
+        c.set_data(_make_ohlcv_df(60))
+        out = c.add_indicator_spec({"kind": "ema", "period": 10})
+        assert out is not None
+
+
+class TestChartIndicatorsConfig:
+    """SimulateConfig.chart_indicators validation (v0.8.0)."""
+
+    def test_default_is_empty_list(self):
+        from AlgoTradeKit.simulate import SimulateConfig
+        assert SimulateConfig().chart_indicators == []
+
+    def test_accepts_list_of_specs(self):
+        from AlgoTradeKit.simulate import SimulateConfig
+        cfg = SimulateConfig(chart_indicators=[
+            {"kind": "rsi", "period": 14},
+            {"kind": "ema", "period": 200},
+        ])
+        assert len(cfg.chart_indicators) == 2
+
+    @pytest.mark.parametrize("bad", ["x", [1], [{"period": 14}], [None]])
+    def test_rejects_bad(self, bad):
+        from AlgoTradeKit.simulate import SimulateConfig
+        with pytest.raises(ValueError):
+            SimulateConfig(chart_indicators=bad)

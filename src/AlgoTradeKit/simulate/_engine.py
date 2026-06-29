@@ -896,6 +896,16 @@ class Simulate:
         )
         chart.set_data(primary_df)
 
+        # Pre-load caller-requested indicators (SimulateConfig.chart_indicators).
+        # All maths run in the backend here, before the chart is shown; the
+        # series appear automatically and stay editable from the chart toolbar.
+        for spec in getattr(self.config, "chart_indicators", None) or []:
+            try:
+                chart.add_indicator_spec(dict(spec))
+            except Exception as exc:  # a bad spec must never abort the chart
+                import warnings
+                warnings.warn(f"chart_indicators: skipped {spec!r} ({exc})")
+
         # Add strategy-defined drawings (support/resistance, signal zones, etc.)
         if strategy_result.drawings:
             add_strategy_drawings(chart, strategy_result)

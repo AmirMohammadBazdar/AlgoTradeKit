@@ -272,6 +272,22 @@ class SimulateConfig:
     report_save_path: str = "report.html"
     """Destination file path when report_mode is 'save' or 'both'."""
 
+    chart_indicators: list = field(default_factory=list)
+    """Indicator specs drawn on the ``show_chart`` candle chart (v0.8.0).
+
+    A list of dicts, each ``{"kind": ..., <params>}`` using the same schema as
+    the in-browser indicator toolbar.  All maths run in the backend before the
+    chart opens.  To mirror the strategy, pass the strategy's own indicator
+    parameters; extra indicators may be added freely.  Examples::
+
+        chart_indicators=[
+            {"kind": "ichimoku", "tenkan": 8, "kijun": 22,
+             "senkou_b": 44, "displacement": 22},
+            {"kind": "rsi", "period": 14, "source": "close"},
+            {"kind": "ema", "period": 200, "source": "close"},
+        ]
+    """
+
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
@@ -352,6 +368,16 @@ class SimulateConfig:
                 f"SimulateConfig.report_mode must be one of "
                 f"'none', 'webpage', 'save', 'both', got {self.report_mode!r}."
             )
+        if not isinstance(self.chart_indicators, list):
+            raise ValueError(
+                "SimulateConfig.chart_indicators must be a list of indicator-spec dicts."
+            )
+        for spec in self.chart_indicators:
+            if not isinstance(spec, dict) or "kind" not in spec:
+                raise ValueError(
+                    "Each SimulateConfig.chart_indicators entry must be a dict with a "
+                    f"'kind' key, got {spec!r}."
+                )
 
     def _auto_id(self) -> str:
         """Generate a readable identifier from key parameters."""

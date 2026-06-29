@@ -834,19 +834,28 @@ class Chart:
 
         elif msg_type == "compute_indicator":
             params = msg.get("params", {})
-            self._compute_and_send_indicator(params)
+            self.add_indicator_spec(params)
 
     # -----------------------------------------------------------------------
     # On-demand indicator computation (v0.7.4)
     # -----------------------------------------------------------------------
 
-    def _compute_and_send_indicator(self, params: dict) -> None:
+    def add_indicator_spec(self, params: dict) -> "dict | None":
         """
-        Compute an indicator from the stored OHLCV data and broadcast the
-        result to the browser as one or more ``add_indicator`` messages.
+        Compute an indicator from the stored OHLCV data **server-side** and add
+        it to the chart, tagging every resulting series with the resolved spec
+        that produced it.
 
-        Called when the browser toolbar sends a ``compute_indicator`` event
-        (e.g. user picks EMA(20) from the indicator panel).
+        This single entry point is used by both:
+
+        * the browser toolbar — a ``compute_indicator`` WebSocket message
+          (live add, or live edit, which removes the old group then re-adds);
+        * ``SimulateConfig.chart_indicators`` — indicators pre-loaded before
+          the chart is shown so they appear automatically.
+
+        All maths run here (never in the browser).  The tagged ``spec`` lets the
+        front-end's per-indicator gear icon re-open the panel pre-filled and
+        recompute through this same path.
 
         Parameters accepted in *params*
         --------------------------------
@@ -856,49 +865,77 @@ class Chart:
             ``"rsi"``, ``"macd"``, ``"atr"``, ``"ichimoku"``.
         period : int      (MA, RSI, ATR)
         source : str      ``"close"`` | ``"open"`` | ``"high"`` | ``"low"``  (MA, RSI)
-        fast   : int      (MACD fast period, default 12)
-        slow   : int      (MACD slow period, default 26)
-        signal_period : int  (MACD signal, default 9)
-        ma_type : str     MA type applied to RSI (``"none"`` | ``"sma"`` | ``"ema"``)
+        fast / slow / signal_period : int   (MACD; defaults 12 / 26 / 9)
+        ma_type : str     MA on RSI (``"none"`` | ``"sma"`` | ``"ema"``)
         ma_period : int   MA period on RSI (default 14)
-        tenkan  : int     Ichimoku tenkan period (default 9)
-        kijun   : int     Ichimoku kijun period (default 26)
-        senkou_b : int    Ichimoku senkou B period (default 52)
-        color   : str     Hex color override for the first series
+        tenkan / kijun / senkou_b / displacement : int  (Ichimoku; 9/26/52/26)
+        color   : str     Hex colour override for the first series
+
+        Returns
+        -------
+        dict | None
+            The resolved spec that was tagged onto the new series, or ``None``
+            if nothing could be computed (empty data / unknown kind).
         """
         if self.df.empty:
-            return
+            return None
 
-        kind   = params.get("kind", "ema").lower()
-        color  = params.get("color") or None  # None → use indicator default
+        start = len(self._indicators)
+        spec  = self._compute_indicator_series(params)
+        if spec is None:
+            return None
+
+        # Tag every freshly-added series with the resolved spec so the browser
+        # can map group → spec for the edit (gear) flow.
+        for ind in self._indicators[start:]:
+            if hasattr(ind, "payload"):
+                ind.payload["spec"] = spec
+
+        # Push to a live browser, and keep the replay cache in sync so a page
+        # refresh still shows (and can still edit) the indicator.
+        self._broadcast_last_indicators(0)
+        self._refresh_init_cache()
+        return spec
+
+    # Backwards-compatible alias (pre-0.8.0 name).
+    def _compute_and_send_indicator(self, params: dict) -> None:
+        self.add_indicator_spec(params)
+
+    def _compute_indicator_series(self, params: dict) -> "dict | None":
+        """
+        Run the indicator maths for *params* and ``_push`` the resulting
+        series onto ``self._indicators``.  Returns the resolved spec (with all
+        defaults filled in) or ``None``.  Does **not** broadcast.
+        """
+        kind  = params.get("kind", "ema").lower()
+        color = params.get("color") or None  # None → use indicator default
 
         from .indicator_renderer import (
             add_ma, add_rsi, add_macd, add_ichimoku, _next_pane, _push,
-            _series_to_tv, _series_to_hist,
+            _series_to_tv,
         )
 
-        ts = self.df["timestamp"]
+        # Stored OHLCV uses 'timestamp' (ms); fall back to 'time' if present.
+        if "timestamp" in self.df.columns:
+            ts = self.df["timestamp"]
+        elif "time" in self.df.columns:
+            ts = self.df["time"]
+        else:
+            return None
 
-        # ----------------------------------------------------------------
-        # Moving Averages
-        # ----------------------------------------------------------------
+        # ── Moving Averages ─────────────────────────────────────────────
         _MA_KINDS = {"sma", "ema", "wma", "smma", "dema", "tema", "hma", "vwma", "vwap"}
         if kind in _MA_KINDS:
             period  = int(params.get("period", 20))
             src_col = params.get("source", "close")
             src     = self.df[src_col] if src_col in self.df.columns else self.df["close"]
-
             ma = self._build_ma(kind, src, period)
             if ma is None:
-                return
+                return None
             add_ma(self, ma, timestamps=ts, color=color)
-            # Broadcast all freshly-added indicators
-            self._broadcast_last_indicators(_next_pane(self))
-            return
+            return {"kind": kind, "period": period, "source": src_col, "color": color}
 
-        # ----------------------------------------------------------------
-        # RSI
-        # ----------------------------------------------------------------
+        # ── RSI ─────────────────────────────────────────────────────────
         if kind == "rsi":
             from AlgoTradeKit.indicator.rsi import RSI as _RSI
             period    = int(params.get("period", 14))
@@ -906,36 +943,34 @@ class Chart:
             ma_type   = params.get("ma_type", "none")
             ma_period = int(params.get("ma_period", 14))
             src = self.df[src_col] if src_col in self.df.columns else self.df["close"]
-
-            ma_arg = None if ma_type == "none" else ma_type
-            rsi = _RSI(src, period, ma_type=ma_arg, ma_length=ma_period)
+            show_ma = ma_type != "none"
+            rsi = _RSI(
+                src, period,
+                show_ma=show_ma,
+                ma_type=(ma_type if show_ma else "EMA"),  # RSI upper-cases this
+                ma_length=ma_period,
+            )
             add_rsi(self, rsi, timestamps=ts)
-            self._broadcast_last_indicators(_next_pane(self))
-            return
+            return {"kind": "rsi", "period": period, "source": src_col,
+                    "ma_type": ma_type, "ma_period": ma_period, "color": color}
 
-        # ----------------------------------------------------------------
-        # MACD
-        # ----------------------------------------------------------------
+        # ── MACD ────────────────────────────────────────────────────────
         if kind == "macd":
             from AlgoTradeKit.indicator.macd import MACD as _MACD
             fast   = int(params.get("fast",   12))
             slow   = int(params.get("slow",   26))
             signal = int(params.get("signal_period", 9))
-            src    = self.df["close"]
-
-            macd = _MACD(src, fast, slow, signal)
+            macd = _MACD(self.df["close"], fast, slow, signal)
             add_macd(self, macd, timestamps=ts)
-            self._broadcast_last_indicators(_next_pane(self))
-            return
+            return {"kind": "macd", "fast": fast, "slow": slow,
+                    "signal_period": signal, "color": color}
 
-        # ----------------------------------------------------------------
-        # ATR  (custom, no third-party ta lib)
-        # ----------------------------------------------------------------
+        # ── ATR (custom, no third-party TA lib) ─────────────────────────
         if kind == "atr":
             period  = int(params.get("period", 14))
             atr_ser = self._compute_atr(period)
             if atr_ser is None:
-                return
+                return None
             pane  = _next_pane(self)
             label = f"ATR({period})"
             _push(self, label, {
@@ -948,26 +983,26 @@ class Chart:
                 "seriesType": "line",
                 "group":      label,
             })
-            self._broadcast_last_indicators(pane)
-            return
+            return {"kind": "atr", "period": period, "color": color}
 
-        # ----------------------------------------------------------------
-        # Ichimoku
-        # ----------------------------------------------------------------
+        # ── Ichimoku ────────────────────────────────────────────────────
         if kind == "ichimoku":
             from AlgoTradeKit.indicator.ichimoku import Ichimoku as _Ichi
-            tenkan   = int(params.get("tenkan",   9))
-            kijun    = int(params.get("kijun",   26))
-            senkou_b = int(params.get("senkou_b", 52))
-
+            tenkan       = int(params.get("tenkan",   9))
+            kijun        = int(params.get("kijun",   26))
+            senkou_b     = int(params.get("senkou_b", 52))
+            displacement = int(params.get("displacement", 26))
+            # Ichimoku signature is (high, low, close) — order matters.
             ichi = _Ichi(
-                self.df["close"], self.df["high"], self.df["low"],
+                self.df["high"], self.df["low"], self.df["close"],
                 tenkan_period=tenkan, kijun_period=kijun,
-                senkou_b_period=senkou_b,
+                senkou_b_period=senkou_b, displacement=displacement,
             )
             add_ichimoku(self, ichi, timestamps=ts)
-            self._broadcast_last_indicators(0)
-            return
+            return {"kind": "ichimoku", "tenkan": tenkan, "kijun": kijun,
+                    "senkou_b": senkou_b, "displacement": displacement, "color": color}
+
+        return None
 
     # ------------------------------------------------------------------
     # Indicator computation helpers
@@ -987,14 +1022,16 @@ class Chart:
             "dema": lambda: DEMA(src, period),
             "tema": lambda: TEMA(src, period),
             "hma":  lambda: HullMA(src, period),
-            "vwma": lambda: VWMA(src, period,
-                                  volume=self.df.get("volume",
-                                  pd.Series([1.0] * len(src)))),
-            "vwap": lambda: VWAP(src,
-                                  high=self.df.get("high", src),
-                                  low=self.df.get("low", src),
-                                  volume=self.df.get("volume",
-                                  pd.Series([1.0] * len(src)))),
+            "vwma": lambda: VWMA(
+                source=src, length=period,
+                volume=self.df.get("volume", pd.Series([1.0] * len(src))),
+            ),
+            "vwap": lambda: VWAP(
+                high=self.df.get("high", src),
+                low=self.df.get("low", src),
+                close=src,
+                volume=self.df.get("volume", pd.Series([1.0] * len(src))),
+            ),
         }
         factory = _MAP.get(kind)
         return factory() if factory else None
@@ -1153,8 +1190,13 @@ class Chart:
     # Internal helpers
     # -----------------------------------------------------------------------
 
-    def _send_init(self) -> None:
-        self._server.send({
+    def _build_init_payload(self) -> dict:
+        # Mark every indicator as already delivered so a later *live* add only
+        # broadcasts genuinely new series (prevents duplicates when indicators
+        # were pre-loaded via SimulateConfig.chart_indicators before show()).
+        for ind in self._indicators:
+            ind._sent_to_browser = True  # type: ignore[attr-defined]
+        return {
             "type":         "init",
             "title":        self.title,
             "chartType":    self.chart_type,
@@ -1163,7 +1205,16 @@ class Chart:
             "bars":         self._bars,
             "indicators":   [i.to_dict() for i in self._indicators],
             "drawings":     [d.to_dict() for d in self._drawings],
-        })
+        }
+
+    def _send_init(self) -> None:
+        self._server.send(self._build_init_payload())
+
+    def _refresh_init_cache(self) -> None:
+        """Keep the server's replay cache current so a browser refresh still
+        shows (and can still edit) indicators added after the initial init."""
+        if self._shown and self._server._last_init is not None:
+            self._server._last_init = self._build_init_payload()
 
     @property
     def url(self) -> str:
