@@ -7,6 +7,60 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.8.0] — 2026-06-29
+
+### Added
+
+#### `visual` module — working indicator toolbar (add / edit, backend-computed)
+
+- **Indicator button now works.** The chart toolbar's **INDICATORS** button was
+  inert (it called an undefined `sendMsg`); the panel now ships the chosen spec
+  to the backend over the WebSocket and the computed series returns as one or
+  more `add_indicator` messages. The button (and its panel) were moved to the
+  **left** of the toolbar.
+- **Edit existing indicators.** Every indicator in the legend / oscillator pane
+  gains a ⚙ gear icon. Clicking it re-opens the panel pre-filled with that
+  indicator's current settings; saving recomputes it in the backend (the old
+  series is removed and replaced). Works for price-pane lines, the Ichimoku
+  group, and oscillator sub-panes (RSI / MACD / ATR).
+- **`Chart.add_indicator_spec(params)`** — new public method that computes an
+  indicator from the chart's stored OHLCV **server-side** and tags each
+  resulting series with the resolved `spec` that produced it (so the front-end
+  gear can round-trip it). Used by both the toolbar and `chart_indicators`.
+- **Ichimoku Displacement** is now an editable parameter in the panel and in
+  indicator specs (defaults to 26).
+- Indicators added/edited live now survive a browser refresh (the server's
+  init-replay cache is kept in sync).
+
+#### `simulate` module — indicators on the simulation chart
+
+- **`SimulateConfig.chart_indicators`** — new field: a list of indicator-spec
+  dicts (same schema as the toolbar) drawn on the `show_chart=True` candle
+  chart. All maths run in the backend before the chart opens. Pass the
+  strategy's own indicator parameters to mirror what it traded on, add extra
+  indicators, or both. Validated in `__post_init__` (must be a list of dicts,
+  each with a `"kind"`).
+
+### Fixed
+
+- **Ichimoku from the toolbar** computed with the wrong argument order
+  (`close, high, low` instead of `high, low, close`), producing incorrect
+  lines. Now correct and verified against a direct `Ichimoku` call.
+- **RSI from the toolbar** crashed on its default (`ma_type="none"` →
+  `None.upper()`), and never showed its MA line because `show_ma` was not set.
+  Both fixed.
+- **VWAP / VWMA from the toolbar** raised `TypeError: got multiple values for
+  argument …` due to mixed positional/keyword construction. Now built with
+  explicit keyword arguments.
+
+### Changed
+
+- `ichimoku_strategy.py` now passes `chart_indicators` so the simulation chart
+  automatically renders the Ichimoku cloud + RSI (matching the strategy's
+  parameters, including the non-standard displacement).
+
+---
+
 ## [0.7.4] — 2026-06-24
 
 ### Added

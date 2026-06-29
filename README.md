@@ -258,6 +258,7 @@ report = Simulate(config).run(strategy_result)
 | `show_chart` | **False** | **v0.7.0** Open candle chart after run |
 | `report_mode` | **`"none"`** | **v0.7.0** Post-run report rendering |
 | `report_save_path` | `"report.html"` | **v0.7.0** HTML save path |
+| `chart_indicators` | `[]` | **v0.8.0** Indicator specs drawn on the `show_chart` chart (backend-computed) — see below |
 
 ### Per-Signal Sizing & Partial Take-Profit (v0.7.3)
 
@@ -434,20 +435,40 @@ chart.add_position_box(
 )
 ```
 
-### Indicator Toolbar *(v0.7.4)*
+### Indicator Toolbar *(v0.8.0)*
 
-The chart toolbar now has an **Add Indicator** (📈) button.  Clicking it
-opens a panel where indicators can be added interactively at runtime — no
-code required:
+The chart toolbar has an **INDICATORS** button on the **left**.  Clicking it
+opens a panel where indicators can be added — and edited — interactively at
+runtime, no code required:
 
 - **Moving averages**: EMA, SMA, WMA, SMMA, DEMA, TEMA, HMA, VWMA, VWAP
 - **Oscillators**: RSI (with optional MA), MACD, ATR
-- **Trend**: Ichimoku Cloud
+- **Trend**: Ichimoku Cloud (Tenkan / Kijun / Senkou B / Displacement)
 
 Each type shows its own parameter form.  After clicking *Add to Chart*, the
-server computes the indicator from the OHLCV data and the chart updates
-immediately.  Indicators added this way work exactly like those added via
-`add_ma()` / `add_rsi()` / etc. in Python code.
+**backend** computes the indicator from the OHLCV data and the chart updates
+immediately (no maths in the browser).  Every indicator on the chart gets a
+⚙ gear icon in the legend — click it to re-open the panel pre-filled with the
+current settings; saving recomputes it server-side.
+
+### Indicators on the Simulation Chart *(v0.8.0)*
+
+When `show_chart=True`, pass `chart_indicators` to draw indicators on the
+simulation chart automatically.  Use the same parameters your strategy trades
+on to mirror it exactly, add extra indicators, or both — all computed in the
+backend before the chart opens (and still editable live via the toolbar):
+
+```python
+config = SimulateConfig(
+    show_chart=True,
+    chart_indicators=[
+        {"kind": "ichimoku", "tenkan": 8, "kijun": 22,
+         "senkou_b": 44, "displacement": 22},   # match the strategy
+        {"kind": "rsi", "period": 14, "source": "close"},
+        {"kind": "ema", "period": 200, "source": "close"},  # extra
+    ],
+)
+```
 
 ### Strategy Drawings (v0.7.0)
 
