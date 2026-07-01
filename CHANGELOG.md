@@ -7,6 +7,63 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.9.0] — 2026-07-01
+
+### Added
+
+#### `broker` module — unified exchange & MetaTrader access (new)
+
+- **`Broker(name, ...)`** — one entry point for every venue. `name` is
+  case-insensitive: `"binance-spot"`, `"binance-futures"`, `"metatrader"`
+  (aliases `mt5` / `forex`). Credentials are **optional** — without them only
+  public market-data calls work; private (account / trading) calls raise a clear
+  `AuthenticationError`. Returns a concrete `BaseBroker`, so the whole library
+  treats every venue identically.
+- **`BaseBroker`** unified interface: `fetch_candles` / `fetch_last_candles` /
+  `get_ticker` / `server_time`, `stream_candles` / `stream_ticker`,
+  `get_balance` / `get_account_info`, `create_order` (+ `create_market_order` /
+  `create_limit_order`), `cancel_order` / `cancel_all`, `open_orders`,
+  `open_positions`, `close_position`, `set_leverage`.
+- **Unified types** (`Balance`, `AccountInfo`, `Ticker`, `Order`, `OrderResult`,
+  `Position`) and string constants (`SIDE_BUY`, `ORDER_MARKET`, `MARKET_SPOT`,
+  …) re-exported from `broker/__init__.py`.
+- **Binance connector** (`broker/exchange/binance/`): spot **and** USD-M futures.
+  - REST: klines, ticker, server time; signed account, order create/cancel,
+    open orders, futures positions (`positionRisk`), balance, `leverage`.
+    Signing is `HMAC-SHA256` with the Python standard library — no new deps.
+  - WebSocket: real-time `kline` and `bookTicker` streams, plus the private
+    user-data stream (auto listen-key keepalive).
+  - Futures `create_order` can attach `stop_loss` / `take_profit` as reduce-only
+    protective orders. `testnet=True` points at Binance testnet.
+- **MetaTrader 5 connector** (`broker/metatrader/`) for **headless** Linux VPS:
+  - `bridge_server.py` runs inside the Wine Python (where `MetaTrader5` is
+    importable) under `xvfb` — no GUI. It exposes MT5 over a tiny
+    newline-delimited JSON socket (standard library only).
+  - `MetaTraderBroker` runs on the normal Linux side and reaches MT5 only
+    through that bridge, mapping candles / positions / orders / account onto the
+    same unified types.
+  - **`MetaTrader5` is never a dependency of AlgoTradeKit** (it lives only in the
+    Wine Python), so there is no dependency conflict.
+
+#### `data` module — now backed by `broker`
+
+- All Binance REST kline logic **moved** into `broker`; `data.sources.binance`
+  is now a thin adapter over it (public API unchanged).
+- **`Collector` accepts a name *or* a `Broker` instance** — pass
+  `Collector("binance-futures", …)` (way 1, Collector builds the connector) or
+  `Collector(my_broker, …)` / `Collector(..., broker=my_broker)` (way 2, bring
+  your own — including an authenticated or MetaTrader **forex** connection).
+- **`Collector.stream(on_candle)`** — real-time candle subscription for both
+  exchange (Binance WebSocket) and MetaTrader feeds.
+
+### Notes
+
+- Live-order safety: `testnet` is supported; live endpoints are the default.
+- Deferred to **v0.9.1** (see `v091.md`): the `trader` live-order module,
+  real-time simulation, live-updating chart/report, and the ichimoku live demo.
+
+---
+
 ## [0.8.0] — 2026-06-29
 
 ### Added

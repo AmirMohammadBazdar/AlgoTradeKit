@@ -16,14 +16,15 @@ pip install AlgoTradeKit
 ## Table of Contents
 
 1. [Architecture Overview](#architecture-overview)
-2. [data — OHLCV Collection](#data--ohlcv-collection)
-3. [indicator — Technical Indicators](#indicator--technical-indicators)
-4. [strategy — Signal Generation](#strategy--signal-generation)
-5. [simulate — Backtesting Engine](#simulate--backtesting-engine)
-6. [visual — Interactive Chart](#visual--interactive-chart)
-7. [report — Simulation Report](#report--simulation-report-v070)
-8. [Built-in MACD Strategy Demo](#built-in-macd-strategy-demo)
-9. [Configuration Reference](#configuration-reference)
+2. [broker — Exchanges & MetaTrader](#broker--exchanges--metatrader-v090)
+3. [data — OHLCV Collection](#data--ohlcv-collection)
+4. [indicator — Technical Indicators](#indicator--technical-indicators)
+5. [strategy — Signal Generation](#strategy--signal-generation)
+6. [simulate — Backtesting Engine](#simulate--backtesting-engine)
+7. [visual — Interactive Chart](#visual--interactive-chart)
+8. [report — Simulation Report](#report--simulation-report-v070)
+9. [Built-in MACD Strategy Demo](#built-in-macd-strategy-demo)
+10. [Configuration Reference](#configuration-reference)
 
 ---
 
@@ -31,7 +32,8 @@ pip install AlgoTradeKit
 
 ```
 AlgoTradeKit/
-├── data/           Download and cache OHLCV candles from exchange REST APIs
+├── broker/         Unified exchange & MetaTrader access — candles, orders, account, sockets  ← new in v0.9.0
+├── data/           Download and cache OHLCV candles (now via the broker module)
 ├── indicator/      RSI, MACD, EMA, SMA, Bollinger Bands, ATR, Ichimoku
 ├── strategy/       BaseStrategy, Signal, StrategyResult, built-in strategies
 ├── simulate/       Backtesting engine, position management, SimulateReport
@@ -42,13 +44,100 @@ AlgoTradeKit/
 Data flows in one direction:
 
 ```
-data ──► indicator ──► strategy ──► simulate ──► report
-                                         └──────► visual
+broker ──► data ──► indicator ──► strategy ──► simulate ──► report
+                                                   └──────► visual
 ```
 
 ---
 
+## broker — Exchanges & MetaTrader *(v0.9.0)*
+
+One unified door to every venue. Create a connection with `Broker(...)` and hand
+the result to `data.Collector` (candles / streaming) or use it directly for
+account info and orders. A Binance spot account, a Binance USD-M futures
+account, and a MetaTrader forex account all expose the **same** `BaseBroker`
+interface — the connector hides each venue's quirks.
+
+**Market data — no credentials needed:**
+
+```python
+from AlgoTradeKit.broker import Broker
+
+b = Broker("binance-futures")                       # public: no API keys
+candles = b.fetch_last_candles("BTCUSDT", "1h", 500)  # list of standard candle dicts
+tick    = b.get_ticker("BTCUSDT")                     # last / bid / ask
+```
+
+**Trading — credentials required** (`testnet=True` for the sandbox):
+
+```python
+b = Broker("binance-futures", api_key="…", api_secret="…", testnet=True)
+
+b.set_leverage("BTCUSDT", 10)
+res = b.create_market_order("BTCUSDT", "buy", 0.001,
+                            stop_loss=58000, take_profit=72000)  # SL/TP = reduce-only orders
+print(b.open_positions(), b.get_account_info().equity)
+b.close_position("BTCUSDT")
+```
+
+Order placement is safe-by-default in the sense that private calls need explicit
+credentials; live endpoints are the default and `testnet=True` opts into the
+sandbox.
+
+**Real-time sockets** (both Binance spot & futures):
+
+```python
+stream = b.stream_candles("BTCUSDT", "1m", lambda c: print(c["close"]), closed_only=True)
+# … later …
+stream.stop()
+```
+
+**MetaTrader (forex) on a headless Linux VPS**
+
+MetaTrader has no public API — the terminal speaks a proprietary protocol to
+your broker's server. To run head­less (SSH-only, no GUI) you install MT5 +
+Windows Python under **Wine** and run the bundled **bridge server** under
+`xvfb`. AlgoTradeKit's Linux side then reaches MT5 only through that bridge, so
+`MetaTrader5` is **never** a dependency of the library itself (no conflict).
+
+```bash
+# On the VPS, inside the Wine Python (headless):
+wine python -m pip install MetaTrader5
+xvfb-run wine python bridge_server.py --host 127.0.0.1 --port 18812 \
+    --login 12345678 --password "***" --server "MyBroker-Demo"
+```
+
+```python
+# On the normal Linux side:
+mt = Broker("metatrader", server="MyBroker-Demo", login=12345678, password="***")
+candles = mt.fetch_last_candles("EURUSD", "15m", 1000)
+mt.create_market_order("EURUSD", "buy", 0.10, stop_loss=1.0800, take_profit=1.1000)
+```
+
+`bridge_server.py` ships in `AlgoTradeKit/broker/metatrader/` — see its header
+for the full Wine setup.
+
+---
+
 ## data — OHLCV Collection
+
+The `data` module now sits on top of `broker`. `Collector` takes either a venue
+**name** *or* a ready `Broker` instance:
+
+```python
+from AlgoTradeKit.data import Collector
+from AlgoTradeKit.broker import Broker
+
+# way 1 — by name (Collector builds the connector)
+c = Collector("binance-futures", "BTCUSDT", "1h")
+
+# way 2 — bring your own Broker (e.g. authenticated, or a MetaTrader forex link)
+c = Collector(Broker("metatrader", server="MyBroker-Demo", login=1, password="…"),
+              "EURUSD", "15m")
+
+# real-time candles for either venue
+stream = c.stream(lambda candle: print(candle["close"]))
+```
 
 ```python
 from AlgoTradeKit.data import Collector
