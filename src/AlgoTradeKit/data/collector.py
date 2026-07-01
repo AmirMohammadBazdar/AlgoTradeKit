@@ -14,6 +14,8 @@ from ._utils import (
 from .sources import get_source
 from .sources.base import BaseSource
 from .storage.csv_handler import CSVHandler
+from ..broker import Broker
+from ..broker.base import BaseBroker
  
  
 # ---------------------------------------------------------------------------
@@ -87,17 +89,38 @@ class Collector:
         collector.collect()
     """
  
-    def __init__(self, source: str, symbol: str, timeframe: str) -> None:
-        self._source_name: str = source
+    def __init__(
+        self,
+        source: str | BaseBroker,
+        symbol: str,
+        timeframe: str,
+        *,
+        broker: BaseBroker | None = None,
+    ) -> None:
+        # Two ways to point the Collector at a venue (v0.9.0):
+        #   way 1 — pass a name string ("binance-futures"); the Collector builds
+        #           the broker/source itself.
+        #   way 2 — pass a ready ``Broker`` instance (as ``source`` or via the
+        #           ``broker=`` keyword), e.g. an authenticated or MetaTrader
+        #           (forex) connection.
+        fetcher = broker if broker is not None else (
+            source if isinstance(source, BaseBroker) else None
+        )
+        self._fetcher: BaseBroker | None = fetcher
+        if fetcher is not None:
+            self._source_name: str = getattr(fetcher, "name", "broker")
+        else:
+            self._source_name = str(source)
+
         self._symbol: str      = symbol.upper().strip()
         self._timeframe: str   = normalize_timeframe(timeframe)
- 
+
         # Settable attributes
         self.destination: str       = "./"
         self.outputname:  str | None = None
         self.starttime:   Any        = None   # parsed lazily in collect()
         self.endtime:     Any        = None   # parsed lazily in collect()
- 
+
         # Resolved lazily
         self._source: BaseSource | None = None
  
@@ -308,10 +331,40 @@ class Collector:
  
         return all_candles
  
-    def _get_source(self) -> BaseSource:
+    def _get_source(self) -> BaseSource | BaseBroker:
+        # A passed-in Broker instance and a registry BaseSource both expose the
+        # same ``fetch_candles(symbol, timeframe, start_ms, end_ms)`` signature,
+        # so the collect() loop treats them identically.
+        if self._fetcher is not None:
+            return self._fetcher
         if self._source is None:
             self._source = get_source(self._source_name)
         return self._source
+
+    # ------------------------------------------------------------------
+    # Real-time streaming (v0.9.0)
+    # ------------------------------------------------------------------
+
+    def stream(
+        self,
+        on_candle,
+        *,
+        closed_only: bool = True,
+        timeframe: str | None = None,
+    ):
+        """
+        Subscribe to real-time candles for this Collector's symbol.
+
+        *on_candle* receives library-standard candle dicts (same schema as
+        ``collect()`` rows, plus a ``"closed"`` flag).  Works for both exchange
+        (Binance spot/futures WebSocket) and — via a passed-in MetaTrader
+        ``Broker`` — forex feeds.
+
+        Returns a ``Stream`` handle; call ``.stop()`` to end the subscription.
+        """
+        broker = self._fetcher or Broker(self._source_name)
+        tf = timeframe or self._timeframe
+        return broker.stream_candles(self._symbol, tf, on_candle, closed_only=closed_only)
  
     def _resolve_filepath(self) -> str:
         if self.outputname:
