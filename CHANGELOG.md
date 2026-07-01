@@ -7,6 +7,27 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.9.1] — 2026-07-01
+
+Follow-up to the v0.9.0 `broker` module: a MetaTrader smoke-test demo, a
+complete headless-setup guide, and a bridge fix for crypto / CFD symbols.
+
+### Added
+
+- **`MT5_WINE_SETUP.md`** — complete "MetaTrader 5 headless on a Linux VPS"
+  guide: install Wine + Xvfb, run the bridge server, open the SSH tunnel, plus a
+  troubleshooting table and optional systemd auto-start. Linked from the README.
+- **`MetaTraderBroker.list_symbols(group="*BTC*")`** — discover a broker's exact
+  symbol spelling (they vary a lot between brokers).
+
+### Fixed
+
+- MetaTrader bridge now calls `symbol_select` before every `copy_rates` — crypto
+  / CFD symbols are hidden from Market Watch by default and otherwise return no
+  candles.
+
+---
+
 ## [0.9.0] — 2026-07-01
 
 ### Added

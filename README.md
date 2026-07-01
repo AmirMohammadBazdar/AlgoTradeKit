@@ -11,6 +11,10 @@ pip install AlgoTradeKit
 
 > Requires Python 3.10+
 
+> **New in v0.9.1** — running the [`broker`](#broker--exchanges--metatrader-v090)
+> module's MetaTrader connector **headless on a Linux VPS** is now documented
+> step-by-step in **[`MT5_WINE_SETUP.md`](MT5_WINE_SETUP.md)**.
+
 ---
 
 ## Table of Contents
@@ -114,8 +118,9 @@ candles = mt.fetch_last_candles("EURUSD", "15m", 1000)
 mt.create_market_order("EURUSD", "buy", 0.10, stop_loss=1.0800, take_profit=1.1000)
 ```
 
-`bridge_server.py` ships in `AlgoTradeKit/broker/metatrader/` — see its header
-for the full Wine setup.
+> 📘 **Full headless setup: [`MT5_WINE_SETUP.md`](MT5_WINE_SETUP.md).** Zero-to-chart
+> guide — install Wine + Xvfb, run the bridge, SSH-tunnel the port, troubleshooting,
+> optional systemd auto-start.
 
 ---
 
