@@ -275,6 +275,8 @@ class _FakeMTTransport:
                      "symbol": "EURUSD", "time": 1700000000}]
         if method == "tick":
             return {"bid": 1.2, "ask": 1.2002, "last": 0.0, "time_ms": 1700000000000}
+        if method == "symbols":
+            return ["EURUSD", "BTCUSD", "XAUUSD"]
         return None
 
     def close(self):
@@ -300,6 +302,8 @@ def test_metatrader_basic_flow():
 
     info = mt.get_account_info()
     assert info.equity == 1010.0 and info.currency == "USD"
+
+    assert "BTCUSD" in mt.list_symbols("*")   # symbol discovery (used by demo.py)
 
 
 def test_metatrader_auth_guard_when_not_logged_in():

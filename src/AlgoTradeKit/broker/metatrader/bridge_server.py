@@ -81,6 +81,15 @@ class MT5Dispatcher:
             raise ValueError(f"Unsupported timeframe '{tf_str}'.")
         return getattr(self.mt5, name)
 
+    def _ensure_symbol(self, symbol):
+        # Crypto / many CFD symbols are hidden from Market Watch by default;
+        # copy_rates returns None until the symbol is selected.
+        if not self.mt5.symbol_select(symbol, True):
+            raise RuntimeError(
+                f"symbol_select({symbol}) failed — is '{symbol}' the EXACT symbol "
+                f"name in MT5 Market Watch? {self.mt5.last_error()}"
+            )
+
     def _candle(self, r, tf_str) -> dict:
         ts = int(r["time"]) * 1000
         vol = float(r["real_volume"]) if r["real_volume"] else float(r["tick_volume"])
@@ -105,6 +114,7 @@ class MT5Dispatcher:
 
     def candles_range(self, symbol, timeframe, start_ms, end_ms) -> list:
         from datetime import datetime, timezone
+        self._ensure_symbol(symbol)
         frm = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
         to = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
         rates = self.mt5.copy_rates_range(symbol, self._tf(timeframe), frm, to)
@@ -113,12 +123,14 @@ class MT5Dispatcher:
         return [self._candle(r, timeframe) for r in rates]
 
     def candles_from_count(self, symbol, timeframe, count) -> list:
+        self._ensure_symbol(symbol)
         rates = self.mt5.copy_rates_from_pos(symbol, self._tf(timeframe), 0, int(count))
         if rates is None:
             raise RuntimeError(f"copy_rates_from_pos failed: {self.mt5.last_error()}")
         return [self._candle(r, timeframe) for r in rates]
 
     def tick(self, symbol) -> dict:
+        self._ensure_symbol(symbol)
         t = self.mt5.symbol_info_tick(symbol)
         if t is None:
             raise RuntimeError(f"symbol_info_tick failed: {self.mt5.last_error()}")
@@ -129,6 +141,10 @@ class MT5Dispatcher:
         if info is None:
             raise RuntimeError(f"symbol_info failed: {self.mt5.last_error()}")
         return info._asdict()
+
+    def symbols(self, group="*") -> list:
+        syms = self.mt5.symbols_get(group) if group else self.mt5.symbols_get()
+        return [s.name for s in (syms or ())]
 
     def account_info(self) -> dict:
         info = self.mt5.account_info()
