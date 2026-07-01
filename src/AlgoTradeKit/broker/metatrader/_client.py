@@ -128,6 +128,15 @@ class MetaTraderBroker(BaseBroker):
         tf = normalize_timeframe(timeframe)
         return self._call("candles_from_count", symbol, tf, int(count))
 
+    def list_symbols(self, group: str = "*") -> list[str]:
+        """
+        Available symbol names on the account (MetaTrader-specific helper).
+
+        Pass a filter to narrow it down, e.g. ``"*BTC*"`` or ``"*EUR*"`` — handy
+        when you don't know the broker's exact symbol spelling.
+        """
+        return self._call("symbols", group)
+
     def get_ticker(self, symbol: str) -> Ticker:
         t = self._call("tick", symbol)
         bid, ask = float(t.get("bid", 0.0)), float(t.get("ask", 0.0))
