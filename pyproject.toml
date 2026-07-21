@@ -36,6 +36,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Native MT5 mode (Windows only). The MetaTrader5 package does not exist for
+# Linux — there it lives ONLY in the Wine Python (see MT5_WINE_SETUP.md); never
+# install it in the library's own environment.
+mt5 = ['MetaTrader5; platform_system == "Windows"']
 dev = [
     "pytest>=7.0",
     "pytest-cov",
