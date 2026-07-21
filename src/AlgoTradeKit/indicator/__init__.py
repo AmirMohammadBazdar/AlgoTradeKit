@@ -21,10 +21,10 @@ Indicators
 """
 
 from .atr import ATR
-from .rsi import RSI
-from .macd import MACD
-from .ma import SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, VWAP
 from .ichimoku import Ichimoku
+from .ma import DEMA, EMA, SMA, SMMA, TEMA, VWAP, VWMA, WMA, HullMA
+from .macd import MACD
+from .rsi import RSI
 
 __all__ = [
     "ATR",
