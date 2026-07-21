@@ -38,23 +38,8 @@ import pandas as pd
 
 from ..strategy._types import StrategyMode, StrategyResult
 from ._config import SimulateConfig
-from ._engine import (
-    Simulate,
-    _apply_partial_close,
-    _can_open_position,
-    _check_close,
-    _check_risk_free,
-    _compute_position_params,
-    _make_closed_trade,
-    _update_trailing_sl,  # noqa: F401 — re-exported for multi-loop callers
-    _SIZE_EPSILON,
-)
-from ._position import (
-    CLOSE_REASON_EOD,
-    CLOSE_REASON_FC,
-    ClosedTrade,
-    _InternalPosition,
-)
+from ._engine import Simulate, SimulationStepper
+from ._position import ClosedTrade
 from ._report import SimulateReport, build_report
 
 if TYPE_CHECKING:
@@ -66,8 +51,8 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 def run_batch(
-    strategy: "BaseStrategy",
-    data: "dict[str, pd.DataFrame] | pd.DataFrame",
+    strategy: BaseStrategy,
+    data: dict[str, pd.DataFrame] | pd.DataFrame,
     configs: list[SimulateConfig],
     max_workers: int | None = None,
 ) -> list[SimulateReport]:
@@ -143,7 +128,7 @@ def run_batch(
 # ---------------------------------------------------------------------------
 
 def run_multi(
-    pairs: list[tuple["BaseStrategy", "dict[str, pd.DataFrame] | pd.DataFrame", SimulateConfig]],
+    pairs: list[tuple[BaseStrategy, dict[str, pd.DataFrame] | pd.DataFrame, SimulateConfig]],
     initial_balance: float | None = None,
     max_workers: int | None = None,
 ) -> SimulateReport:
@@ -245,7 +230,6 @@ def run_multi(
     # 3. Build per-pair primary DataFrames and find the union timestamp set
     # ------------------------------------------------------------------
     pair_dfs: list[pd.DataFrame] = []
-    pair_ts_to_idx: list[dict[int, int]] = []
 
     for _, data, cfg in pairs:
         if isinstance(data, pd.DataFrame):
@@ -253,8 +237,6 @@ def run_multi(
         else:
             df = data[cfg.primary_timeframe]
         pair_dfs.append(df)
-        ts_map = {int(row["timestamp"]): i for i, row in df.iterrows()}
-        pair_ts_to_idx.append(ts_map)
 
     # Union of all timestamps, sorted
     all_timestamps: list[int] = sorted(
@@ -263,9 +245,22 @@ def run_multi(
 
     # ------------------------------------------------------------------
     # 4. Shared-wallet simulation loop over merged timeline
+    #
+    # One SimulationStepper per pair holds that pair's open positions and
+    # per-pair bookkeeping; the wallet and the trade-id sequence are
+    # rebound around every step so all pairs draw from the same pool of
+    # capital.  Pairs step strictly sequentially, so this is exact.
+    # Combined-portfolio equity snapshots are computed here (steppers run
+    # with record_balance_history=False).
     # ------------------------------------------------------------------
     wallet = starting_wallet
-    open_per_pair: list[list[_InternalPosition]] = [[] for _ in pairs]
+    steppers: list[SimulationStepper] = [
+        SimulationStepper(cfg, initial_wallet=starting_wallet, record_balance_history=False)
+        for _, _, cfg in pairs
+    ]
+    # Aliases of each stepper's live position list (mutated in place,
+    # never rebound) — used by the combined equity snapshot below.
+    open_per_pair: list[list] = [st.open_positions for st in steppers]
     closed_trades: list[ClosedTrade] = []
     balance_history: list[dict] = []
     trade_id_seq = 0
@@ -287,6 +282,7 @@ def run_multi(
         ts_row: dict[int, dict] = {}
         for row in df.itertuples(index=False):
             ts_row[int(row.timestamp)] = {
+                "timestamp": int(row.timestamp),
                 "open":  float(row.open),
                 "high":  float(row.high),
                 "low":   float(row.low),
@@ -303,93 +299,26 @@ def run_multi(
         pair_candle_idx.append(ts_to_ci)
 
     for ts in all_timestamps:
-        all_open_positions = [p for pp in open_per_pair for p in pp]
-
-        # --- Update + check close for each pair ---
-        for pair_idx, (cfg, open_positions) in enumerate(
-            zip([p[2] for p in pairs], open_per_pair)
-        ):
+        # --- Advance each pair that has a candle at this timestamp ---
+        for pair_idx, stepper in enumerate(steppers):
             candle = pair_ts_rows[pair_idx].get(ts)
             if candle is None:
                 continue  # This pair has no candle at this timestamp
 
-            c_open  = candle["open"]
-            c_high  = candle["high"]
-            c_low   = candle["low"]
-            c_close = candle["close"]
-
-            # Trailing peak + excursion
-            # (trailing SL is applied inside _check_close, after gap check)
-            for pos in open_positions:
-                pos.update_trailing_peak(c_high if pos.direction == "long" else c_low)
-                pos.update_excursion(c_close)
-
-            # Risk-free
-            if cfg.risk_free_enabled and cfg.tp_mode != "multi_rr":
-                for pos in open_positions:
-                    _check_risk_free(pos, c_high, c_low, cfg)
-
-            # SL/TP close (may yield zero, one, or several partial+final events)
-            newly_closed = []
-            for pos in open_positions:
-                events = _check_close(pos, c_open, c_high, c_low, c_close, cfg, ts)
-                for exit_price, reason, closed_size in events:
-                    ct = _make_closed_trade(pos, exit_price, reason, ts, cfg, closed_size)
-                    wallet += ct.margin_amount + ct.gross_pnl
-                    closed_trades.append(ct)
-                    _apply_partial_close(pos, closed_size)
-                if pos.size <= _SIZE_EPSILON:
-                    newly_closed.append(pos)
-            for pos in newly_closed:
-                open_positions.remove(pos)
-
-            # Force-close on ExitSignal
-            if cfg.force_close_on_exit_signal and open_positions:
-                ci = pair_candle_idx[pair_idx].get(ts)
-                if ci is not None:
-                    exit_sigs = exits_by_pair_candle.get((pair_idx, ci), [])
-                    if exit_sigs:
-                        exit_p = exit_sigs[0].exit_price if exit_sigs[0].exit_price else c_close
-                        for pos in open_positions[:]:
-                            ct = _make_closed_trade(pos, exit_p, CLOSE_REASON_FC, ts, cfg)
-                            wallet += pos.margin_amount + ct.gross_pnl
-                            closed_trades.append(ct)
-                        open_positions.clear()
-
-            # Entry signals for this pair at this timestamp
             ci = pair_candle_idx[pair_idx].get(ts)
             if ci is not None:
-                for sig in sigs_by_pair_candle.get((pair_idx, ci), []):
-                    all_open_now = [p for pp in open_per_pair for p in pp]
-                    if not _can_open_position(sig, open_positions, cfg):
-                        continue
-                    params = _compute_position_params(sig, cfg, wallet)
-                    if params is None:
-                        continue
-                    (margin_amount, size, pnl_pu, risk_amount,
-                     commission, spread_paid, tp_prices, fill_price) = params
+                signals = sigs_by_pair_candle.get((pair_idx, ci), [])
+                exit_signals = exits_by_pair_candle.get((pair_idx, ci), [])
+            else:
+                signals = []
+                exit_signals = []
 
-                    wallet -= margin_amount + commission
-                    display_tp = tp_prices[0] if tp_prices else None
-                    pos = _InternalPosition(
-                        trade_id=trade_id_seq,
-                        symbol=cfg.symbol or sig.metadata.get("symbol", ""),
-                        direction=sig.direction,
-                        entry_price=fill_price,
-                        raw_entry_price=sig.entry_price,
-                        stop_loss=sig.stop_loss,
-                        take_profit=display_tp,
-                        margin_amount=margin_amount,
-                        risk_amount=risk_amount,
-                        size=size,
-                        open_time=ts,
-                        open_commission=commission,
-                        signal_metadata=dict(sig.metadata),
-                        signal_candle_index=sig.candle_index,
-                        tp_level_prices=tp_prices,
-                    )
-                    open_positions.append(pos)
-                    trade_id_seq += 1
+            # Rebind the shared wallet + trade-id sequence around the step
+            stepper.wallet = wallet
+            stepper.trade_id_seq = trade_id_seq
+            closed_trades.extend(stepper.step(candle, signals, exit_signals))
+            wallet = stepper.wallet
+            trade_id_seq = stepper.trade_id_seq
 
         # Equity snapshot (all pairs combined)
         all_open_now = [p for pp in open_per_pair for p in pp]
@@ -408,20 +337,11 @@ def run_multi(
         equity = wallet + all_closed_ts + unrealised
         balance_history.append({"timestamp": ts, "wallet": wallet, "equity": equity})
 
-    # Close remaining open positions at last timestamp for each pair
-    for pair_idx, (cfg, open_positions) in enumerate(
-        zip([p[2] for p in pairs], open_per_pair)
-    ):
-        if not open_positions:
-            continue
-        last_df = pair_dfs[pair_idx]
-        last_row = last_df.iloc[-1]
-        last_ts = int(last_row["timestamp"])
-        last_close = float(last_row["close"])
-        for pos in open_positions:
-            ct = _make_closed_trade(pos, last_close, CLOSE_REASON_EOD, last_ts, cfg)
-            wallet += pos.margin_amount + ct.gross_pnl
-            closed_trades.append(ct)
+    # Close remaining open positions at each pair's last candle close
+    for stepper in steppers:
+        stepper.wallet = wallet
+        closed_trades.extend(stepper.finalize())
+        wallet = stepper.wallet
 
     # Use first pair's config as the report config (combined portfolio)
     portfolio_config = SimulateConfig(
