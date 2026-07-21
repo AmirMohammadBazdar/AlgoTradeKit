@@ -37,15 +37,26 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
 
 import pandas as pd
 
 from .models import (
-    Bar, Box, FibRetracement, HorizontalLine,
-    IndicatorSeries, PositionBox, Signal, TextLabel, TrendLine,
+    Box,
+    FibRetracement,
+    HorizontalLine,
+    IndicatorSeries,
+    LivePosition,
+    PositionBox,
+    Signal,
+    TextLabel,
+    TrendLine,
 )
 from .server import ChartServer
+
+# Sentinel for "argument not passed" where None is a meaningful value
+# (e.g. update_live_position(next_tp=None) clears the TP line).
+_UNSET = object()
 
 
 class Chart:
@@ -66,6 +77,23 @@ class Chart:
         Colour theme.
     volume_in_main : bool
         When ``True`` volume bars appear in the main price pane.
+    host : str
+        Network interface the chart server binds to (v1.0.0).  Default
+        ``"127.0.0.1"`` keeps it reachable from this machine only.
+
+        .. warning::
+           **Security** — ``host="0.0.0.0"`` exposes the chart on **every
+           network interface**: anyone who can reach this machine (LAN, or
+           the whole internet on an unfirewalled VPS) can open the chart,
+           see your data and send WebSocket messages.  There is no
+           authentication.  Only use it on trusted / firewalled networks;
+           an SSH tunnel to the default binding is the safer alternative.
+    candle_count_limit : int | None
+        Rolling window size (v1.0.0).  When set, the chart only ever keeps
+        the last N candles: older candles, and drawings whose whole time
+        range left the window, are dropped on both the Python side and the
+        browser side as new candles stream in.  ``None`` = unbounded.
+        Can also be changed later via :meth:`set_candle_limit`.
     """
 
     def __init__(
@@ -75,6 +103,8 @@ class Chart:
         port:           int  = 0,
         theme:          Literal["dark", "light"] = "dark",
         volume_in_main: bool = True,
+        host:           str  = "127.0.0.1",
+        candle_count_limit: int | None = None,
     ) -> None:
         self.title          = title
         self.chart_type     = chart_type
@@ -86,9 +116,13 @@ class Chart:
         self._drawings:   list                = []
         self.df:          pd.DataFrame        = pd.DataFrame()  # raw OHLCV kept for indicator use
 
-        self._server = ChartServer(title=title, port=port)
+        self._server = ChartServer(title=title, port=port, host=host)
         self._server.on_message = self._handle_browser_message
         self._shown = False
+
+        self._candle_count_limit: int | None = None
+        if candle_count_limit is not None:
+            self.set_candle_limit(candle_count_limit)
 
         # Optional callback: called when the user removes an indicator from
         # the browser legend.  Signature: on_indicator_removed(name: str) -> None
@@ -107,8 +141,8 @@ class Chart:
         theme:         Literal["dark", "light"] = "dark",
         port:          int  = 0,
         volume_in_main: bool = True,
-        candle_range:  "dict | None" = None,
-    ) -> "Chart":
+        candle_range:  dict | None = None,
+    ) -> Chart:
         """
         Create a Chart pre-loaded with data from an AlgoTradeKit CSV file.
 
@@ -169,9 +203,9 @@ class Chart:
     def set_data(
         self,
         df:         pd.DataFrame,
-        chart_type: Optional[str] = None,
-        candle_range: "dict | None" = None,
-    ) -> "Chart":
+        chart_type: str | None = None,
+        candle_range: dict | None = None,
+    ) -> Chart:
         """
         Load OHLCV data from a pandas DataFrame.
 
@@ -272,6 +306,9 @@ class Chart:
             for _, row in df.iterrows()
         ]
 
+        # Rolling window (v1.0.0): a freshly loaded frame obeys the limit too
+        self._enforce_candle_limit()
+
         if self._shown:
             self._send_init()
 
@@ -336,7 +373,8 @@ class Chart:
         * ``int``      — already in seconds if < 10^10; in ms if >= 10^10
         * ``float``    — treated as seconds
         """
-        from datetime import datetime, timezone as _tz
+        from datetime import datetime
+        from datetime import timezone as _tz
 
         _PARSE_FMTS = [
             "%Y/%m/%d", "%Y-%m-%d",
@@ -402,7 +440,7 @@ class Chart:
         line_width:  int  = 1,
         series_type: Literal["line", "histogram", "area"] = "line",
         group:       str  = "",
-    ) -> "Chart":
+    ) -> Chart:
         """
         Add an indicator series.
 
@@ -461,7 +499,7 @@ class Chart:
         line_width:  int  = 1,
         series_type: Literal["line", "histogram", "area"] = "line",
         group:       str  = "",
-    ) -> "Chart":
+    ) -> Chart:
         """
         Add an indicator from an AlgoTradeKit-format DataFrame.
 
@@ -497,6 +535,18 @@ class Chart:
     # Drawings
     # -----------------------------------------------------------------------
 
+    def _add_drawing(self, drawing) -> None:
+        """Store *drawing*, push it to live browsers, keep the replay fresh.
+
+        Central path for every drawing add (v1.0.0): the server's cached
+        ``init`` is refreshed so a page refresh mid-session reproduces the
+        current chart state, including drawings added after ``show()``.
+        """
+        self._drawings.append(drawing)
+        if self._shown:
+            self._server.send({"type": "add_drawing", "drawing": drawing.to_dict()})
+            self._refresh_init_cache()
+
     def add_hline(
         self,
         price:      float,
@@ -504,14 +554,12 @@ class Chart:
         line_width: int = 1,
         line_style: int = 0,
         label:      str = "",
-    ) -> "Chart":
+    ) -> Chart:
         d = HorizontalLine(
             price=price, color=color,
             line_width=line_width, line_style=line_style, label=label,
         )
-        self._drawings.append(d)
-        if self._shown:
-            self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        self._add_drawing(d)
         return self
 
     def add_trendline(
@@ -524,14 +572,12 @@ class Chart:
         line_width: int  = 1,
         extend:     bool = False,
         label:      str  = "",
-    ) -> "Chart":
+    ) -> Chart:
         d = TrendLine(
             time1=time1, price1=price1, time2=time2, price2=price2,
             color=color, line_width=line_width, extend=extend, label=label,
         )
-        self._drawings.append(d)
-        if self._shown:
-            self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        self._add_drawing(d)
         return self
 
     def add_box(
@@ -544,24 +590,22 @@ class Chart:
         opacity:      float = 0.2,
         border_color: str   = "#26a69a",
         label:        str   = "",
-    ) -> "Chart":
+    ) -> Chart:
         d = Box(
             time1=time1, price1=price1, time2=time2, price2=price2,
             color=color, opacity=opacity, border_color=border_color, label=label,
         )
-        self._drawings.append(d)
-        if self._shown:
-            self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        self._add_drawing(d)
         return self
 
     def add_signal(
         self,
         time:  int,
         side:  Literal["buy", "sell"],
-        price: Optional[float] = None,
+        price: float | None = None,
         label: str = "",
         color: str = "",
-    ) -> "Chart":
+    ) -> Chart:
         """
         Add a buy or sell marker.
 
@@ -575,9 +619,7 @@ class Chart:
         price : Price at which to anchor the marker.  ``None`` = auto (high/low).
         """
         d = Signal(time=time, side=side, price=price, label=label, color=color)
-        self._drawings.append(d)
-        if self._shown:
-            self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        self._add_drawing(d)
         return self
 
     def add_text(
@@ -587,11 +629,9 @@ class Chart:
         text:      str,
         color:     str = "#ffffff",
         font_size: int = 12,
-    ) -> "Chart":
+    ) -> Chart:
         d = TextLabel(time=time, price=price, text=text, color=color, font_size=font_size)
-        self._drawings.append(d)
-        if self._shown:
-            self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        self._add_drawing(d)
         return self
 
     def add_fib(
@@ -601,18 +641,16 @@ class Chart:
         time2:  int,
         price2: float,
         color:  str  = "#9c27b0",
-        levels: Optional[list] = None,
+        levels: list | None = None,
         label:  str  = "",
-    ) -> "Chart":
+    ) -> Chart:
         d = FibRetracement(
             time1=time1, price1=price1, time2=time2, price2=price2,
             color=color,
             levels=levels or [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0],
             label=label,
         )
-        self._drawings.append(d)
-        if self._shown:
-            self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        self._add_drawing(d)
         return self
 
     def add_position_box(
@@ -621,14 +659,14 @@ class Chart:
         close_time:   int,
         entry_price:  float,
         stop_loss:    float,
-        take_profit:  Optional[float],
+        take_profit:  float | None,
         direction:    str,
         net_pnl:      float,
         close_reason: str = "",
         trade_id:     int  = -1,
         rr_ratio:     float = 0.0,
         opacity:      float = 0.15,
-    ) -> "Chart":
+    ) -> Chart:
         """
         Add a TradingView-style position box for one simulated trade.
 
@@ -663,12 +701,99 @@ class Chart:
             rr_ratio=rr_ratio,
             opacity=opacity,
         )
-        self._drawings.append(d)
-        if self._shown:
-            self._server.send({"type": "add_drawing", "drawing": d.to_dict()})
+        self._add_drawing(d)
         return self
 
-    def navigate_to_candle(self, timestamp_ms: int) -> "Chart":
+    # -----------------------------------------------------------------------
+    # Live positions (v1.0.0)
+    # -----------------------------------------------------------------------
+
+    def add_live_position(
+        self,
+        open_time:   int,
+        entry_price: float,
+        stop_loss:   float,
+        direction:   str,
+        next_tp:     float | None = None,
+        trade_id:    int = -1,
+        label:       str = "",
+    ) -> str:
+        """
+        Draw an OPEN (still running) trade whose lines auto-extend to the
+        newest candle: dashed entry line, coloured current-SL line (red =
+        loss zone, amber = break-even, cyan = profit — v0.7.4 scheme) and,
+        when *next_tp* is given, a dashed green next-TP target line.
+
+        Returns the drawing **id** (unlike the other ``add_*`` methods,
+        which return the chart) — keep it to stream SL/TP changes with
+        :meth:`update_live_position` and, when the trade closes, remove the
+        live drawing with :meth:`remove_drawing` before adding the final
+        position box.
+
+        Parameters
+        ----------
+        open_time  : Entry candle time in **Unix seconds** (ms // 1000).
+        entry_price: Fill price.
+        stop_loss  : Current stop-loss price.
+        direction  : ``"long"`` or ``"short"``.
+        next_tp    : Next TP target price, or ``None`` when the mode has no
+                     TP (trailing / risk-free flows send no TP line).
+        trade_id   : Trade ID from the live simulation / trader.
+        label      : Optional short label drawn at the entry line.
+        """
+        if direction not in ("long", "short"):
+            raise ValueError(f"direction must be 'long' or 'short', got {direction!r}")
+        d = LivePosition(
+            open_time=int(open_time),
+            entry_price=float(entry_price),
+            stop_loss=float(stop_loss),
+            direction=direction,
+            next_tp=None if next_tp is None else float(next_tp),
+            trade_id=trade_id,
+            label=label,
+        )
+        self._add_drawing(d)
+        return d.id
+
+    def update_live_position(
+        self,
+        drawing_id: str,
+        stop_loss:  float | None = None,
+        next_tp=_UNSET,
+        label:      str | None = None,
+    ) -> Chart:
+        """
+        Stream a state change of an open live position to the browser:
+        trailing SL move, risk-free jump to break-even, or a new next-TP
+        target after a multi-RR level fill.
+
+        The full drawing dict is re-broadcast, so the SL line colour is
+        recomputed backend-side from the new SL.  Unknown *drawing_id* is a
+        silent no-op (the position may already have been closed/removed).
+
+        Parameters
+        ----------
+        drawing_id : Id returned by :meth:`add_live_position`.
+        stop_loss  : New SL price (``None`` = unchanged).
+        next_tp    : New next-TP price; pass ``None`` to **clear** the TP
+                     line; omit the argument to leave it unchanged.
+        label      : New label (``None`` = unchanged).
+        """
+        for d in self._drawings:
+            if isinstance(d, LivePosition) and d.id == drawing_id:
+                if stop_loss is not None:
+                    d.stop_loss = float(stop_loss)
+                if next_tp is not _UNSET:
+                    d.next_tp = None if next_tp is None else float(next_tp)
+                if label is not None:
+                    d.label = label
+                if self._shown:
+                    self._server.send({"type": "update_drawing", "drawing": d.to_dict()})
+                    self._refresh_init_cache()
+                break
+        return self
+
+    def navigate_to_candle(self, timestamp_ms: int) -> Chart:
         """
         Scroll and zoom the chart to show the candle at *timestamp_ms*.
 
@@ -688,23 +813,53 @@ class Chart:
             })
         return self
 
-    def remove_drawing(self, drawing_id: str) -> "Chart":
+    def update_drawing(self, drawing_id: str, **fields) -> Chart:
+        """
+        Update fields of an existing drawing and push the change to live
+        browsers (v1.0.0) — e.g. move a trendline SL segment, retint a box.
+
+        *fields* use the drawing's Python attribute names (``price``,
+        ``time2``, ``stop_loss``, ``color``, …); attributes the drawing
+        does not have are ignored.  The **full** re-serialised drawing dict
+        is broadcast as an ``update_drawing`` message, so derived fields
+        (position-box zones, live-position SL colour) stay consistent.
+        Unknown *drawing_id* is a silent no-op, mirroring
+        :meth:`remove_drawing`.
+        """
+        for d in self._drawings:
+            if getattr(d, "id", None) != drawing_id:
+                continue
+            if hasattr(d, "_payload"):          # raw strategy-drawing wrapper
+                d._payload.update(fields)
+            else:
+                for key, val in fields.items():
+                    if hasattr(d, key):
+                        setattr(d, key, val)
+            if self._shown:
+                self._server.send({"type": "update_drawing", "drawing": d.to_dict()})
+                self._refresh_init_cache()
+            break
+        return self
+
+    def remove_drawing(self, drawing_id: str) -> Chart:
         self._drawings = [d for d in self._drawings if d.id != drawing_id]
         if self._shown:
             self._server.send({"type": "remove_drawing", "id": drawing_id})
+            self._refresh_init_cache()
         return self
 
-    def clear_drawings(self) -> "Chart":
+    def clear_drawings(self) -> Chart:
         self._drawings.clear()
         if self._shown:
             self._server.send({"type": "clear_drawings"})
+            self._refresh_init_cache()
         return self
 
     # -----------------------------------------------------------------------
     # Live streaming
     # -----------------------------------------------------------------------
 
-    def stream(self, bar) -> "Chart":
+    def stream(self, bar) -> Chart:
         """
         Push a new (or updated) bar in real-time.
 
@@ -744,9 +899,15 @@ class Chart:
         if self._shown:
             self._server.send({"type": "stream", "bar": bar})
 
+        # Rolling window (v1.0.0): the frontend enforces its own limit on
+        # every streamed bar; mirror it here so Python memory stays bounded
+        # and the init replay matches what an open page shows.
+        if self._enforce_candle_limit() and self._shown:
+            self._refresh_init_cache()
+
         return self
 
-    def stream_from_atk(self, candle: dict) -> "Chart":
+    def stream_from_atk(self, candle: dict) -> Chart:
         """
         Stream a live candle from an AlgoTradeKit exchange source.
 
@@ -770,7 +931,7 @@ class Chart:
             candle["time"] = int(candle.pop("timestamp")) // 1000
         return self.stream(candle)
 
-    def stream_indicator(self, name: str, time: int, value: float) -> "Chart":
+    def stream_indicator(self, name: str, time: int, value: float) -> Chart:
         """
         Push a single new indicator point without recalculating from scratch.
 
@@ -793,6 +954,87 @@ class Chart:
         return self
 
     # -----------------------------------------------------------------------
+    # Rolling candle window (v1.0.0)
+    # -----------------------------------------------------------------------
+
+    def set_candle_limit(self, limit: int | None) -> Chart:
+        """
+        Cap the chart at the last *limit* candles (rolling window).
+
+        Effective immediately and on every subsequently streamed bar, on
+        both sides:
+
+        * **Python** — ``_bars`` is trimmed in place and drawings whose
+          whole time range fell out of the window are dropped, so the init
+          replayed to a refreshed page matches the live view.
+        * **Browser** — a ``set_candle_limit`` message arms the frontend,
+          which trims candles, indicator points, ichimoku cloud points and
+          expired drawings now and after each streamed bar.
+
+        Timeless drawings (horizontal lines) and open live positions are
+        never dropped.  ``None`` disables the window.
+        """
+        if limit is not None:
+            limit = int(limit)
+            if limit <= 0:
+                raise ValueError(f"candle_count_limit must be a positive integer, got {limit}")
+        self._candle_count_limit = limit
+        self._enforce_candle_limit()
+        if self._shown:
+            self._server.send({"type": "set_candle_limit", "limit": limit})
+            self._refresh_init_cache()
+        return self
+
+    def _enforce_candle_limit(self) -> bool:
+        """Trim Python-side state to the rolling window.  True if trimmed.
+
+        ``_bars`` is shrunk **in place** — the server's cached init holds a
+        reference to the same list, so it stays current without a rebuild.
+        """
+        limit = self._candle_count_limit
+        if not limit or len(self._bars) <= limit:
+            return False
+        del self._bars[: len(self._bars) - limit]
+        cutoff = self._bars[0]["time"]
+        kept = [
+            d for d in self._drawings
+            if not self._drawing_expired(d, cutoff)
+        ]
+        if len(kept) != len(self._drawings):
+            self._drawings[:] = kept
+        return True
+
+    @classmethod
+    def _drawing_expired(cls, drawing, cutoff: int) -> bool:
+        """A drawing expires when its whole time range is before *cutoff*."""
+        end = cls._drawing_end_time(drawing)
+        return end is not None and end < cutoff
+
+    @staticmethod
+    def _drawing_end_time(drawing) -> int | None:
+        """
+        Latest chart time (Unix seconds) a drawing occupies, or ``None``
+        for drawings that must never be window-trimmed: timeless ones
+        (``hline``) and open live positions (they extend to "now").
+
+        Works for both dataclass drawings and raw strategy-drawing dicts —
+        all types share the ``time`` / ``time1``/``time2`` / ``close_time``
+        field vocabulary.
+        """
+        payload = drawing.to_dict() if hasattr(drawing, "to_dict") else dict(drawing)
+        if payload.get("type") == "live_position":
+            return None
+        if payload.get("close_time") is not None:
+            return payload["close_time"]
+        t1, t2 = payload.get("time1"), payload.get("time2")
+        times = [t for t in (t1, t2) if t is not None]
+        if times:
+            return max(times)
+        if payload.get("time") is not None:
+            return payload["time"]
+        return None
+
+    # -----------------------------------------------------------------------
     # Browser → Python message handling
     # -----------------------------------------------------------------------
 
@@ -810,11 +1052,13 @@ class Chart:
                             if hasattr(drawing, key):
                                 setattr(drawing, key, val)
                         break
+                self._refresh_init_cache()
 
         elif msg_type == "drawing_deleted":
             did = msg.get("id")
             if did:
                 self._drawings = [dr for dr in self._drawings if dr.id != did]
+                self._refresh_init_cache()
 
         elif msg_type == "drawing_lock_changed":
             did   = msg.get("id")
@@ -824,6 +1068,7 @@ class Chart:
                     if drawing.id == did:
                         drawing.locked = state
                         break
+                self._refresh_init_cache()
 
         elif msg_type == "remove_indicator":
             name = msg.get("name")
@@ -831,6 +1076,7 @@ class Chart:
                 self._indicators = [i for i in self._indicators if i.name != name]
                 if callable(self.on_indicator_removed):
                     self.on_indicator_removed(name)
+                self._refresh_init_cache()
 
         elif msg_type == "compute_indicator":
             params = msg.get("params", {})
@@ -840,7 +1086,7 @@ class Chart:
     # On-demand indicator computation (v0.7.4)
     # -----------------------------------------------------------------------
 
-    def add_indicator_spec(self, params: dict) -> "dict | None":
+    def add_indicator_spec(self, params: dict) -> dict | None:
         """
         Compute an indicator from the stored OHLCV data **server-side** and add
         it to the chart, tagging every resulting series with the resolved spec
@@ -901,7 +1147,7 @@ class Chart:
     def _compute_and_send_indicator(self, params: dict) -> None:
         self.add_indicator_spec(params)
 
-    def _compute_indicator_series(self, params: dict) -> "dict | None":
+    def _compute_indicator_series(self, params: dict) -> dict | None:
         """
         Run the indicator maths for *params* and ``_push`` the resulting
         series onto ``self._indicators``.  Returns the resolved spec (with all
@@ -911,8 +1157,13 @@ class Chart:
         color = params.get("color") or None  # None → use indicator default
 
         from .indicator_renderer import (
-            add_ma, add_rsi, add_macd, add_ichimoku, _next_pane, _push,
+            _next_pane,
+            _push,
             _series_to_tv,
+            add_ichimoku,
+            add_ma,
+            add_macd,
+            add_rsi,
         )
 
         # Stored OHLCV uses 'timestamp' (ms); fall back to 'time' if present.
@@ -1010,10 +1261,19 @@ class Chart:
 
     def _build_ma(self, kind: str, src, period: int):
         """Instantiate the right MA class from the indicator module."""
-        from AlgoTradeKit.indicator.ma import (
-            SMA, EMA, WMA, SMMA, DEMA, TEMA, HullMA, VWMA, VWAP,
-        )
         import pandas as pd
+
+        from AlgoTradeKit.indicator.ma import (
+            DEMA,
+            EMA,
+            SMA,
+            SMMA,
+            TEMA,
+            VWAP,
+            VWMA,
+            WMA,
+            HullMA,
+        )
         _MAP = {
             "sma":  lambda: SMA(src, period),
             "ema":  lambda: EMA(src, period),
@@ -1095,7 +1355,7 @@ class Chart:
     # Layout persistence
     # -----------------------------------------------------------------------
 
-    def save_layout(self, path: str) -> "Chart":
+    def save_layout(self, path: str) -> Chart:
         """Save the current chart configuration (indicators + drawings) to JSON."""
         layout = {
             "title":      self.title,
@@ -1107,7 +1367,7 @@ class Chart:
         Path(path).write_text(json.dumps(layout, indent=2), encoding="utf-8")
         return self
 
-    def load_layout(self, path: str) -> "Chart":
+    def load_layout(self, path: str) -> Chart:
         """Restore chart configuration from a JSON file saved by ``save_layout()``."""
         layout = json.loads(Path(path).read_text(encoding="utf-8"))
 
@@ -1156,7 +1416,7 @@ class Chart:
         self,
         open_browser: bool = True,
         block:        bool = False,
-    ) -> "Chart":
+    ) -> Chart:
         """
         Start the local server and optionally open the browser.
 
@@ -1197,14 +1457,15 @@ class Chart:
         for ind in self._indicators:
             ind._sent_to_browser = True  # type: ignore[attr-defined]
         return {
-            "type":         "init",
-            "title":        self.title,
-            "chartType":    self.chart_type,
-            "theme":        self.theme,
-            "volumeInMain": self.volume_in_main,
-            "bars":         self._bars,
-            "indicators":   [i.to_dict() for i in self._indicators],
-            "drawings":     [d.to_dict() for d in self._drawings],
+            "type":             "init",
+            "title":            self.title,
+            "chartType":        self.chart_type,
+            "theme":            self.theme,
+            "volumeInMain":     self.volume_in_main,
+            "candleCountLimit": self._candle_count_limit,
+            "bars":             self._bars,
+            "indicators":       [i.to_dict() for i in self._indicators],
+            "drawings":         [d.to_dict() for d in self._drawings],
         }
 
     def _send_init(self) -> None:
@@ -1218,8 +1479,12 @@ class Chart:
 
     @property
     def url(self) -> str:
-        """The local URL of the chart server."""
-        return f"http://127.0.0.1:{self._server.port}"
+        """Browsable URL of the chart server.
+
+        Uses the configured host; a ``0.0.0.0`` / ``::`` bind address is
+        substituted with ``127.0.0.1`` (bind-to-all is not a destination).
+        """
+        return self._server.url
 
     def __repr__(self) -> str:
         return (
