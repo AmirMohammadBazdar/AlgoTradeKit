@@ -50,12 +50,32 @@ Usage
                 )]
             return []
 
+Incremental (live) computation — v1.0.0
+---------------------------------------
+For live stepping without full recomputes, strategies may override the
+optional ``update_indicators(data, new_index)`` hook (O(1) per closed
+candle, supports SMC/price-action ``self.*`` state); strategies without the
+hook fall back to a tail recompute of ``prepare_indicators`` over the last
+``recompute_window`` candles.  Driven by:
+
+- :func:`advance_live_candle` — append one closed candle, update
+  indicators (hook or tail recompute), return that candle's signals.
+- :func:`evaluate_forming_candle` — evaluate a forming candle on a
+  throwaway copy; committed state and master data stay untouched.
+- :func:`default_recompute_window` / :func:`has_update_hook` — helpers.
+
 Built-in strategies
 -------------------
 - :class:`MACDCrossoverStrategy` — MACD line / signal line crossover entries.
 """
 
 from ._base import BaseStrategy
+from ._incremental import (
+    advance_live_candle,
+    default_recompute_window,
+    evaluate_forming_candle,
+    has_update_hook,
+)
 from ._types import ExitSignal, Signal, StrategyMode, StrategyResult
 from .builtin.macd import MACDCrossoverStrategy
 
@@ -67,6 +87,11 @@ __all__ = [
     "ExitSignal",
     "StrategyResult",
     "StrategyMode",
+    # Incremental (live) computation
+    "advance_live_candle",
+    "evaluate_forming_candle",
+    "default_recompute_window",
+    "has_update_hook",
     # Built-in strategies
     "MACDCrossoverStrategy",
 ]
