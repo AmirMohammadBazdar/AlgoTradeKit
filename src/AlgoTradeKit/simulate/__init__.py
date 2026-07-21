@@ -53,6 +53,11 @@ Public API
 Classes
     SimulateConfig       — full simulation configuration (v0.7.0: show_chart, report_mode)
     Simulate             — single-pair backtesting engine
+    SimulationStepper    — step-driven engine core: feed one closed candle at a
+                           time via step(), snapshot with build_report() (v1.0.0)
+    LiveSimulation       — live-simulation core (v1.0.0): seed from a broker,
+                           step on live closed candles, rolling window, live
+                           chart/report push — behind run_live and the Trader display
     SimulateReport       — complete statistical report
     ClosedTrade          — immutable record of one completed trade
     DrawdownPeriod       — one peak-to-trough drawdown event
@@ -68,14 +73,19 @@ String constants (for SimulateConfig fields)
     EXCHANGE_TYPE_*      COMMISSION_TYPE_*      SIZING_*
     TP_MODE_*            SL_MODE_*
     REPORT_MODE_*        (v0.7.0)
+    EVENT_*              (v1.0.0 — LiveSimulation on_event dict types)
 """
 
 from ._config import (
     COMMISSION_TYPE_FIXED,
-    COMMISSION_TYPE_PERCENTAGE,
     COMMISSION_TYPE_PER_LOT,
+    COMMISSION_TYPE_PERCENTAGE,
     EXCHANGE_TYPE_EXCHANGE,
     EXCHANGE_TYPE_METATRADER,
+    REPORT_MODE_BOTH,
+    REPORT_MODE_NONE,
+    REPORT_MODE_SAVE,
+    REPORT_MODE_WEBPAGE,
     SIZING_FIXED_AMOUNT,
     SIZING_FIXED_LOT,
     SIZING_RISK_PERCENT,
@@ -85,14 +95,18 @@ from ._config import (
     TP_MODE_MULTI_RR,
     TP_MODE_NONE,
     TP_MODE_SIGNAL,
-    # v0.7.0 report mode constants
-    REPORT_MODE_NONE,
-    REPORT_MODE_WEBPAGE,
-    REPORT_MODE_SAVE,
-    REPORT_MODE_BOTH,
     SimulateConfig,
 )
-from ._engine import Simulate
+from ._engine import Simulate, SimulationStepper
+from ._live import (
+    EVENT_CLOSE,
+    EVENT_EXIT_SIGNAL,
+    EVENT_OPEN,
+    EVENT_SIGNAL,
+    EVENT_SL_MOVE,
+    EVENT_TP_LEVEL,
+    LiveSimulation,
+)
 from ._position import (
     CLOSE_REASON_EOD,
     CLOSE_REASON_FC,
@@ -136,6 +150,15 @@ __all__ = [
     "REPORT_MODE_BOTH",
     # Engine
     "Simulate",
+    "SimulationStepper",
+    # Live simulation (v1.0.0)
+    "LiveSimulation",
+    "EVENT_SIGNAL",
+    "EVENT_EXIT_SIGNAL",
+    "EVENT_OPEN",
+    "EVENT_SL_MOVE",
+    "EVENT_TP_LEVEL",
+    "EVENT_CLOSE",
     # Position records
     "ClosedTrade",
     "CLOSE_REASON_SL",
