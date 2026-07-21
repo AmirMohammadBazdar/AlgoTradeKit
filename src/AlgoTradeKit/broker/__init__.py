@@ -28,8 +28,6 @@ MetaTrader forex via the headless Wine bridge (see
 """
 from __future__ import annotations
 
-from typing import Optional
-
 from ._errors import (
     AuthenticationError,
     BrokerError,
@@ -39,6 +37,9 @@ from ._errors import (
 )
 from ._stream import Stream
 from ._types import (
+    COMMISSION_TYPE_FIXED,
+    COMMISSION_TYPE_PER_LOT,
+    COMMISSION_TYPE_PERCENTAGE,
     MARKET_FOREX,
     MARKET_FUTURES,
     MARKET_SPOT,
@@ -46,6 +47,7 @@ from ._types import (
     ORDER_MARKET,
     ORDER_STOP,
     ORDER_STOP_LIMIT,
+    ORDER_TAKE_PROFIT,
     POSITION_LONG,
     POSITION_SHORT,
     SIDE_BUY,
@@ -65,6 +67,7 @@ from ._types import (
     OrderResult,
     Position,
     Ticker,
+    TradingCosts,
 )
 from .base import BaseBroker
 from .exchange.binance import BinanceBroker
@@ -79,19 +82,22 @@ _MT_ALIASES = {"metatrader", "metatrader5", "mt5", "mt", "forex"}
 
 def Broker(
     name: str,
-    api_key: Optional[str] = None,
-    api_secret: Optional[str] = None,
+    api_key: str | None = None,
+    api_secret: str | None = None,
     *,
-    market: Optional[str] = None,
+    market: str | None = None,
     testnet: bool = False,
     recv_window: int = 5000,
     # MetaTrader-specific
-    server: Optional[str] = None,
-    login: Optional[int] = None,
-    password: Optional[str] = None,
+    server: str | None = None,
+    login: int | None = None,
+    password: str | None = None,
+    mode: str = "auto",
     host: str = "127.0.0.1",
     port: int = 18812,
     timeout: float = 30.0,
+    candle_poll_interval: float = 1.0,
+    tick_poll_interval: float = 0.2,
     connect: bool = True,
 ) -> BaseBroker:
     """
@@ -101,6 +107,13 @@ def Broker(
     ``"metatrader"`` (aliases: ``mt5``, ``forex``).  Credentials are optional —
     without them only public market-data calls work.
 
+    MetaTrader picks its transport by ``mode``: ``"auto"`` (default) uses the
+    Wine bridge for a non-default ``host`` or on Linux/macOS, and the native
+    ``MetaTrader5`` package on Windows; ``"native"`` / ``"bridge"`` force it.
+    MetaTrader streaming (``stream_candles`` / ``stream_ticker``) polls the
+    transport at ``candle_poll_interval`` / ``tick_poll_interval`` seconds
+    (MT5 has no push feed); Binance streams over WebSocket and ignores both.
+
     Returns a concrete :class:`BaseBroker`, so the whole library can treat every
     venue identically.
     """
@@ -108,8 +121,10 @@ def Broker(
 
     if key in _MT_ALIASES:
         return MetaTraderBroker(
-            server=server, login=login, password=password,
-            host=host, port=port, timeout=timeout, connect=connect,
+            server=server, login=login, password=password, mode=mode,
+            host=host, port=port, timeout=timeout,
+            candle_poll_interval=candle_poll_interval,
+            tick_poll_interval=tick_poll_interval, connect=connect,
         )
 
     if key in _BINANCE_ALIASES or key.startswith("binance"):
@@ -134,15 +149,17 @@ __all__ = [
     "BinanceBroker", "MetaTraderBroker", "Stream",
     # types
     "Balance", "AccountInfo", "Ticker", "Order", "OrderResult", "Position",
+    "TradingCosts",
     # errors
     "BrokerError", "AuthenticationError", "NotSupportedError", "OrderError",
     "ConnectionFailed",
     # constants
     "SIDE_BUY", "SIDE_SELL",
-    "ORDER_MARKET", "ORDER_LIMIT", "ORDER_STOP", "ORDER_STOP_LIMIT",
+    "ORDER_MARKET", "ORDER_LIMIT", "ORDER_STOP", "ORDER_STOP_LIMIT", "ORDER_TAKE_PROFIT",
     "TIF_GTC", "TIF_IOC", "TIF_FOK",
     "POSITION_LONG", "POSITION_SHORT",
     "MARKET_SPOT", "MARKET_FUTURES", "MARKET_FOREX",
+    "COMMISSION_TYPE_PERCENTAGE", "COMMISSION_TYPE_PER_LOT", "COMMISSION_TYPE_FIXED",
     "STATUS_NEW", "STATUS_PARTIALLY_FILLED", "STATUS_FILLED",
     "STATUS_CANCELED", "STATUS_REJECTED", "STATUS_EXPIRED",
 ]

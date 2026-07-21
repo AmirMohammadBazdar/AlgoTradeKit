@@ -9,7 +9,8 @@ types in :mod:`AlgoTradeKit.broker._types` and hides all the differences.
 Method groups
 -------------
 * **Market data** (public, no credentials): ``fetch_candles``, ``get_ticker``,
-  ``server_time``, ``stream_candles``, ``stream_ticker``.
+  ``server_time``, ``clock_offset_ms``, ``get_trading_costs``,
+  ``stream_candles``, ``stream_ticker``.
 * **Account** (private): ``get_balance``, ``get_account_info``.
 * **Trading** (private): ``create_order`` (+ ``create_market_order`` /
   ``create_limit_order``), ``cancel_order``, ``cancel_all``, ``open_orders``,
@@ -21,7 +22,9 @@ raise :class:`AuthenticationError` when no credentials were supplied.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from statistics import median
+from typing import Any
 
 import pandas as pd
 
@@ -38,12 +41,18 @@ from ._types import (
     OrderResult,
     Position,
     Ticker,
+    TradingCosts,
 )
 
 _CANDLE_COLUMNS = [
     "timestamp", "open", "high", "low", "close", "volume",
     "close_time", "quote_volume", "trades", "taker_buy_base", "taker_buy_quote",
 ]
+
+# clock_offset_ms(): median over this many server_time() round trips…
+_CLOCK_OFFSET_SAMPLES = 5
+# …cached and re-measured once the cached value is older than this.
+_CLOCK_OFFSET_TTL_MS = 5 * 60_000
 
 
 class BaseBroker(ABC):
@@ -58,6 +67,9 @@ class BaseBroker(ABC):
 
     # Connectors set this True once credentials are validated / present.
     _authenticated: bool = False
+
+    # clock_offset_ms() cache: (offset_ms, measured_at_local_ms).
+    _clock_offset_cache: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # Auth helpers
@@ -133,6 +145,50 @@ class BaseBroker(ABC):
     def server_time(self) -> int:
         """Venue server time as a UTC millisecond timestamp."""
 
+    def clock_offset_ms(self, *, force_refresh: bool = False) -> int:
+        """
+        Venue clock minus local clock, in milliseconds.
+
+        Live scheduling (exact candle-close timing) must run on the **venue**
+        clock, never the local one: ``venue_now = now_ms() + clock_offset_ms()``.
+        Each sample brackets one :meth:`server_time` round trip and compares the
+        server stamp against the local midpoint (cancels request/response
+        asymmetry); the offset is the median of ``_CLOCK_OFFSET_SAMPLES``
+        samples.  The result is cached and re-measured automatically once it is
+        older than ``_CLOCK_OFFSET_TTL_MS``; ``force_refresh=True`` re-measures
+        immediately.
+        """
+        cached = self._clock_offset_cache
+        if not force_refresh and cached is not None:
+            offset, measured_at = cached
+            if now_ms() - measured_at < _CLOCK_OFFSET_TTL_MS:
+                return offset
+        samples = []
+        for _ in range(_CLOCK_OFFSET_SAMPLES):
+            local_before = now_ms()
+            server = self.server_time()
+            local_after = now_ms()
+            samples.append(server - (local_before + local_after) // 2)
+        offset = int(median(samples))
+        self._clock_offset_cache = (offset, now_ms())
+        return offset
+
+    def get_trading_costs(self, symbol: str) -> TradingCosts:
+        """
+        The venue's trading costs for *symbol*, in ``SimulateConfig`` terms —
+        used by the ``trader`` module to auto-build the display simulation
+        config with the broker's real fee and spread.
+
+        Connectors override this with venue data (Binance: commission endpoint
+        + book ticker; MetaTrader: ``symbol_info``).  This default is for venues
+        that cannot answer: zero costs, with a note in ``raw``.  User-supplied
+        cost overrides (``TraderConfig.spread`` / ``commission``) always win
+        over whatever this reports.
+        """
+        return TradingCosts(
+            raw={"source": "default", "note": f"{self.name} reports no trading costs."}
+        )
+
     def stream_candles(
         self,
         symbol: str,
@@ -179,13 +235,13 @@ class BaseBroker(ABC):
         quantity: float,
         *,
         type: str = ORDER_MARKET,
-        price: Optional[float] = None,
-        stop_price: Optional[float] = None,
+        price: float | None = None,
+        stop_price: float | None = None,
         time_in_force: str = TIF_GTC,
         reduce_only: bool = False,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
-        client_order_id: Optional[str] = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        client_order_id: str | None = None,
     ) -> OrderResult:
         """Place an order.  Returns an :class:`OrderResult`."""
 
@@ -216,7 +272,7 @@ class BaseBroker(ABC):
     def cancel_order(self, order_id: str, symbol: str) -> bool:
         """Cancel one working order.  Returns True on success."""
 
-    def cancel_all(self, symbol: Optional[str] = None) -> int:
+    def cancel_all(self, symbol: str | None = None) -> int:
         """Cancel all working orders (optionally for one symbol).  Returns count."""
         cancelled = 0
         for order in self.open_orders(symbol):
@@ -225,10 +281,10 @@ class BaseBroker(ABC):
         return cancelled
 
     @abstractmethod
-    def open_orders(self, symbol: Optional[str] = None) -> list[Order]:
+    def open_orders(self, symbol: str | None = None) -> list[Order]:
         """Working (pending / not-yet-filled) orders."""
 
-    def open_positions(self, symbol: Optional[str] = None) -> list[Position]:
+    def open_positions(self, symbol: str | None = None) -> list[Position]:
         """
         Open leveraged positions.  Spot venues have none, so the default returns
         an empty list; futures / MetaTrader connectors override this.
@@ -238,7 +294,7 @@ class BaseBroker(ABC):
     def close_position(
         self,
         symbol: str,
-        quantity: Optional[float] = None,
+        quantity: float | None = None,
     ) -> OrderResult:
         """Close (or partially close) an open position."""
         raise NotSupportedError(f"{self.name} does not support close_position.")

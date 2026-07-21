@@ -76,6 +76,16 @@ class Endpoints:
         return f"{self.rest_base}{self._api}/openOrders"
 
     @property
+    def order_list_oco(self) -> str:
+        # Spot-only: create an OCO order list (SL + TP pair)
+        return f"{self.rest_base}/api/v3/orderList/oco"
+
+    @property
+    def order_list(self) -> str:
+        # Spot-only: cancel an order list by orderListId
+        return f"{self.rest_base}/api/v3/orderList"
+
+    @property
     def all_open_orders(self) -> str:
         # Futures-only bulk cancel
         return f"{self.rest_base}/fapi/v1/allOpenOrders"
@@ -86,6 +96,17 @@ class Endpoints:
         if self.market == "futures":
             return f"{self.rest_base}/fapi/v2/account"
         return f"{self.rest_base}/api/v3/account"
+
+    @property
+    def commission_rate(self) -> str:
+        return f"{self.rest_base}/fapi/v1/commissionRate"  # futures only
+
+    @property
+    def my_trades(self) -> str:
+        # Account trade fills (order history): futures userTrades / spot myTrades
+        if self.market == "futures":
+            return f"{self.rest_base}/fapi/v1/userTrades"
+        return f"{self.rest_base}/api/v3/myTrades"
 
     @property
     def balance(self) -> str:
