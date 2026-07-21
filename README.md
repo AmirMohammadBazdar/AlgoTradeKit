@@ -1,7 +1,7 @@
 # AlgoTradeKit
 
 **AlgoTradeKit** is a modular Python library for building, backtesting, and
-visualising algorithmic trading strategies.  Every indicator is implemented
+**live-trading** algorithmic strategies.  Every indicator is implemented
 from scratch — no `pandas-ta`, no `ta-lib` — so you have full control over
 every calculation.
 
@@ -11,9 +11,24 @@ pip install AlgoTradeKit
 
 > Requires Python 3.10+
 
-> **New in v0.9.1** — running the [`broker`](#broker--exchanges--metatrader-v090)
-> module's MetaTrader connector **headless on a Linux VPS** is now documented
-> step-by-step in **[`MT5_WINE_SETUP.md`](MT5_WINE_SETUP.md)**.
+> ### 🚀 New in v1.0.0 — live trading
+>
+> The same strategy you backtested can now trade a real account, or paper-trade
+> live market data with the simulation engine:
+>
+> ```python
+> from AlgoTradeKit.trader import Trader, TraderConfig, run_live
+>
+> run_live(strategy=MyStrategy(), broker=broker, config=config)  # paper — no orders
+> Trader(broker=broker, strategy=MyStrategy(), config=config).run()   # real orders
+> ```
+>
+> Position sizing, trailing stops, risk-free moves and multi-RR ladders come from
+> the **same maths module the backtest uses**, so live behaviour matches the
+> backtest by construction. See [`trader`](#trader--live-trading-v100).
+>
+> Also new: **MetaTrader works on Windows and Linux automatically**, every
+> indicator gained an O(1) `update()`, and the chart + report now update live.
 
 ---
 
@@ -25,10 +40,11 @@ pip install AlgoTradeKit
 4. [indicator — Technical Indicators](#indicator--technical-indicators)
 5. [strategy — Signal Generation](#strategy--signal-generation)
 6. [simulate — Backtesting Engine](#simulate--backtesting-engine)
-7. [visual — Interactive Chart](#visual--interactive-chart)
-8. [report — Simulation Report](#report--simulation-report-v070)
-9. [Built-in MACD Strategy Demo](#built-in-macd-strategy-demo)
-10. [Configuration Reference](#configuration-reference)
+7. [trader — Live Trading](#trader--live-trading-v100)
+8. [visual — Interactive Chart](#visual--interactive-chart)
+9. [report — Simulation Report](#report--simulation-report-v070)
+10. [Built-in MACD Strategy Demo](#built-in-macd-strategy-demo)
+11. [Configuration Reference](#configuration-reference)
 
 ---
 
@@ -36,21 +52,27 @@ pip install AlgoTradeKit
 
 ```
 AlgoTradeKit/
-├── broker/         Unified exchange & MetaTrader access — candles, orders, account, sockets  ← new in v0.9.0
-├── data/           Download and cache OHLCV candles (now via the broker module)
-├── indicator/      RSI, MACD, EMA, SMA, Bollinger Bands, ATR, Ichimoku
+├── broker/         Unified exchange & MetaTrader access — candles, orders, account, sockets  ← v0.9.0
+├── data/           Download and cache OHLCV candles (via the broker module)
+├── indicator/      RSI, MACD, EMA, SMA, ATR, Ichimoku — all with O(1) streaming updates
 ├── strategy/       BaseStrategy, Signal, StrategyResult, built-in strategies
 ├── simulate/       Backtesting engine, position management, SimulateReport
+├── trader/         Live trading — real orders and run_live paper trading  ← new in v1.0.0
 ├── visual/         Interactive candlestick chart served in your browser
-└── report/         Interactive simulation report web page  ← new in v0.7.0
+└── report/         Interactive simulation report web page  ← v0.7.0
 ```
 
 Data flows in one direction:
 
 ```
 broker ──► data ──► indicator ──► strategy ──► simulate ──► report
-                                                   └──────► visual
+                                       │           └──────► visual
+                                       └──────► trader ◄────┘
 ```
+
+`trader` is a leaf: it consumes `broker`, `strategy` and `simulate`, and nothing
+imports from it. That is what keeps the backtest engine free of live-trading
+concerns while both share the same position maths.
 
 ---
 
@@ -88,7 +110,7 @@ Order placement is safe-by-default in the sense that private calls need explicit
 credentials; live endpoints are the default and `testnet=True` opts into the
 sandbox.
 
-**Real-time sockets** (both Binance spot & futures):
+**Real-time streams** — every venue, one API:
 
 ```python
 stream = b.stream_candles("BTCUSDT", "1m", lambda c: print(c["close"]), closed_only=True)
@@ -96,31 +118,56 @@ stream = b.stream_candles("BTCUSDT", "1m", lambda c: print(c["close"]), closed_o
 stream.stop()
 ```
 
-**MetaTrader (forex) on a headless Linux VPS**
+Binance streams over WebSocket. MetaTrader has no push feed, so *(v1.0.0)* it
+polls the terminal behind the same `Stream` handle and emits the same candle
+dicts — closed candles fire exactly once, in order.
 
-MetaTrader has no public API — the terminal speaks a proprietary protocol to
-your broker's server. To run head­less (SSH-only, no GUI) you install MT5 +
-Windows Python under **Wine** and run the bundled **bridge server** under
-`xvfb`. AlgoTradeKit's Linux side then reaches MT5 only through that bridge, so
-`MetaTrader5` is **never** a dependency of the library itself (no conflict).
-
-```bash
-# On the VPS, inside the Wine Python (headless):
-wine python -m pip install MetaTrader5
-xvfb-run wine python bridge_server.py --host 127.0.0.1 --port 18812 \
-    --login 12345678 --password "***" --server "MyBroker-Demo"
-```
+**Trading costs & venue clock** *(v1.0.0)*
 
 ```python
-# On the normal Linux side:
+costs = b.get_trading_costs("BTCUSDT")
+costs.commission, costs.commission_type, costs.spread, costs.contract_size
+
+b.clock_offset_ms()      # venue clock − local clock (median-sampled, cached)
+```
+
+Binance reports your account's real taker fee and a live book spread;
+MetaTrader reports spread and contract size from `symbol_info`. The live trader
+uses both to size positions correctly and to fire exactly on candle close.
+
+**MetaTrader (forex) — Windows and Linux** *(v1.0.0)*
+
+MetaTrader has no public API: the terminal speaks a proprietary protocol to your
+broker's server. AlgoTradeKit picks the right transport **automatically**.
+
+```python
 mt = Broker("metatrader", server="MyBroker-Demo", login=12345678, password="***")
+print(mt.mode)   # "native" on Windows, "bridge" on Linux/macOS
+
 candles = mt.fetch_last_candles("EURUSD", "15m", 1000)
 mt.create_market_order("EURUSD", "buy", 0.10, stop_loss=1.0800, take_profit=1.1000)
 ```
 
-> 📘 **Full headless setup: [`MT5_WINE_SETUP.md`](MT5_WINE_SETUP.md).** Zero-to-chart
-> guide — install Wine + Xvfb, run the bridge, SSH-tunnel the port, troubleshooting,
-> optional systemd auto-start.
+| Where you run | Transport | Setup |
+|---|---|---|
+| **Windows** | in-process `MetaTrader5` | `pip install AlgoTradeKit[mt5]` + the terminal installed and logged in once |
+| **Linux / macOS** | Wine bridge over TCP | [`MT5_WINE_SETUP.md`](MT5_WINE_SETUP.md) |
+| any OS, remote `host=` | that host's bridge | bridge running on the VPS |
+
+Force it with `mode="native"` / `mode="bridge"` if you ever need to. Both
+transports run the *same* operation implementations, so behaviour is identical.
+
+`MetaTrader5` is **never a core dependency** — on Windows it is the opt-in
+`[mt5]` extra (marker-gated so it can never install on Linux), and on Linux it
+lives only inside the Wine Python. No dependency conflict either way.
+
+When a bridge connection fails, the error names the failing step *and* the exact
+setup section that fixes it — Wine missing, prefix missing, or bridge not
+running — then stops. No silent fallback.
+
+> 📘 **Headless Linux setup: [`MT5_WINE_SETUP.md`](MT5_WINE_SETUP.md).**
+> Install Wine + Xvfb, run the bridge, SSH-tunnel the port, plus a Windows
+> section, an error-message reference table and troubleshooting.
 
 ---
 
@@ -232,6 +279,22 @@ ichi = Ichimoku(high, low, close, displacement=26)
 # ichi.span_a_raw = (tenkan + kijun) / 2  — current bar value (unshifted)
 ```
 
+### Streaming updates *(v1.0.0)*
+
+Every indicator can consume one new bar at a time — O(1), no recompute:
+
+```python
+ema = EMA(close, length=20)
+ema.update(new_close)                     # -> float
+macd.update(new_close)                    # -> {"macd", "signal", "histogram"}
+atr.update(new_high, new_low, new_close)  # -> float
+ichi.update(new_high, new_low, new_close) # -> {"tenkan", "kijun", ...}
+```
+
+The stored source and result series are extended in place, so properties and
+crossover helpers stay correct afterwards. Values are **parity-tested against
+the batch computation** for all 13 indicator classes — streaming and batch agree.
+
 ---
 
 ## strategy — Signal Generation
@@ -281,6 +344,30 @@ self._drawings.append({
 # Return them in StrategyResult:
 return StrategyResult(..., drawings=self._drawings)
 ```
+
+### Live / Incremental Computation *(v1.0.0)*
+
+A live session must not recompute the whole history every candle. Add an
+optional hook and each new candle costs O(1):
+
+```python
+class MyStrategy(BaseStrategy):
+
+    def setup(self, data):
+        self.zones = []          # custom state lives here, not in prepare_indicators
+
+    def update_indicators(self, data, new_index):
+        """Called exactly once per closed candle, after the row is appended."""
+        df = data[self.primary_timeframe]
+        df.loc[new_index, "_ema20"] = self._ema.update(df.loc[new_index, "close"])
+        self.zones = self._rebuild_zones(df, new_index)   # any custom state too
+```
+
+**The hook is optional.** Without it the library falls back to recomputing
+`prepare_indicators` over the last K candles and splicing the `_`-prefixed
+columns back — accurate for windowed indicators, and never revising a value it
+already wrote. Implement the hook if your strategy repaints or builds Python
+objects (order blocks, zones, SMC structures) during `prepare_indicators`.
 
 ### Built-in Strategies
 
@@ -413,6 +500,25 @@ report = run_multi([
 ], initial_balance=10_000)
 ```
 
+### Candle-by-Candle Stepping *(v1.0.0)*
+
+The engine core is also usable one candle at a time — the batch loop is a thin
+driver over it, so results stay byte-identical:
+
+```python
+from AlgoTradeKit.simulate import SimulationStepper
+
+stepper = SimulationStepper(config)
+for candle in feed:                                  # broker stream dicts work as-is
+    closed = stepper.step(candle, signals=sigs)      # -> trades closed this candle
+    snapshot = stepper.build_report()                # any-time report snapshot
+stepper.finalize()                                   # close leftovers at the last close
+```
+
+`LiveSimulation` builds on it: seed history → simulate → keep stepping a live
+feed, pushing chart and report updates each closed candle. It is what powers
+`run_live()` and the trader's display, and it never places an order.
+
 ### SimulateReport
 
 ```python
@@ -430,6 +536,125 @@ report.monthly_stats      # dict[str, MonthStats]
 report.balance_history    # list[dict]
 report.trade_markers      # list[dict]
 ```
+
+---
+
+## trader — Live Trading *(v1.0.0)*
+
+Two entry points, one config class. `run_live()` paper-trades on live market
+data; `Trader` places real orders. Both take the **same** `TraderConfig`, whose
+field names mirror `SimulateConfig` — a tuned backtest config copy-pastes across.
+
+### Paper Trading — `run_live()`
+
+Watch a strategy trade the current market without opening a position. Order code
+is never even imported; the simulation engine fills the trades, with the venue's
+real costs applied.
+
+```python
+from AlgoTradeKit.broker import Broker
+from AlgoTradeKit.trader import TraderConfig, run_live
+
+config = TraderConfig(
+    symbol="BTCUSDT",
+    min_candles=500,          # history the strategy needs before it may trade
+    risk_per_trade=1.0,
+    tp_mode="multi_rr",
+    tp_levels=[1.0, 2.0, 3.0],
+    display=True,             # live chart + live report
+    display_candles=1000,     # seed the display with the last 1000 candles
+    log_events=True,          # per-event terminal log
+)
+
+report = run_live(strategy=MyStrategy(),
+                  broker=Broker("binance-futures"),
+                  config=config)
+```
+
+Blocks until Ctrl+C, then returns the final `SimulateReport`.
+
+### Real Orders — `Trader`
+
+```python
+from AlgoTradeKit.trader import Trader
+
+trader = Trader(
+    broker=Broker("binance-futures", api_key="…", api_secret="…"),
+    strategy=MyStrategy(),
+    config=config,
+    state_path="trader_state.json",     # journal for restart recovery
+    kill_switch_file="STOP",            # touch this file to shut down
+    on_stop="keep",                     # or "close_all"
+)
+trader.run()          # blocks; Ctrl+C / SIGTERM shut down gracefully
+```
+
+**Stop-losses are always venue-native.** SL and TP are attached to the real
+order, and trailing / risk-free / multi-RR moves *modify the venue SL*. There is
+no soft stop watching price in Python anywhere — if your process dies, your stop
+is still on the exchange.
+
+### What it does for you
+
+| | |
+|---|---|
+| **Execution modes** | `candle_close` (fires at the exact venue-clock boundary — never late, even when the venue prints no candle until its first trade), `candle_update`, `tick` |
+| **Position management** | Trailing SL, risk-free moves and multi-RR ladders, all from the **same maths the backtest uses** |
+| **Multi-RR ladders** | Venue-native: reduce-only level orders on Binance futures, feed-detected partial closes on MetaTrader |
+| **Safety** | `max_daily_loss` (`500` or `"2%"`) halts new entries for the UTC day, optional flatten; kill-switch file; graceful shutdown |
+| **Restart recovery** | State is journaled on every change and reconciled against the venue on start — open positions are adopted with their trailing/ladder state, offline closes are recovered from venue history, foreign positions are left untouched |
+| **Multi-pair** | One worker per pair, brokers may repeat, one combined report |
+
+### Event Log
+
+Every meaningful moment is a typed event on a stream, printed as one grep-able
+line (`log_events=True`, filter with `log_event_types`):
+
+```
+[LIVE][BTCUSDT] SIGNAL long @ 64250.0 sl=63800.0 tp=65150.0 rr=2.00 risk=$100.00
+[LIVE][BTCUSDT] OPEN    long 0.015 @ 64251.5 margin=$96.38 order=8412…
+[LIVE][BTCUSDT] SL_MOVE 63800.0 -> 64251.5 (risk-free, rr=1.00)
+[LIVE][BTCUSDT] CLOSE   @ 65150.0 reason=tp net=$+198.40 R=+1.98 held=4h12m
+```
+
+`[SIM]` tags paper trades, `[LIVE]` real ones. Subscribers are the extension
+point for notification backends.
+
+### Multi-Pair / Multi-Venue
+
+```python
+from AlgoTradeKit.trader import Trader, TraderPair
+
+trader = Trader(pairs=[
+    TraderPair(broker=binance, config=cfg_btc, strategy=StratA()),
+    TraderPair(broker=mt5,     config=cfg_eur, strategy=StratB()),
+    TraderPair(broker=mt5,     config=cfg_gbp, strategy=StratB()),
+])
+trader.run()
+```
+
+Pairs on the same broker share that account's wallet naturally. Every pair gets
+its own chart, report and event log, plus **one combined portfolio report** —
+merged trades, equity summed across accounts, per-pair breakdown.
+
+### Live Display
+
+Optional and **off by default** — display work runs on a low-priority background
+queue, so it can never slow the trading loop.
+
+```python
+TraderConfig(
+    display=True,
+    display_trades="sim",           # "sim" | "real" | "both"
+    display_open_browser=False,     # VPS: print the URLs instead of opening tabs
+    chart_host="0.0.0.0",           # reachable from another machine
+    chart_port=8080, report_port=8081,
+    candle_count_limit=2000,        # rolling window keeps memory bounded
+)
+```
+
+`"sim"` shows theoretical strategy performance, `"real"` shows your actual
+fills, `"both"` overlays them.
 
 ---
 
@@ -577,6 +802,26 @@ add_strategy_drawings(chart, strategy_result)
 chart.navigate_to_candle(timestamp_ms=1700000000000)
 ```
 
+### Live Updates *(v1.0.0)*
+
+```python
+chart = Chart(host="0.0.0.0", candle_count_limit=2000)   # host default: 127.0.0.1
+print(chart.url)                                          # print instead of opening a tab
+
+pid = chart.add_live_position(open_time=…, entry_price=…, stop_loss=…,
+                              direction="long", next_tp=…)
+chart.update_live_position(pid, stop_loss=new_sl)         # trailing / risk-free move
+chart.set_candle_limit(2000)                              # rolling window, browser mirrors it
+```
+
+An open trade draws as a dashed entry line plus a live SL line, colour-coded by
+zone (red = loss, amber = break-even, cyan = profit) and a dashed next-TP line.
+Every change is pushed to the open page, and refreshing the browser mid-session
+replays the **current** chart, not the state it started in.
+
+> ⚠️ `host="0.0.0.0"` exposes the chart to anyone who can reach the port. An SSH
+> tunnel is the safer way to view a VPS chart.
+
 ---
 
 ## report — Simulation Report (v0.7.0)
@@ -616,6 +861,25 @@ save_report_html(report, "report.html")
 
 Clicking a trade dot and pressing **"Open on Candle Chart"** navigates the
 linked chart to that trade's entry candle.
+
+### Live Updates & Portfolio Reports *(v1.0.0)*
+
+```python
+from AlgoTradeKit.report import ReportServer, show_combined_report
+
+server = ReportServer(host="127.0.0.1")
+server.push_update(fresh_report)     # re-renders the open page in place
+```
+
+A **combined report** aggregates several pairs into one page — merged trade
+list, equity curve summed across accounts, and a per-pair breakdown table:
+
+```python
+show_combined_report({"BTCUSDT": btc_report, "EURUSD": eur_report})
+```
+
+A report built from **real broker fills** is an ordinary `SimulateReport`, so
+every path above renders live trading exactly like a backtest.
 
 ---
 
@@ -707,6 +971,26 @@ Two browser tabs open:
 |---|---|---|
 | `SL_MODE_SIGNAL` | `"signal"` | Use Signal's stop_loss |
 | `SL_MODE_TRAILING` | `"trailing"` | Trail `trailing_sl_percent`% from peak |
+
+### Trader Constants *(v1.0.0)*
+
+`from AlgoTradeKit.trader import …`
+
+| Constant | Value | Behaviour |
+|---|---|---|
+| `EXEC_CANDLE_CLOSE` | `"candle_close"` | Evaluate once per closed candle, at the exact venue-clock boundary (default) |
+| `EXEC_CANDLE_UPDATE` | `"candle_update"` | Re-evaluate on every forming-candle update |
+| `EXEC_TICK` | `"tick"` | Re-evaluate on every tick |
+| `DISPLAY_TRADES_SIM` | `"sim"` | Display shows theoretical simulated trades (default) |
+| `DISPLAY_TRADES_REAL` | `"real"` | Display shows actual broker fills |
+| `DISPLAY_TRADES_BOTH` | `"both"` | Real fills overlaid on simulated trades |
+| `ON_STOP_KEEP` | `"keep"` | On shutdown, leave positions open under their venue SL/TP (default) |
+| `ON_STOP_CLOSE_ALL` | `"close_all"` | On shutdown, market-close everything and cancel working orders |
+
+Event types — the domain of `log_event_types`, and `ALL_EVENT_TYPES` is the full
+set: `EVENT_SIGNAL`, `EVENT_EXIT_SIGNAL`, `EVENT_OPEN`, `EVENT_SL_MOVE`,
+`EVENT_RISK_FREE`, `EVENT_TP_LEVEL`, `EVENT_CLOSE`, `EVENT_DAILY_LOSS`,
+`EVENT_RECONCILE`, `EVENT_ERROR`.
 
 ---
 

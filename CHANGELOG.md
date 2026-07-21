@@ -7,6 +7,40 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.0] — 2026-07-21
+
+Live trading. AlgoTradeKit can now place real orders, or paper-trade the same
+strategy on live market data with the simulation engine.
+
+### Added
+
+- **`trader` module** — `Trader` for real orders and `run_live()` for paper
+  trading, sharing one `TraderConfig` (same field names as `SimulateConfig`).
+  Venue-native SL/TP, three execution modes (`candle_close` / `candle_update` /
+  `tick`), multi-RR ladders, `max_daily_loss`, kill switch, `on_stop` policy,
+  journal persistence with restart reconciliation, multi-pair / multi-venue.
+- **Typed event stream + terminal log** — one line per signal, open, SL move,
+  risk-free touch, TP level and close, tagged `[SIM]` or `[LIVE]`.
+- **MetaTrader cross-platform** — `mode="auto"` picks the native `MetaTrader5`
+  transport on Windows (`pip install AlgoTradeKit[mt5]`) or the Wine bridge
+  elsewhere; connection failures name the setup step that fixes them.
+- **MetaTrader streaming** — `stream_candles` / `stream_ticker` by polling.
+- **`get_trading_costs()` and `clock_offset_ms()`** on every broker.
+- **Incremental computation** — `update()` on all 13 indicators; optional
+  `BaseStrategy.update_indicators` hook with a tail-recompute fallback.
+- **`SimulationStepper`** and **`LiveSimulation`** in `simulate`.
+- **Live chart + report** — configurable bind host, open-position drawings with
+  live SL/TP updates, rolling window, `ReportServer.push_update`, and combined
+  portfolio reports across pairs.
+
+### Changed
+
+- Position maths moved to `simulate/_position_math.py`, shared by the backtest
+  engine, the multi-pair runner and the live trader. Batch results unchanged.
+- `MT5_WINE_SETUP.md` rewritten for the cross-platform flow.
+
+---
+
 ## [0.9.1] — 2026-07-01
 
 Follow-up to the v0.9.0 `broker` module: a MetaTrader smoke-test demo, a
