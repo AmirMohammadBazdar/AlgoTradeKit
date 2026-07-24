@@ -587,6 +587,10 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 // ═══════════════════════════════════════════════════════════════
 let theme='dark', chartType='candlestick', activeTool='cursor', volumeInMain=true;
 let allBars=[];
+// Rolling window (v1.0.0): keep only the last N candles; null = unbounded.
+// Set by the server (init payload / set_candle_limit message), enforced here
+// after every streamed bar.
+let candleCountLimit=null;
 
 const panes={};
 let mainChart=null, mainSeries=null, volumeSeries=null;
@@ -830,10 +834,66 @@ function streamBar(bar){
     color:bar.close>=bar.open?'#3fb95055':'#f8514955'});
   if(allBars.length&&allBars[allBars.length-1].time===bar.time) allBars[allBars.length-1]=bar;
   else allBars.push(bar);
+  enforceCandleLimit();   // rolling window (v1.0.0) — no-op when unlimited
   document.getElementById('barcnt').textContent=allBars.length+' bars';
   document.getElementById('lupd').textContent='⟳ '+new Date().toLocaleTimeString();
   // Keep last-close axis label current
   updateCursorAxisLabel(null);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ROLLING CANDLE WINDOW (v1.0.0)
+//  Drops candles, indicator points, cloud points and drawings that
+//  fell out of the last-N-candles window.  Armed by the server via
+//  the init payload or a set_candle_limit message.
+// ═══════════════════════════════════════════════════════════════
+function drawingEndTime(d){
+  // Latest chart time a drawing occupies; null = never trim.
+  // hlines are timeless; live positions extend to "now".
+  if(d.type==='live_position') return null;
+  if(d.close_time!=null) return d.close_time;
+  if(d.time1!=null || d.time2!=null)
+    return Math.max(d.time1 ?? -Infinity, d.time2 ?? -Infinity);
+  if(d.time!=null) return d.time;
+  return null;
+}
+
+function enforceCandleLimit(){
+  if(!candleCountLimit || allBars.length<=candleCountLimit) return;
+  const vr = mainChart ? mainChart.timeScale().getVisibleRange() : null;
+
+  allBars = allBars.slice(-candleCountLimit);
+  const cutoff = allBars[0].time;
+
+  if(mainSeries) mainSeries.setData(allBars);
+  if(volumeSeries) volumeSeries.setData(allBars.map(b=>({
+    time:b.time,value:b.volume||0,
+    color:b.close>=b.open?'#3fb95055':'#f8514955',
+  })));
+
+  // Indicator series: drop points older than the window start
+  Object.values(indMeta).forEach(m=>{
+    try{ m.series.setData(m.series.data().filter(p=>p.time>=cutoff)); }catch{}
+  });
+  if(ichimokuCloud){
+    ichimokuCloud.spanA = ichimokuCloud.spanA.filter(p=>p.time>=cutoff);
+    ichimokuCloud.spanB = ichimokuCloud.spanB.filter(p=>p.time>=cutoff);
+  }
+
+  // Drawings whose whole time range left the window
+  Object.keys(drawings).forEach(k=>{
+    const end = drawingEndTime(drawings[k]);
+    if(end!=null && end<cutoff){
+      delete drawings[k];
+      if(selectedId===k) selectedId=null;
+      if(hoverId===k)    hoverId=null;
+    }
+  });
+
+  // Restore the visible time range (setData shifts logical indices)
+  if(vr && mainChart){ try{ mainChart.timeScale().setVisibleRange(vr); }catch{} }
+  document.getElementById('barcnt').textContent=allBars.length+' bars';
+  redrawAll();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1833,6 +1893,57 @@ function renderOne(d,ctx,W,H){
     }
   }
 
+  else if(d.type==='live_position'){
+    // OPEN trade (v1.0.0): entry / current-SL / next-TP lines drawn from
+    // open_time and auto-extending to the newest candle.  sl_color is
+    // computed backend-side (red = loss zone, amber = break-even, cyan =
+    // profit); updates arrive as update_drawing messages.
+    if(!allBars.length){ctx.restore();return;}
+    const tLast  = allBars[allBars.length-1].time;
+    const pEntry = toXY(tLast, d.entry_price);
+    const pSl    = toXY(tLast, d.stop_loss);
+    if(!pEntry||!pSl){ctx.restore();return;}
+    // open_time may have been window-trimmed / scrolled out → clamp to left edge
+    const openPt = toXY(d.open_time, d.entry_price);
+    const x1 = openPt ? openPt.x : 0;
+    const x2 = Math.min(pEntry.x + 8, W);   // a touch past the newest bar
+
+    // Entry line (dashed, like the posbox entry line)
+    ctx.beginPath(); ctx.strokeStyle='#ffffff66';
+    ctx.lineWidth=0.8; ctx.setLineDash([4,3]);
+    ctx.moveTo(x1,pEntry.y); ctx.lineTo(x2,pEntry.y); ctx.stroke();
+
+    // Current SL line (solid, zone-coloured)
+    ctx.beginPath(); ctx.strokeStyle=d.sl_color||'#f85149';
+    ctx.lineWidth=2; ctx.setLineDash([]);
+    ctx.moveTo(x1,pSl.y); ctx.lineTo(x2,pSl.y); ctx.stroke();
+
+    // Next-TP target line (dashed green) — only when the mode has a TP
+    if(d.next_tp!=null){
+      const pTp = toXY(tLast, d.next_tp);
+      if(pTp){
+        ctx.beginPath(); ctx.strokeStyle=d.tp_color||'#3fb950';
+        ctx.lineWidth=1; ctx.setLineDash([5,3]);
+        ctx.moveTo(x1,pTp.y); ctx.lineTo(x2,pTp.y); ctx.stroke();
+      }
+    }
+    ctx.setLineDash([]);
+
+    // Entry marker (direction triangle, same as posbox)
+    const col = d.direction==='long' ? '#3fb950' : '#f85149';
+    const sz = 5;
+    ctx.beginPath();
+    ctx.moveTo(x1 - sz*1.5, pEntry.y - sz);
+    ctx.lineTo(x1,          pEntry.y);
+    ctx.lineTo(x1 - sz*1.5, pEntry.y + sz);
+    ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+
+    if(d.label){
+      ctx.fillStyle = col; ctx.textAlign='left';
+      ctx.fillText(d.label, x1 + 4, pEntry.y - 6);
+    }
+  }
+
   ctx.restore();
 }
 
@@ -2404,6 +2515,7 @@ function handleMsg(msg){
       document.body.classList.toggle('light',theme==='light');
       chartType=msg.chartType||'candlestick';
       volumeInMain=msg.volumeInMain!==false;
+      candleCountLimit=msg.candleCountLimit||null;
       document.getElementById('chart-title').textContent=msg.title||'Chart';
       document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
 
@@ -2411,6 +2523,7 @@ function handleMsg(msg){
       setData(msg.bars||[]);
       (msg.indicators||[]).forEach(addIndicator);
       (msg.drawings||[]).forEach(d=>{ drawings[d.id]=d; });
+      enforceCandleLimit();   // server already trims; belt-and-braces
       redrawAll(); fitAll();
       setCanvasInteractive(false);
       break;
@@ -2424,6 +2537,11 @@ function handleMsg(msg){
     case 'update_drawing':
       if(drawings[msg.drawing.id]) Object.assign(drawings[msg.drawing.id],msg.drawing);
       redrawAll(); break;
+    case 'set_candle_limit':
+      // Rolling window (v1.0.0): arm/disarm and apply immediately
+      candleCountLimit=msg.limit||null;
+      enforceCandleLimit();
+      break;
     case 'navigate_to_candle':{
       // Smoothly scroll+zoom to show the target candle
       if(!mainChart || !allBars.length) break;

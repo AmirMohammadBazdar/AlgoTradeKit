@@ -11,20 +11,32 @@ Tests cover:
 - Ichimoku (including raw span_a / span_b — v0.7.2)
 """
 
-import math
-import pytest
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pytest
 
-from AlgoTradeKit.indicator import ATR, RSI, MACD, SMA, EMA, WMA, VWMA, SMMA, DEMA, TEMA, HullMA, VWAP, Ichimoku
+from AlgoTradeKit.indicator import (
+    ATR,
+    DEMA,
+    EMA,
+    MACD,
+    RSI,
+    SMA,
+    SMMA,
+    TEMA,
+    VWAP,
+    VWMA,
+    WMA,
+    HullMA,
+    Ichimoku,
+)
 from AlgoTradeKit.indicator._base import (
-    _to_series,
-    _sma_series,
     _ema_series,
     _rma_series,
+    _sma_series,
+    _to_series,
     _wma_series,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -305,7 +317,9 @@ class TestVWAP:
 
     def test_bands_present(self):
         df = _synthetic_ohlcv(50)
-        vwap = VWAP(df["high"], df["low"], df["close"], df["volume"], anchor="none", bands=[1, 2, 3])
+        vwap = VWAP(
+            df["high"], df["low"], df["close"], df["volume"], anchor="none", bands=[1, 2, 3]
+        )
         for i in [1, 2, 3]:
             assert f"upper_{i}" in vwap.result
             assert f"lower_{i}" in vwap.result
@@ -313,9 +327,9 @@ class TestVWAP:
     def test_upper_above_lower(self):
         df = _synthetic_ohlcv(50)
         vwap = VWAP(df["high"], df["low"], df["close"], df["volume"], anchor="none", bands=[1])
-        u = vwap.result["upper_1"].dropna()
-        l = vwap.result["lower_1"].dropna()
-        assert (u >= l).all()
+        upper = vwap.result["upper_1"].dropna()
+        lower = vwap.result["lower_1"].dropna()
+        assert (upper >= lower).all()
 
     def test_no_bands(self):
         df = _synthetic_ohlcv(20)
@@ -414,12 +428,12 @@ class TestRSI:
         rsi = RSI(_synthetic_close(50))
         cfg = rsi.visual_config()
         assert cfg["pane"] == "oscillator"
-        assert any(l["key"] == "rsi" for l in cfg["lines"])
+        assert any(line["key"] == "rsi" for line in cfg["lines"])
 
     def test_visual_config_with_ma(self):
         rsi = RSI(_synthetic_close(60), show_ma=True, ma_type="EMA")
         cfg = rsi.visual_config()
-        keys = [l["key"] for l in cfg["lines"]]
+        keys = [line["key"] for line in cfg["lines"]]
         assert "rsi_ma" in keys
 
     def test_short_data_raises(self):
@@ -521,7 +535,7 @@ class TestMACD:
         macd = MACD(_synthetic_close(100))
         cfg = macd.visual_config()
         assert cfg["pane"] == "oscillator"
-        line_keys = [l["key"] for l in cfg["lines"]]
+        line_keys = [line["key"] for line in cfg["lines"]]
         assert "macd" in line_keys
         assert "signal" in line_keys
         assert cfg["histogram"]["key"] == "histogram"
@@ -569,7 +583,9 @@ class TestIchimoku:
     def test_all_keys_present(self):
         df = _synthetic_ohlcv(200)
         ichi = Ichimoku(df["high"], df["low"], df["close"])
-        for key in ["tenkan", "kijun", "senkou_a", "senkou_b", "chikou", "cloud_future_a", "cloud_future_b"]:
+        keys = ["tenkan", "kijun", "senkou_a", "senkou_b", "chikou",
+                "cloud_future_a", "cloud_future_b"]
+        for key in keys:
             assert key in ichi.result, f"Missing key: {key}"
 
     def test_tenkan_formula(self):
@@ -692,7 +708,7 @@ class TestIchimoku:
         cfg = ichi.visual_config()
         assert cfg["pane"] == "price"
         assert cfg["type"] == "overlay"
-        line_keys = [l["key"] for l in cfg["lines"]]
+        line_keys = [line["key"] for line in cfg["lines"]]
         for key in ["tenkan", "kijun", "senkou_a", "senkou_b", "chikou"]:
             assert key in line_keys
         assert cfg["cloud"]["extend_future"] is True
@@ -981,3 +997,271 @@ class TestIchimokuRawSpans:
             shifted[mask].reset_index(drop=True),
             check_names=False,
         )
+
+
+# ===========================================================================
+# Incremental streaming updates — update() (v1.0.0)
+#
+# Parity contract: construct an indicator over the first _SEED_N bars, stream
+# the remaining bars through update(), and every result series must equal the
+# batch computation over the full data — identical NaN positions, values equal
+# to floating-point tolerance (EWM-based lines are bitwise-identical; rolling
+# mean/sum lines can differ from pandas' compensated sliding sums by ~1 ulp).
+# ===========================================================================
+
+_SEED_N = 120  # bars given to the constructor
+_FULL_N = 260  # total bars after streaming the rest through update()
+
+
+def _assert_series_parity(streamed: pd.Series, batch: pd.Series, label: str):
+    assert len(streamed) == len(batch), f"{label}: length {len(streamed)} != {len(batch)}"
+    s = streamed.to_numpy(dtype=float)
+    b = batch.to_numpy(dtype=float)
+    np.testing.assert_array_equal(
+        np.isnan(s), np.isnan(b), err_msg=f"{label}: NaN mask mismatch"
+    )
+    mask = ~np.isnan(b)
+    if mask.any():
+        np.testing.assert_allclose(s[mask], b[mask], rtol=1e-9, atol=1e-12, err_msg=label)
+
+
+def _assert_full_parity(streamed_ind, batch_ind, label: str):
+    assert set(streamed_ind.result) == set(batch_ind.result), f"{label}: result keys"
+    for key in batch_ind.result:
+        _assert_series_parity(streamed_ind.result[key], batch_ind.result[key], f"{label}.{key}")
+
+
+class TestIncrementalUpdates:
+    """ v1.0.0 — update() must reproduce the batch columns for every indicator."""
+
+    # ------------------------------------------------------------------
+    # Single-source MA family
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "cls,kwargs",
+        [
+            (SMA, {"length": 9}),
+            (SMA, {"length": 20}),
+            (EMA, {"length": 9}),
+            (EMA, {"length": 21}),
+            (WMA, {"length": 9}),
+            (SMMA, {"length": 7}),
+            (DEMA, {"length": 9}),
+            (TEMA, {"length": 9}),
+            (HullMA, {"length": 16}),
+        ],
+    )
+    def test_ma_family_parity(self, cls, kwargs):
+        close = _synthetic_close(_FULL_N, seed=7)
+        batch = cls(close, **kwargs)
+        inc = cls(close.iloc[:_SEED_N], **kwargs)
+        for value in close.iloc[_SEED_N:]:
+            ret = inc.update(float(value))
+            assert isinstance(ret, float)
+        _assert_full_parity(inc, batch, cls.__name__)
+
+    def test_vwma_parity(self):
+        df = _synthetic_ohlcv(_FULL_N, seed=11)
+        batch = VWMA(df["close"], df["volume"], length=20)
+        inc = VWMA(df["close"].iloc[:_SEED_N], df["volume"].iloc[:_SEED_N], length=20)
+        for i in range(_SEED_N, _FULL_N):
+            ret = inc.update(float(df["close"].iloc[i]), float(df["volume"].iloc[i]))
+            assert isinstance(ret, float)
+        _assert_full_parity(inc, batch, "VWMA")
+
+    @pytest.mark.parametrize("anchor", ["session", "none"])
+    def test_vwap_parity(self, anchor):
+        df = _synthetic_ohlcv(_FULL_N, seed=11)
+        kwargs = {"anchor": anchor, "bands": [1, 2, 3], "band_multiplier": 1.5}
+        batch = VWAP(df["high"], df["low"], df["close"], df["volume"], **kwargs)
+        inc = VWAP(
+            df["high"].iloc[:_SEED_N],
+            df["low"].iloc[:_SEED_N],
+            df["close"].iloc[:_SEED_N],
+            df["volume"].iloc[:_SEED_N],
+            **kwargs,
+        )
+        for i in range(_SEED_N, _FULL_N):
+            ret = inc.update(
+                float(df["high"].iloc[i]),
+                float(df["low"].iloc[i]),
+                float(df["close"].iloc[i]),
+                float(df["volume"].iloc[i]),
+            )
+            assert isinstance(ret, float)
+        assert set(inc.result) == {"vwap", "upper_1", "lower_1", "upper_2", "lower_2",
+                                   "upper_3", "lower_3"}
+        _assert_full_parity(inc, batch, f"VWAP[{anchor}]")
+
+    # ------------------------------------------------------------------
+    # RSI
+    # ------------------------------------------------------------------
+
+    def test_rsi_parity(self):
+        close = _synthetic_close(_FULL_N, seed=7)
+        batch = RSI(close)
+        inc = RSI(close.iloc[:_SEED_N])
+        for value in close.iloc[_SEED_N:]:
+            ret = inc.update(float(value))
+            assert isinstance(ret, float)
+        _assert_full_parity(inc, batch, "RSI")
+
+    @pytest.mark.parametrize("ma_type", ["EMA", "SMA", "SMMA", "WMA"])
+    def test_rsi_show_ma_parity(self, ma_type):
+        close = _synthetic_close(_FULL_N, seed=9)
+        batch = RSI(close, show_ma=True, ma_type=ma_type)
+        inc = RSI(close.iloc[:_SEED_N], show_ma=True, ma_type=ma_type)
+        for value in close.iloc[_SEED_N:]:
+            inc.update(float(value))
+        assert "rsi_ma" in inc.result
+        _assert_full_parity(inc, batch, f"RSI[{ma_type}]")
+
+    # ------------------------------------------------------------------
+    # MACD
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {},
+            {"oscillator_ma": "SMA", "signal_ma": "SMA"},
+            {"oscillator_ma": "SMMA", "signal_ma": "WMA"},
+        ],
+    )
+    def test_macd_parity(self, kwargs):
+        close = _synthetic_close(_FULL_N, seed=7)
+        batch = MACD(close, **kwargs)
+        inc = MACD(close.iloc[:_SEED_N], **kwargs)
+        for value in close.iloc[_SEED_N:]:
+            ret = inc.update(float(value))
+            assert isinstance(ret, dict)
+            assert set(ret) == {"macd", "signal", "histogram"}
+        _assert_full_parity(inc, batch, "MACD")
+
+    def test_macd_return_matches_appended_values(self):
+        close = _synthetic_close(_FULL_N, seed=7)
+        inc = MACD(close.iloc[:_SEED_N])
+        for value in close.iloc[_SEED_N:]:
+            ret = inc.update(float(value))
+            for key in ("macd", "signal", "histogram"):
+                last = inc.result[key].iloc[-1]
+                assert (ret[key] != ret[key] and last != last) or ret[key] == last
+
+    # ------------------------------------------------------------------
+    # ATR
+    # ------------------------------------------------------------------
+
+    def test_atr_parity(self):
+        df = _synthetic_ohlcv(_FULL_N, seed=13)
+        batch = ATR(df["high"], df["low"], df["close"])
+        inc = ATR(
+            df["high"].iloc[:_SEED_N], df["low"].iloc[:_SEED_N], df["close"].iloc[:_SEED_N]
+        )
+        for i in range(_SEED_N, _FULL_N):
+            ret = inc.update(
+                float(df["high"].iloc[i]), float(df["low"].iloc[i]), float(df["close"].iloc[i])
+            )
+            assert isinstance(ret, float)
+        _assert_full_parity(inc, batch, "ATR")
+
+    # ------------------------------------------------------------------
+    # Ichimoku
+    # ------------------------------------------------------------------
+
+    def test_ichimoku_parity(self):
+        df = _synthetic_ohlcv(_FULL_N, seed=13)
+        batch = Ichimoku(df["high"], df["low"], df["close"])
+        inc = Ichimoku(
+            df["high"].iloc[:_SEED_N], df["low"].iloc[:_SEED_N], df["close"].iloc[:_SEED_N]
+        )
+        for i in range(_SEED_N, _FULL_N):
+            ret = inc.update(
+                float(df["high"].iloc[i]), float(df["low"].iloc[i]), float(df["close"].iloc[i])
+            )
+            assert isinstance(ret, dict)
+            assert set(ret) == {
+                "tenkan", "kijun", "senkou_a", "senkou_b", "chikou", "span_a_raw", "span_b_raw"
+            }
+            assert ret["chikou"] != ret["chikou"]  # newest bar's chikou is always NaN
+        _assert_full_parity(inc, batch, "Ichimoku")
+        # future cloud must be re-anchored past the new last bar, like batch
+        assert inc.result["cloud_future_a"].index.equals(batch.result["cloud_future_a"].index)
+        assert inc.result["cloud_future_b"].index.equals(batch.result["cloud_future_b"].index)
+
+    def test_ichimoku_chikou_retro_write(self):
+        df = _synthetic_ohlcv(_SEED_N, seed=13)
+        inc = Ichimoku(df["high"], df["low"], df["close"])
+        disp = inc.displacement
+        n_old = len(df)
+        assert pd.isna(inc.result["chikou"].iloc[n_old - disp])  # not yet known
+        new_close = float(df["close"].iloc[-1]) + 1.25
+        inc.update(float(df["high"].iloc[-1]) + 2.0, float(df["low"].iloc[-1]), new_close)
+        assert inc.result["chikou"].iloc[n_old - disp] == new_close
+        assert pd.isna(inc.result["chikou"].iloc[-1])
+
+    # ------------------------------------------------------------------
+    # Cross-cutting behaviour
+    # ------------------------------------------------------------------
+
+    def test_update_returns_appended_value(self):
+        close = _synthetic_close(_FULL_N, seed=7)
+        inc = EMA(close.iloc[:_SEED_N], length=9)
+        for value in close.iloc[_SEED_N:]:
+            ret = inc.update(float(value))
+            assert ret == inc.ema.iloc[-1]
+            assert inc.source.iloc[-1] == float(value)
+
+    def test_update_from_minimal_history(self):
+        """update() works right after construction with the minimum data length."""
+        close = _synthetic_close(60, seed=21)
+        for cls, need in [(EMA, 9), (SMA, 9), (SMMA, 9)]:
+            batch = cls(close, length=9)
+            inc = cls(close.iloc[:need], length=9)
+            for value in close.iloc[need:]:
+                inc.update(float(value))
+            _assert_full_parity(inc, batch, f"{cls.__name__}[minimal]")
+        df = _synthetic_ohlcv(60, seed=21)
+        batch = ATR(df["high"], df["low"], df["close"], period=14)
+        inc = ATR(
+            df["high"].iloc[:15], df["low"].iloc[:15], df["close"].iloc[:15], period=14
+        )
+        for i in range(15, 60):
+            inc.update(
+                float(df["high"].iloc[i]), float(df["low"].iloc[i]), float(df["close"].iloc[i])
+            )
+        _assert_full_parity(inc, batch, "ATR[minimal]")
+
+    def test_constant_series_exact(self):
+        """Constant input exercises pandas' constant-value guard — bitwise equality."""
+        const = pd.Series([42.5] * 80)
+        for cls, key in [(EMA, "ema"), (SMMA, "smma")]:
+            batch = cls(const, length=9)
+            inc = cls(const.iloc[:30], length=9)
+            for value in const.iloc[30:]:
+                inc.update(float(value))
+            s = inc.result[key].to_numpy(dtype=float)
+            b = batch.result[key].to_numpy(dtype=float)
+            np.testing.assert_array_equal(np.isnan(s), np.isnan(b))
+            mask = ~np.isnan(b)
+            assert (s[mask] == b[mask]).all()  # exactly equal, not just close
+
+    def test_index_and_length_grow(self):
+        close = _synthetic_close(_SEED_N + 5, seed=3)
+        inc = RSI(close.iloc[:_SEED_N])
+        for value in close.iloc[_SEED_N:]:
+            inc.update(float(value))
+        assert len(inc.source) == _SEED_N + 5
+        assert len(inc.rsi) == _SEED_N + 5
+        assert inc.source.index.equals(pd.RangeIndex(_SEED_N + 5))
+        assert inc.rsi.index.equals(pd.RangeIndex(_SEED_N + 5))
+
+    def test_signal_helpers_work_after_updates(self):
+        """Full-series helpers (crossovers, cloud checks) keep working post-stream."""
+        close = _synthetic_close(_FULL_N, seed=7)
+        batch = MACD(close)
+        inc = MACD(close.iloc[:_SEED_N])
+        for value in close.iloc[_SEED_N:]:
+            inc.update(float(value))
+        pd.testing.assert_series_equal(inc.crossover(), batch.crossover())
+        pd.testing.assert_series_equal(inc.crossunder(), batch.crossunder())

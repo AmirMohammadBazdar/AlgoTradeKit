@@ -6,19 +6,21 @@ the rest of AlgoTradeKit treats Binance exactly like any other venue.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
-from ...base import BaseBroker
-from ..._errors import NotSupportedError, OrderError
+from ..._errors import BrokerError, ConnectionFailed, NotSupportedError, OrderError
 from ..._stream import Stream
 from ..._timeutil import next_open_ms, normalize_timeframe, now_ms
 from ..._types import (
+    COMMISSION_TYPE_PERCENTAGE,
     MARKET_FUTURES,
     MARKET_SPOT,
     ORDER_LIMIT,
     ORDER_MARKET,
     ORDER_STOP,
     ORDER_STOP_LIMIT,
+    ORDER_TAKE_PROFIT,
     POSITION_LONG,
     POSITION_SHORT,
     SIDE_BUY,
@@ -38,7 +40,9 @@ from ..._types import (
     OrderResult,
     Position,
     Ticker,
+    TradingCosts,
 )
+from ...base import BaseBroker
 from ._endpoints import INTERVAL_MAP, MAX_KLINES_PER_REQUEST, resolve_endpoints
 from ._rest import BinanceREST
 from ._ws import UserDataStream, stream_book_ticker, stream_kline
@@ -67,9 +71,14 @@ _TYPE_FROM_BINANCE = {
     "STOP_LOSS": ORDER_STOP,
     "STOP": ORDER_STOP_LIMIT,
     "STOP_LOSS_LIMIT": ORDER_STOP_LIMIT,
-    "TAKE_PROFIT_MARKET": ORDER_STOP,
-    "TAKE_PROFIT": ORDER_STOP,
+    "TAKE_PROFIT_MARKET": ORDER_TAKE_PROFIT,
+    "TAKE_PROFIT": ORDER_TAKE_PROFIT,
+    "TAKE_PROFIT_LIMIT": ORDER_TAKE_PROFIT,
 }
+
+# Standard VIP-0 taker fee per market — the get_trading_costs() fallback when
+# the account commission endpoint is unavailable (unauthenticated / rejected).
+_STANDARD_TAKER_FEE = {MARKET_SPOT: 0.001, MARKET_FUTURES: 0.0005}
 
 
 def _num(x: float) -> str:
@@ -95,8 +104,8 @@ class BinanceBroker(BaseBroker):
     def __init__(
         self,
         market: str = MARKET_SPOT,
-        api_key: Optional[str] = None,
-        api_secret: Optional[str] = None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
         *,
         testnet: bool = False,
         recv_window: int = 5000,
@@ -174,6 +183,55 @@ class BinanceBroker(BaseBroker):
 
     def server_time(self) -> int:
         return self._rest.get_server_time()
+
+    def get_trading_costs(self, symbol: str) -> TradingCosts:
+        """
+        Commission (taker — entries are market orders) + spread for *symbol*.
+
+        Commission comes from the account commission endpoint; without
+        credentials — or if the venue rejects the call — it falls back to the
+        standard taker fee for the market (spot 0.1 %, futures 0.05 %), noted
+        in ``raw``.  Spread is estimated from one book-ticker snapshot
+        (``ask − bid``, price units).  Connection failures still raise.
+        """
+        symbol = symbol.upper()
+        book = self._rest.public("GET", self._ep.book_ticker, {"symbol": symbol})
+        bid = float(book.get("bidPrice", 0.0) or 0.0)
+        ask = float(book.get("askPrice", 0.0) or 0.0)
+        spread = max(ask - bid, 0.0) if (bid and ask) else 0.0
+        commission, commission_raw = self._taker_commission(symbol)
+        return TradingCosts(
+            commission_type=COMMISSION_TYPE_PERCENTAGE,
+            commission=commission,
+            spread=spread,
+            contract_size=None,
+            raw={"commission": commission_raw, "book": book},
+        )
+
+    def _taker_commission(self, symbol: str) -> tuple[float, dict[str, Any]]:
+        """Account taker rate, or the standard fee when the venue cannot answer."""
+        fallback = _STANDARD_TAKER_FEE[self.market]
+        if not self._authenticated:
+            return fallback, {"source": "standard_taker_fee", "authenticated": False}
+        try:
+            if self.market == MARKET_FUTURES:
+                resp = self._rest.signed(
+                    "GET", self._ep.commission_rate, {"symbol": symbol}
+                )
+                return float(resp["takerCommissionRate"]), resp
+            acct = self._rest.signed("GET", self._ep.account, {})
+            rates = acct.get("commissionRates") or {}
+            if "taker" in rates:
+                return float(rates["taker"]), {"commissionRates": rates}
+            # Legacy spot account payload: basis points (10 = 0.1 %).
+            return (
+                float(acct.get("takerCommission", 0)) / 10_000,
+                {"takerCommission": acct.get("takerCommission")},
+            )
+        except ConnectionFailed:
+            raise
+        except (BrokerError, KeyError, TypeError, ValueError) as exc:
+            return fallback, {"source": "standard_taker_fee", "error": str(exc)}
 
     # ---- streaming ----
 
@@ -284,13 +342,13 @@ class BinanceBroker(BaseBroker):
         quantity: float,
         *,
         type: str = ORDER_MARKET,
-        price: Optional[float] = None,
-        stop_price: Optional[float] = None,
+        price: float | None = None,
+        stop_price: float | None = None,
         time_in_force: str = TIF_GTC,
         reduce_only: bool = False,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None,
-        client_order_id: Optional[str] = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        client_order_id: str | None = None,
     ) -> OrderResult:
         self._require_auth()
         symbol = symbol.upper()
@@ -334,6 +392,11 @@ class BinanceBroker(BaseBroker):
             if stop_price is None:
                 raise OrderError("Stop order requires a stop_price.")
             p["type"] = "STOP_MARKET" if self.market == MARKET_FUTURES else "STOP_LOSS"
+            p["stopPrice"] = _num(stop_price)
+        elif order_type == ORDER_TAKE_PROFIT:
+            if stop_price is None:
+                raise OrderError("Take-profit order requires a stop_price.")
+            p["type"] = "TAKE_PROFIT_MARKET" if self.market == MARKET_FUTURES else "TAKE_PROFIT"
             p["stopPrice"] = _num(stop_price)
         elif order_type == ORDER_STOP_LIMIT:
             if price is None or stop_price is None:
@@ -403,14 +466,110 @@ class BinanceBroker(BaseBroker):
                           {"symbol": symbol.upper(), "orderId": order_id})
         return True
 
-    def cancel_all(self, symbol: Optional[str] = None) -> int:
+    def my_trades(
+        self,
+        symbol: str,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+        from_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Account trade fills for *symbol* as raw venue dicts (oldest first) —
+        futures ``GET /fapi/v1/userTrades``, spot ``GET /api/v3/myTrades``.
+        Each row carries ``orderId`` / ``price`` / ``qty`` / ``time`` (spot
+        rows also ``orderListId`` for OCO legs).
+
+        The live trader reads offline exit fills from it during restart
+        reconciliation; the real-fills display backfills from it too.
+        """
+        self._require_auth()
+        params: dict[str, Any] = {"symbol": symbol.upper()}
+        if start_ms is not None:
+            params["startTime"] = int(start_ms)
+        if end_ms is not None:
+            params["endTime"] = int(end_ms)
+        if from_id is not None:
+            params["fromId"] = int(from_id)
+        if limit is not None:
+            params["limit"] = int(limit)
+        return self._rest.signed("GET", self._ep.my_trades, params)
+
+    def create_oco_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: float,
+        *,
+        take_profit_price: float,
+        stop_price: float,
+        stop_limit_price: float | None = None,
+        client_order_id: str | None = None,
+    ) -> OrderResult:
+        """
+        Place a **spot** OCO order list: a LIMIT_MAKER take-profit leg paired
+        with a STOP_LOSS leg (STOP_LOSS_LIMIT when *stop_limit_price* is given)
+        — when one leg executes the venue cancels the other.  This is how a
+        spot holding gets venue-native SL/TP protection (v1.0.0);
+        futures attach separate reduce-only trigger orders instead.
+
+        ``side`` is the **exit** side (``SIDE_SELL`` protects a long).  The
+        returned :class:`OrderResult`'s ``order_id`` is the ``orderListId`` —
+        pass it to :meth:`cancel_order_list` to cancel both legs.
+        """
+        self._require_auth()
+        if self.market != MARKET_SPOT:
+            raise NotSupportedError(
+                "OCO order lists are spot-only. On futures, attach separate "
+                "stop / take-profit trigger orders instead."
+            )
+        symbol = symbol.upper()
+        tp_leg: dict[str, str] = {"Type": "LIMIT_MAKER", "Price": _num(take_profit_price)}
+        if stop_limit_price is not None:
+            sl_leg = {"Type": "STOP_LOSS_LIMIT", "StopPrice": _num(stop_price),
+                      "Price": _num(stop_limit_price), "TimeInForce": "GTC"}
+        else:
+            sl_leg = {"Type": "STOP_LOSS", "StopPrice": _num(stop_price)}
+        # A SELL exit sits its TP above / SL below the market; a BUY exit the opposite.
+        above, below = (tp_leg, sl_leg) if side == SIDE_SELL else (sl_leg, tp_leg)
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "side": "SELL" if side == SIDE_SELL else "BUY",
+            "quantity": _num(quantity),
+        }
+        for prefix, leg in (("above", above), ("below", below)):
+            for key, value in leg.items():
+                params[prefix + key] = value
+        if client_order_id:
+            params["listClientOrderId"] = client_order_id
+        resp = self._rest.signed("POST", self._ep.order_list_oco, params)
+        return OrderResult(
+            order_id=str(resp.get("orderListId", "")),
+            symbol=symbol,
+            side=side,
+            status=STATUS_NEW,
+            client_order_id=resp.get("listClientOrderId", ""),
+            raw=resp,
+        )
+
+    def cancel_order_list(self, symbol: str, order_list_id: str) -> bool:
+        """Cancel a spot OCO order list (both legs) by ``orderListId``."""
+        self._require_auth()
+        if self.market != MARKET_SPOT:
+            raise NotSupportedError("Order lists are spot-only.")
+        self._rest.signed("DELETE", self._ep.order_list,
+                          {"symbol": symbol.upper(), "orderListId": order_list_id})
+        return True
+
+    def cancel_all(self, symbol: str | None = None) -> int:
         self._require_auth()
         if self.market == MARKET_FUTURES and symbol:
             self._rest.signed("DELETE", self._ep.all_open_orders, {"symbol": symbol.upper()})
             return -1  # Binance returns a status, not a count
         return super().cancel_all(symbol)
 
-    def open_orders(self, symbol: Optional[str] = None) -> list[Order]:
+    def open_orders(self, symbol: str | None = None) -> list[Order]:
         self._require_auth()
         params = {"symbol": symbol.upper()} if symbol else {}
         rows = self._rest.signed("GET", self._ep.open_orders, params)
@@ -436,7 +595,7 @@ class BinanceBroker(BaseBroker):
             raw=o,
         )
 
-    def open_positions(self, symbol: Optional[str] = None) -> list[Position]:
+    def open_positions(self, symbol: str | None = None) -> list[Position]:
         if self.market != MARKET_FUTURES:
             return []
         self._require_auth()
@@ -462,7 +621,7 @@ class BinanceBroker(BaseBroker):
             ))
         return out
 
-    def close_position(self, symbol: str, quantity: Optional[float] = None) -> OrderResult:
+    def close_position(self, symbol: str, quantity: float | None = None) -> OrderResult:
         if self.market != MARKET_FUTURES:
             raise NotSupportedError("close_position is futures-only.")
         self._require_auth()

@@ -41,12 +41,12 @@ from ._base import (
     _BaseIndicator,
     _check_length,
     _ema_series,
+    _ma_state,
     _rma_series,
     _sma_series,
     _to_series,
     _wma_series,
 )
-
 
 _MA_DISPATCH = {
     "EMA": _ema_series,
@@ -107,7 +107,7 @@ class MACD(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         fast_length: int = DEFAULT_FAST,
         slow_length: int = DEFAULT_SLOW,
         signal_length: int = DEFAULT_SIGNAL,
@@ -141,6 +141,38 @@ class MACD(_BaseIndicator):
         self.result["macd"] = macd_line
         self.result["signal"] = signal_line
         self.result["histogram"] = histogram
+
+    # ------------------------------------------------------------------
+    # Streaming updates
+    # ------------------------------------------------------------------
+
+    def _init_stream(self) -> None:
+        self._stream = {
+            "fast": _ma_state(self.oscillator_ma, self.fast_length),
+            "slow": _ma_state(self.oscillator_ma, self.slow_length),
+            "signal": _ma_state(self.signal_ma, self.signal_length),
+        }
+        for v in self.source.to_numpy():
+            self._push_macd(float(v))
+
+    def _push_macd(self, value: float) -> dict[str, float]:
+        st = self._stream
+        macd_line = st["fast"].push(value) - st["slow"].push(value)
+        signal_line = st["signal"].push(macd_line)
+        return {
+            "macd": macd_line,
+            "signal": signal_line,
+            "histogram": macd_line - signal_line,
+        }
+
+    def update(self, value: float) -> dict[str, float]:
+        """Append one new source value; return ``{"macd", "signal", "histogram"}`` floats."""
+        if self._stream is None:
+            self._init_stream()
+        new_values = self._push_macd(float(value))
+        self.source = self._append_value(self.source, value)
+        self._append_results(new_values)
+        return new_values
 
     # ------------------------------------------------------------------
     # Convenience accessors

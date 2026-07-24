@@ -18,24 +18,31 @@ Groups
 
 import json
 import os
-import time
-import pytest
-import pandas as pd
-import numpy as np
 
 # ---------------------------------------------------------------------------
 # We import from the local path — adjust when running inside the real package
 # ---------------------------------------------------------------------------
 import sys
+import time
+
+import numpy as np
+import pandas as pd
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from AlgoTradeKit.visual import Chart
 from AlgoTradeKit.visual.models import (
-    Bar, HorizontalLine, TrendLine, Box,
-    Signal, TextLabel, FibRetracement, IndicatorSeries,
+    Bar,
+    Box,
+    FibRetracement,
+    HorizontalLine,
+    IndicatorSeries,
+    Signal,
+    TextLabel,
+    TrendLine,
 )
 from AlgoTradeKit.visual.server import _find_free_port
-
 
 # ===========================================================================
 # Shared fixtures
@@ -780,3 +787,543 @@ class TestChartIndicatorsConfig:
         from AlgoTradeKit.simulate import SimulateConfig
         with pytest.raises(ValueError):
             SimulateConfig(chart_indicators=bad)
+
+
+# ===========================================================================
+# Group 13 — v1.0.0: chart host + live push + rolling candle window
+# ===========================================================================
+
+from AlgoTradeKit.visual import LivePosition  # noqa: E402
+from AlgoTradeKit.visual.models import (  # noqa: E402
+    COLOR_SL_BREAKEVEN,
+    COLOR_SL_LOSS,
+    COLOR_SL_PROFIT,
+    sl_zone_color,
+)
+from AlgoTradeKit.visual.server import ChartServer  # noqa: E402
+
+
+class _FakeServer:
+    """Records send() calls; mimics the ChartServer surface Chart uses."""
+
+    def __init__(self):
+        self.sent: list = []
+        self._last_init = None
+        self._last_navigate = None
+        self.host = "127.0.0.1"
+        self.port = 65000
+        self.on_message = None
+
+    def send(self, message):
+        self.sent.append(message)
+        if message.get("type") == "init":
+            self._last_init = message
+
+    def start(self, open_browser=True):
+        pass
+
+    def stop(self):
+        pass
+
+
+def _shown_chart(n: int = 10, **chart_kwargs) -> Chart:
+    """Chart that believes it is shown, backed by a recording fake server."""
+    c = Chart(title="Live", **chart_kwargs)
+    c.set_data(_make_ohlcv_df(n))
+    c._server = _FakeServer()
+    c._shown = True
+    c._send_init()          # populates the fake replay cache
+    c._server.sent.clear()
+    return c
+
+
+def _sent(c: Chart) -> list:
+    return c._server.sent
+
+
+def _cached_drawing_ids(c: Chart) -> list:
+    return [d["id"] for d in c._server._last_init["drawings"]]
+
+
+class TestHostConfig:
+    """ — configurable bind host on Chart and ChartServer."""
+
+    def test_server_default_host_is_localhost(self):
+        s = ChartServer(title="t")
+        assert s.host == "127.0.0.1"
+        assert s.url == f"http://127.0.0.1:{s.port}"
+
+    def test_server_custom_host_appears_in_url(self):
+        # Explicit port: a LAN IP is not bindable on this test machine, and
+        # the auto-pick probe binds on the configured host by design.
+        s = ChartServer(title="t", host="192.168.1.50", port=18999)
+        assert s.host == "192.168.1.50"
+        assert s.url == "http://192.168.1.50:18999"
+
+    def test_probe_error_names_the_host(self):
+        with pytest.raises(RuntimeError, match="10.255.255.1"):
+            _find_free_port(host="10.255.255.1")   # not a local interface
+
+    @pytest.mark.parametrize("bind_all", ["0.0.0.0", "::"])
+    def test_bind_all_addresses_substituted_in_url(self, bind_all):
+        s = ChartServer(title="t", host=bind_all)
+        assert s.host == bind_all
+        assert s.display_host == "127.0.0.1"
+        assert s.url == f"http://127.0.0.1:{s.port}"
+
+    def test_chart_passes_host_to_server(self):
+        c = Chart(title="t", host="0.0.0.0")
+        assert c._server.host == "0.0.0.0"
+        assert c.url.startswith("http://127.0.0.1:")
+
+    def test_chart_default_host_unchanged(self):
+        c = Chart(title="t")
+        assert c._server.host == "127.0.0.1"
+        assert c.url == f"http://127.0.0.1:{c._server.port}"
+
+    def test_find_free_port_accepts_host(self):
+        import socket
+        port = _find_free_port(host="127.0.0.1")
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", port))   # must not raise
+
+    def test_server_on_all_interfaces_serves_locally(self):
+        """host='0.0.0.0' must bind and stay reachable via 127.0.0.1."""
+        import urllib.request
+        c = Chart(title="Bind All", host="0.0.0.0")
+        c.set_data(_make_ohlcv_df(5))
+        c.show(open_browser=False)
+        try:
+            with urllib.request.urlopen(c.url, timeout=5) as resp:
+                assert resp.status == 200
+                assert b"AlgoTradeKit" in resp.read()
+        finally:
+            c.stop()
+
+
+class TestUpdateDrawingGeneric:
+    """ — Chart.update_drawing(): server → browser update_drawing push."""
+
+    def test_updates_stored_drawing_and_broadcasts_full_dict(self):
+        c = _shown_chart()
+        c.add_hline(105.0)
+        d = c._drawings[-1]
+        _sent(c).clear()
+
+        c.update_drawing(d.id, price=120.0, label="moved")
+
+        assert d.price == 120.0
+        assert d.label == "moved"
+        msg = _sent(c)[-1]
+        assert msg["type"] == "update_drawing"
+        # Full serialised dict, not a patch: derived keys are present
+        assert msg["drawing"]["type"] == "hline"
+        assert msg["drawing"]["price"] == 120.0
+        assert "lineWidth" in msg["drawing"]
+
+    def test_unknown_id_is_silent_noop(self):
+        c = _shown_chart()
+        out = c.update_drawing("nope_999", price=1.0)
+        assert out is c
+        assert _sent(c) == []
+
+    def test_unknown_field_is_ignored(self):
+        c = _shown_chart()
+        c.add_hline(105.0)
+        d = c._drawings[-1]
+        c.update_drawing(d.id, bogus_field=42)
+        assert not hasattr(d, "bogus_field")
+
+    def test_position_box_derived_zones_recomputed(self):
+        c = _shown_chart()
+        c.add_position_box(
+            open_time=ANCHOR_S, close_time=ANCHOR_S + 3 * ONE_DAY_S,
+            entry_price=100.0, stop_loss=95.0, take_profit=110.0,
+            direction="long", net_pnl=50.0,
+        )
+        d = c._drawings[-1]
+        _sent(c).clear()
+
+        c.update_drawing(d.id, stop_loss=97.0)
+
+        msg = _sent(c)[-1]
+        assert msg["drawing"]["stop_loss"] == 97.0
+        assert msg["drawing"]["loss_bottom"] == 97.0   # derived field followed
+
+    def test_strategy_raw_drawing_payload_updated(self):
+        from types import SimpleNamespace
+
+        from AlgoTradeKit.visual.indicator_renderer import add_strategy_drawings
+        c = _shown_chart()
+        add_strategy_drawings(c, SimpleNamespace(drawings=[
+            {"type": "hline", "price": 42.0, "id": "strat_h1"},
+        ]))
+        _sent(c).clear()
+
+        c.update_drawing("strat_h1", price=43.5)
+
+        msg = _sent(c)[-1]
+        assert msg["type"] == "update_drawing"
+        assert msg["drawing"]["price"] == 43.5
+
+    def test_not_shown_updates_state_without_sending(self):
+        c = _make_chart()
+        c.add_hline(105.0)
+        d = c._drawings[-1]
+        c.update_drawing(d.id, price=99.0)   # must not raise
+        assert d.price == 99.0
+
+
+class TestLivePosition:
+    """ — open-position drawing: add / stream SL & TP changes / remove."""
+
+    def test_add_returns_id_and_stores_drawing(self):
+        c = _shown_chart()
+        pid = c.add_live_position(ANCHOR_S, 100.0, 95.0, "long",
+                                  next_tp=110.0, trade_id=7, label="L #7")
+        assert isinstance(pid, str)
+        d = c._drawings[-1]
+        assert isinstance(d, LivePosition)
+        assert d.id == pid
+        payload = d.to_dict()
+        assert payload["type"] == "live_position"
+        assert payload["open_time"] == ANCHOR_S
+        assert payload["entry_price"] == 100.0
+        assert payload["stop_loss"] == 95.0
+        assert payload["next_tp"] == 110.0
+        assert payload["direction"] == "long"
+        assert payload["trade_id"] == 7
+        assert payload["label"] == "L #7"
+        assert payload["locked"] is True
+        assert payload["source"] == "server"
+
+    def test_payload_is_json_serialisable(self):
+        c = _shown_chart()
+        c.add_live_position(ANCHOR_S, 100.0, 95.0, "short")
+        json.dumps(c._drawings[-1].to_dict())   # must not raise
+
+    @pytest.mark.parametrize("direction,sl,expected", [
+        ("long",  95.0,  COLOR_SL_LOSS),       # below entry → loss zone
+        ("long",  100.0, COLOR_SL_BREAKEVEN),  # at entry → break-even
+        ("long",  103.0, COLOR_SL_PROFIT),     # above entry → profit
+        ("short", 105.0, COLOR_SL_LOSS),
+        ("short", 100.0, COLOR_SL_BREAKEVEN),
+        ("short", 97.0,  COLOR_SL_PROFIT),
+    ])
+    def test_sl_color_matches_zone(self, direction, sl, expected):
+        c = _shown_chart()
+        c.add_live_position(ANCHOR_S, 100.0, sl, direction)
+        assert c._drawings[-1].to_dict()["sl_color"] == expected
+        assert sl_zone_color(sl, 100.0, direction) == expected
+
+    def test_add_broadcasts_and_caches(self):
+        c = _shown_chart()
+        pid = c.add_live_position(ANCHOR_S, 100.0, 95.0, "long")
+        msg = _sent(c)[-1]
+        assert msg["type"] == "add_drawing"
+        assert msg["drawing"]["type"] == "live_position"
+        assert pid in _cached_drawing_ids(c)    # replay cache is fresh
+
+    def test_update_stop_loss_recolours_line(self):
+        c = _shown_chart()
+        pid = c.add_live_position(ANCHOR_S, 100.0, 95.0, "long")
+        _sent(c).clear()
+
+        c.update_live_position(pid, stop_loss=100.0)   # risk-free jump
+        msg = _sent(c)[-1]
+        assert msg["type"] == "update_drawing"
+        assert msg["drawing"]["stop_loss"] == 100.0
+        assert msg["drawing"]["sl_color"] == COLOR_SL_BREAKEVEN
+
+        c.update_live_position(pid, stop_loss=104.0)   # trailing into profit
+        assert _sent(c)[-1]["drawing"]["sl_color"] == COLOR_SL_PROFIT
+
+    def test_update_next_tp_none_clears_but_omitted_keeps(self):
+        c = _shown_chart()
+        pid = c.add_live_position(ANCHOR_S, 100.0, 95.0, "long", next_tp=110.0)
+        d = c._drawings[-1]
+
+        c.update_live_position(pid, stop_loss=96.0)    # next_tp untouched
+        assert d.next_tp == 110.0
+
+        c.update_live_position(pid, next_tp=115.0)     # next multi-RR level
+        assert d.next_tp == 115.0
+
+        c.update_live_position(pid, next_tp=None)      # ladder exhausted
+        assert d.next_tp is None
+        assert _sent(c)[-1]["drawing"]["next_tp"] is None
+
+    def test_update_label(self):
+        c = _shown_chart()
+        pid = c.add_live_position(ANCHOR_S, 100.0, 95.0, "long", label="a")
+        c.update_live_position(pid, label="b")
+        assert c._drawings[-1].label == "b"
+
+    def test_invalid_direction_raises(self):
+        c = _shown_chart()
+        with pytest.raises(ValueError):
+            c.add_live_position(ANCHOR_S, 100.0, 95.0, "sideways")
+
+    def test_update_unknown_id_is_silent_noop(self):
+        c = _shown_chart()
+        c.update_live_position("livepos_none", stop_loss=1.0)
+        assert _sent(c) == []
+
+    def test_remove_broadcasts_and_uncaches(self):
+        c = _shown_chart()
+        pid = c.add_live_position(ANCHOR_S, 100.0, 95.0, "long")
+        _sent(c).clear()
+
+        c.remove_drawing(pid)
+
+        assert all(getattr(d, "id", None) != pid for d in c._drawings)
+        assert _sent(c)[-1] == {"type": "remove_drawing", "id": pid}
+        assert pid not in _cached_drawing_ids(c)
+
+
+class TestCandleLimit:
+    """ — rolling candle window (client trim + Python mirror)."""
+
+    @pytest.mark.parametrize("bad", [0, -3])
+    def test_non_positive_limit_raises(self, bad):
+        with pytest.raises(ValueError):
+            _make_chart().set_candle_limit(bad)
+        with pytest.raises(ValueError):
+            Chart(title="t", candle_count_limit=bad)
+
+    def test_set_limit_trims_bars_in_place(self):
+        c = _make_chart(10)
+        bars_ref = c._bars
+        c.set_candle_limit(4)
+        assert c._bars is bars_ref              # in place — init cache shares it
+        assert len(c._bars) == 4
+        assert c._bars[0]["time"] == ANCHOR_S + 6 * ONE_DAY_S
+
+    def test_constructor_limit_applies_on_set_data(self):
+        c = Chart(title="t", candle_count_limit=5)
+        c.set_data(_make_ohlcv_df(10))
+        assert len(c._bars) == 5
+
+    def test_under_limit_is_noop(self):
+        c = _make_chart(10)
+        bars_before = list(c._bars)
+        c.set_candle_limit(20)
+        assert c._bars == bars_before
+
+    def test_none_disables_the_window(self):
+        c = _make_chart(10)
+        c.set_candle_limit(4)
+        c.set_candle_limit(None)
+        for i in range(10, 15):
+            c.stream({"time": ANCHOR_S + i * ONE_DAY_S,
+                      "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5})
+        assert len(c._bars) == 9   # 4 kept + 5 streamed, no trimming
+
+    def test_expiry_rules_per_drawing_type(self):
+        c = _make_chart(10)
+
+        def t(i):
+            return ANCHOR_S + i * ONE_DAY_S
+        c.add_hline(100.0)                                        # timeless — kept
+        c.add_signal(t(1), "buy")                                 # old — dropped
+        c.add_trendline(t(0), 100.0, t(2), 101.0)                 # old — dropped
+        c.add_box(t(2), 100.0, t(8), 105.0)                       # spans window — kept
+        c.add_position_box(t(0), t(1), 100.0, 95.0, 110.0,
+                           "long", 5.0)                           # closed early — dropped
+        c.add_position_box(t(5), t(8), 100.0, 95.0, 110.0,
+                           "long", 5.0)                           # ends inside — kept
+        live_id = c.add_live_position(t(0), 100.0, 95.0, "long")  # open — kept
+
+        c.set_candle_limit(4)   # cutoff = t(6)
+
+        kept_types = [d.to_dict()["type"] for d in c._drawings]
+        assert kept_types == ["hline", "box", "position_box", "live_position"]
+        assert any(getattr(d, "id", None) == live_id for d in c._drawings)
+
+    def test_stream_enforces_limit(self):
+        c = _make_chart(10)
+        c.set_candle_limit(4)
+        c.stream({"time": ANCHOR_S + 10 * ONE_DAY_S,
+                  "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5})
+        assert len(c._bars) == 4
+        assert c._bars[0]["time"] == ANCHOR_S + 7 * ONE_DAY_S
+        assert c._bars[-1]["time"] == ANCHOR_S + 10 * ONE_DAY_S
+
+    def test_set_limit_broadcasts_message(self):
+        c = _shown_chart()
+        c.set_candle_limit(4)
+        assert {"type": "set_candle_limit", "limit": 4} in _sent(c)
+        c.set_candle_limit(None)
+        assert {"type": "set_candle_limit", "limit": None} in _sent(c)
+
+    def test_init_payload_carries_limit(self):
+        c = _make_chart(10)
+        c.set_candle_limit(4)
+        init = c._build_init_payload()
+        assert init["candleCountLimit"] == 4
+        assert len(init["bars"]) == 4
+
+    def test_stream_eviction_refreshes_drawing_cache(self):
+        c = _shown_chart(10)
+        c.add_signal(ANCHOR_S + 6 * ONE_DAY_S, "buy")     # first window bar
+        c.set_candle_limit(4)                             # window = bars 6..9
+        assert len(_cached_drawing_ids(c)) == 1
+
+        # Next bar pushes the window to 7..10 → the signal expires
+        c.stream({"time": ANCHOR_S + 10 * ONE_DAY_S,
+                  "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5})
+        assert _cached_drawing_ids(c) == []
+        assert len(c._server._last_init["bars"]) == 4
+
+
+class TestReplayCacheFresh:
+    """ — a page refresh mid-live-session reproduces the current state."""
+
+    def test_add_drawing_lands_in_cache(self):
+        c = _shown_chart()
+        c.add_hline(101.0)
+        d = c._drawings[-1]
+        assert d.id in _cached_drawing_ids(c)
+
+    def test_update_drawing_reflected_in_cache(self):
+        c = _shown_chart()
+        c.add_hline(101.0)
+        d = c._drawings[-1]
+        c.update_drawing(d.id, price=222.0)
+        cached = [x for x in c._server._last_init["drawings"] if x["id"] == d.id][0]
+        assert cached["price"] == 222.0
+
+    def test_remove_drawing_reflected_in_cache(self):
+        c = _shown_chart()
+        c.add_hline(101.0)
+        d = c._drawings[-1]
+        c.remove_drawing(d.id)
+        assert d.id not in _cached_drawing_ids(c)
+
+    def test_clear_drawings_reflected_in_cache(self):
+        c = _shown_chart()
+        c.add_hline(101.0)
+        c.add_signal(ANCHOR_S, "buy")
+        c.clear_drawings()
+        assert _cached_drawing_ids(c) == []
+
+    def test_browser_edit_reflected_in_cache(self):
+        c = _shown_chart()
+        c.add_hline(101.0)
+        d = c._drawings[-1]
+        c._handle_browser_message(
+            {"type": "drawing_updated", "drawing": {"id": d.id, "price": 333.0}}
+        )
+        cached = [x for x in c._server._last_init["drawings"] if x["id"] == d.id][0]
+        assert cached["price"] == 333.0
+
+    def test_browser_delete_reflected_in_cache(self):
+        c = _shown_chart()
+        c.add_hline(101.0)
+        d = c._drawings[-1]
+        c._handle_browser_message({"type": "drawing_deleted", "id": d.id})
+        assert d.id not in _cached_drawing_ids(c)
+
+    def test_not_shown_adds_do_not_touch_cache(self):
+        c = _make_chart()
+        c.add_hline(101.0)      # must not raise; nothing cached
+        assert c._server._last_init is None
+
+
+class TestPushProtocolE2E:
+    """ — real server + real WebSocket client: the live push protocol."""
+
+    def test_live_push_and_replay_over_websocket(self):
+        from websockets.sync.client import connect
+
+        c = Chart(title="E2E", candle_count_limit=None)
+        c.set_data(_make_ohlcv_df(10))
+        c.show(open_browser=False)
+        try:
+            ws_url = f"ws://127.0.0.1:{c._server.port}/ws"
+            with connect(ws_url) as ws:
+                init = json.loads(ws.recv(timeout=5))
+                assert init["type"] == "init"
+                assert init["candleCountLimit"] is None
+                assert len(init["bars"]) == 10
+
+                # 1. Trade opens → add_drawing(live_position)
+                pid = c.add_live_position(ANCHOR_S + 9 * ONE_DAY_S,
+                                          109.0, 104.0, "long", next_tp=119.0)
+                msg = json.loads(ws.recv(timeout=5))
+                assert msg["type"] == "add_drawing"
+                assert msg["drawing"]["type"] == "live_position"
+                assert msg["drawing"]["sl_color"] == COLOR_SL_LOSS
+
+                # 2. Risk-free jump → update_drawing with new colour
+                c.update_live_position(pid, stop_loss=109.0)
+                msg = json.loads(ws.recv(timeout=5))
+                assert msg["type"] == "update_drawing"
+                assert msg["drawing"]["sl_color"] == COLOR_SL_BREAKEVEN
+
+                # 3. Rolling window armed → set_candle_limit
+                c.set_candle_limit(5)
+                msg = json.loads(ws.recv(timeout=5))
+                assert msg == {"type": "set_candle_limit", "limit": 5}
+
+                # 4. Candles still stream (unchanged v0.3 protocol)
+                c.stream_from_atk({"timestamp": (ANCHOR_S + 10 * ONE_DAY_S) * 1000,
+                                   "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5})
+                msg = json.loads(ws.recv(timeout=5))
+                assert msg["type"] == "stream"
+
+                # 5. Trade closes → remove_drawing
+                c.remove_drawing(pid)
+                msg = json.loads(ws.recv(timeout=5))
+                assert msg == {"type": "remove_drawing", "id": pid}
+
+                # 6. Final position box pushed live
+                c.add_position_box(ANCHOR_S + 9 * ONE_DAY_S, ANCHOR_S + 10 * ONE_DAY_S,
+                                   109.0, 104.0, 119.0, "long", 42.0)
+                msg = json.loads(ws.recv(timeout=5))
+                assert msg["type"] == "add_drawing"
+                assert msg["drawing"]["type"] == "position_box"
+
+            # A SECOND client (page refresh) replays the CURRENT state:
+            # trimmed bars, armed window, final posbox — no stale init.
+            with connect(ws_url) as ws2:
+                init2 = json.loads(ws2.recv(timeout=5))
+                assert init2["type"] == "init"
+                assert init2["candleCountLimit"] == 5
+                assert len(init2["bars"]) == 5
+                types = [d["type"] for d in init2["drawings"]]
+                assert "position_box" in types
+                assert "live_position" not in types
+        finally:
+            c.stop()
+
+
+class TestFrontendWiring:
+    """ — the shipped frontend handles the new protocol messages."""
+
+    @pytest.fixture()
+    def html(self) -> str:
+        import AlgoTradeKit.visual.server as _srv
+        return (_srv.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    def test_handles_set_candle_limit_message(self, html):
+        assert "case 'set_candle_limit'" in html
+        assert "enforceCandleLimit" in html
+        assert "candleCountLimit" in html
+
+    def test_renders_live_position_drawings(self, html):
+        assert "live_position" in html
+        assert "sl_color" in html
+        assert "next_tp" in html
+
+    def test_handles_update_drawing_message(self, html):
+        assert "case 'update_drawing'" in html
+
+    def test_trim_covers_drawings_and_indicators(self, html):
+        assert "drawingEndTime" in html
+        assert "ichimokuCloud.spanA = ichimokuCloud.spanA.filter" in html
+
+    def test_stream_bar_enforces_window(self, html):
+        # streamBar must call the window enforcement on every new bar
+        stream_fn = html.split("function streamBar")[1].split("function ")[0]
+        assert "enforceCandleLimit()" in stream_fn

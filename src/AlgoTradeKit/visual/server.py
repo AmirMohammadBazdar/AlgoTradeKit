@@ -16,7 +16,6 @@ import logging
 import socket
 import threading
 from pathlib import Path
-from typing import Optional, Set
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -36,19 +35,29 @@ _reserved_ports: set[int] = set()
 # Port helper
 # ---------------------------------------------------------------------------
 
-def _find_free_port(start: int = 8700) -> int:
-    """Find a free TCP port starting from *start* (scans up to start+200)."""
+def _find_free_port(start: int = 8700, host: str = "127.0.0.1") -> int:
+    """Find a free TCP port starting from *start* (scans up to start+200).
+
+    The probe binds on *host* so the port is guaranteed free on the same
+    interface(s) the server will later bind to (``"0.0.0.0"`` probes all
+    IPv4 interfaces; ``"::"`` probes IPv6).
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
     for port in range(start, start + 200):
         if port in _reserved_ports:       # already claimed by another Chart()
             continue
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket(family, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("127.0.0.1", port))
+                s.bind((host, port))
                 _reserved_ports.add(port) # claim it immediately
                 return port
             except OSError:
                 continue
-    raise RuntimeError("No free TCP port found in range 8700–8900")
+    raise RuntimeError(
+        f"No free TCP port found in range 8700–8900 "
+        f"(probed on host {host!r} — is it a local interface? "
+        f"Pass an explicit port= to skip probing)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +68,7 @@ class ConnectionManager:
     """Tracks active WebSocket connections and broadcasts messages to all of them."""
 
     def __init__(self):
-        self.active: Set[WebSocket] = set()
+        self.active: set[WebSocket] = set()
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
@@ -69,7 +78,7 @@ class ConnectionManager:
         self.active.discard(ws)
 
     async def broadcast(self, message: dict) -> None:
-        dead: Set[WebSocket] = set()
+        dead: set[WebSocket] = set()
         for ws in list(self.active):
             try:
                 await ws.send_text(json.dumps(message))
@@ -106,14 +115,27 @@ class ChartServer:
         Used in the browser URL query-string (cosmetic only).
     port : int
         TCP port to listen on.  0 = auto-select a free port.
+    host : str
+        Network interface to bind to (v1.0.0).  Default ``"127.0.0.1"``
+        keeps the server reachable from this machine only.
+
+        .. warning::
+           **Security** — setting ``host="0.0.0.0"`` exposes the chart
+           server on **every network interface**: anyone who can reach this
+           machine (LAN, or the whole internet on an unfirewalled VPS) can
+           open the chart, see your data and send WebSocket messages.
+           There is no authentication.  Only use ``"0.0.0.0"`` on trusted /
+           firewalled networks; an SSH tunnel to the default
+           ``127.0.0.1`` binding is the safer alternative.
     """
 
-    def __init__(self, title: str = "Chart", port: int = 0) -> None:
+    def __init__(self, title: str = "Chart", port: int = 0, host: str = "127.0.0.1") -> None:
         self.title   = title
-        self.port    = port or _find_free_port()
+        self.host    = host
+        self.port    = port or _find_free_port(host=host)
         self._manager = ConnectionManager()
-        self._loop:   Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
+        self._loop:   asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
         self._app    = self._build_app()
 
         # Set by Chart to receive browser → Python messages.
@@ -121,8 +143,8 @@ class ChartServer:
         self.on_message = None
 
         # v0.7.1: replay cache — new browsers get the current state immediately
-        self._last_init:     Optional[dict] = None
-        self._last_navigate: Optional[dict] = None
+        self._last_init:     dict | None = None
+        self._last_navigate: dict | None = None
 
     # ── FastAPI application ────────────────────────────────────────────────
 
@@ -174,7 +196,7 @@ class ChartServer:
 
             config = uvicorn.Config(
                 self._app,
-                host="127.0.0.1",
+                host=self.host,
                 port=self.port,
                 loop="asyncio",
                 log_level="warning",
@@ -197,14 +219,31 @@ class ChartServer:
 
         if open_browser:
             import webbrowser
-            webbrowser.open(f"http://127.0.0.1:{self.port}/?title={self.title}")
+            webbrowser.open(f"{self.url}/?title={self.title}")
 
-        log.info("ChartServer started → http://127.0.0.1:%d", self.port)
+        log.info("ChartServer started → %s (bound to %s)", self.url, self.host)
 
     def stop(self) -> None:
         _reserved_ports.discard(self.port)
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
+
+    # ── URLs ───────────────────────────────────────────────────────────────
+
+    @property
+    def display_host(self) -> str:
+        """Host usable in a browser URL.
+
+        ``0.0.0.0`` / ``::`` are bind-to-all addresses, not destinations —
+        substitute the loopback address for local display.  Remote viewers
+        replace it with the machine's real IP (prints those URLs).
+        """
+        return "127.0.0.1" if self.host in ("0.0.0.0", "::") else self.host
+
+    @property
+    def url(self) -> str:
+        """Browsable URL of this server (uses :attr:`display_host`)."""
+        return f"http://{self.display_host}:{self.port}"
 
     # ── Messaging ──────────────────────────────────────────────────────────
 

@@ -170,6 +170,23 @@ table.data-tbl td.dd-max{background:#f8514912;color:var(--red)}
       </div>
     </div>
 
+    <!-- Per-pair breakdown (combined reports only, v1.0.0) -->
+    <div class="section" id="sec-pairs" style="display:none">
+      <div class="section-hdr"><h2 id="pairs-hdr-title">Per-Pair Breakdown</h2></div>
+      <div class="section-body">
+        <div class="tbl-wrap">
+          <table class="data-tbl" id="pairs-table">
+            <thead><tr>
+              <th>Pair</th><th>Symbol</th><th class="r">Trades</th><th class="r">Win%</th>
+              <th class="r">PnL</th><th class="r">PnL %</th><th class="r">Final Balance</th>
+              <th class="r">PF</th><th class="r">Max DD</th><th class="r">Sharpe</th>
+            </tr></thead>
+            <tbody id="pairs-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- Performance KPIs -->
     <div class="section" id="sec-perf">
       <div class="section-hdr"><h2>Performance Summary</h2></div>
@@ -278,6 +295,7 @@ table.data-tbl td.dd-max{background:#f8514912;color:var(--red)}
 <div id="trade-tooltip">
   <h4 id="tt-title">Trade #0</h4>
   <table>
+    <tr id="tt-pair-row" style="display:none"><td>Pair</td><td id="tt-pair">—</td></tr>
     <tr><td>Direction</td><td id="tt-dir">—</td></tr>
     <tr><td>Entry</td><td id="tt-entry">—</td></tr>
     <tr><td>Exit</td><td id="tt-exit">—</td></tr>
@@ -340,11 +358,13 @@ function renderReport(d) {
   badge.className = s.total_pnl >= 0 ? 'pos' : 'neg';
 
   const cfgId = d.config?.config_id || '—';
-  document.getElementById('report-title').textContent =
-    `Simulation Report — ${d.config?.symbol || 'Portfolio'} · ${cfgId}`;
+  document.getElementById('report-title').textContent = d.combined
+    ? `Combined Report — ${(d.pairs || []).length} pairs`
+    : `Simulation Report — ${d.config?.symbol || 'Portfolio'} · ${cfgId}`;
 
   renderConfig(d.config);
   buildEquityChart(d);
+  renderPairsTable(d);
   renderKPIs(d);
   renderDrawdownTable(d);
   renderTimeAnalysis(d);
@@ -352,19 +372,47 @@ function renderReport(d) {
   renderCosts(d);
 }
 
+// ── Per-pair breakdown (combined reports only, v1.0.0) ─────────
+function renderPairsTable(d) {
+  const sec = document.getElementById('sec-pairs');
+  const rows = d.combined ? (d.pairs || []) : [];
+  if (!rows.length) { sec.style.display = 'none'; return; }
+  sec.style.display = 'block';
+  document.getElementById('pairs-hdr-title').textContent =
+    `Per-Pair Breakdown — ${rows.length} pairs`;
+  document.getElementById('pairs-tbody').innerHTML = rows.map(p => `<tr>
+    <td>${p.label}</td>
+    <td>${p.symbol}</td>
+    <td class="r">${p.total_trades}</td>
+    <td class="r ${clsWR(p.win_rate)}">${p.win_rate?.toFixed(1) ?? '—'}%</td>
+    <td class="r ${cls(p.total_pnl)}">${money(p.total_pnl)}</td>
+    <td class="r ${cls(p.total_pnl_percent)}">${pct(p.total_pnl_percent)}</td>
+    <td class="r">$${FMT.format(p.final_balance)}</td>
+    <td class="r ${clsPF(p.profit_factor)}">${num(p.profit_factor)}</td>
+    <td class="r ${p.max_drawdown_percent != null ? 'neg' : 'neu'}">${
+      p.max_drawdown_percent != null ? '-' + p.max_drawdown_percent.toFixed(2) + '%' : '—'}</td>
+    <td class="r ${cls(p.sharpe_ratio)}">${num(p.sharpe_ratio)}</td>
+  </tr>`).join('');
+}
+
 // ── Config badges ──────────────────────────────────────────────
+// Combined reports show "mixed" for fields that differ across pairs —
+// numeric formatters only apply to actual numbers.
+function fmtCfg(v, fn) { return typeof v === 'number' ? fn(v) : String(v); }
+
 function renderConfig(cfg) {
   const items = [
     ['Symbol', cfg.symbol],
     ['Exchange', cfg.exchange_type],
-    ['Leverage', cfg.leverage + 'x'],
-    ['Balance', '$' + FMT.format(cfg.initial_balance)],
-    ['Risk/trade', cfg.risk_per_trade + '%'],
+    ['Leverage', fmtCfg(cfg.leverage, v => v + 'x')],
+    ['Balance', fmtCfg(cfg.initial_balance, v => '$' + FMT.format(v))],
+    ['Risk/trade', fmtCfg(cfg.risk_per_trade, v => v + '%')],
     ['TP Mode', cfg.tp_mode],
     ['SL Mode', cfg.sl_mode],
-    ['Commission', cfg.commission_type === 'percentage'
+    ['Commission', typeof cfg.commission !== 'number' ? String(cfg.commission)
+      : cfg.commission_type === 'percentage'
       ? (cfg.commission * 100).toFixed(3) + '%' : cfg.commission + ' ' + cfg.commission_type],
-    ['Spread', cfg.spread > 0 ? cfg.spread : '—'],
+    ['Spread', fmtCfg(cfg.spread, v => v > 0 ? v : '—')],
     ['Timeframe', cfg.primary_timeframe],
   ];
   const grid = document.getElementById('cfg-grid');
@@ -521,6 +569,13 @@ function buildEquityChart(d) {
   const hist = d.balance_history || [];
   if (!hist.length) return;
 
+  // Live push (push_update) rebuilds the chart — preserve the user's
+  // active zoom/pan window across re-renders.  scales.x.min/max in
+  // *options* are only set by the pan/zoom handlers (undefined at the
+  // default full-range view and after a double-click reset).
+  const prevXMin = equityChart?.options?.scales?.x?.min;
+  const prevXMax = equityChart?.options?.scales?.x?.max;
+
   const labels = hist.map(h => h.t);
   const equityData = hist.map(h => ({x: h.t, y: h.e}));
   const walletData = hist.map(h => ({x: h.t, y: h.w}));
@@ -650,7 +705,7 @@ function buildEquityChart(d) {
         const tradeEl = elements.find(e => e.datasetIndex === 2);
         if (tradeEl) {
           const trade = equityChart.data.datasets[2].data[tradeEl.index].trade;
-          hoveredTradeId = trade.trade_id;
+          hoveredTradeId = trade.uid ?? trade.trade_id;
           showTooltipForTrade(trade, evt.native);
         }
       },
@@ -662,6 +717,13 @@ function buildEquityChart(d) {
   addDrawdownAnnotations(d);
   // Bind manual pan/zoom after chart is created
   _bindEquityPanZoom();
+
+  // Re-apply the zoom/pan window the user had before this re-render
+  if (prevXMin != null && prevXMax != null) {
+    equityChart.options.scales.x.min = prevXMin;
+    equityChart.options.scales.x.max = prevXMax;
+    equityChart.update('none');
+  }
 }
 
 function addDrawdownAnnotations(d) {
@@ -747,9 +809,16 @@ function externalTooltip(context) {
 }
 
 function showTooltipForTrade(trade, mouseEvt) {
-  hoveredTradeId = trade.trade_id;
+  hoveredTradeId = trade.uid ?? trade.trade_id;
   const el = document.getElementById('trade-tooltip');
   document.getElementById('tt-title').textContent = `Trade #${trade.trade_id}  ${trade.symbol}`;
+  const pairRow = document.getElementById('tt-pair-row');
+  if (trade.pair) {
+    pairRow.style.display = '';
+    document.getElementById('tt-pair').textContent = trade.pair;
+  } else {
+    pairRow.style.display = 'none';
+  }
   document.getElementById('tt-dir').textContent   = trade.direction.toUpperCase();
   document.getElementById('tt-dir').className     = trade.direction === 'long' ? 'pos' : 'neg';
   document.getElementById('tt-entry').textContent = trade.entry_price?.toFixed(6) ?? '—';
@@ -793,10 +862,11 @@ document.addEventListener('mousemove', e => {
 // ── Open candle chart ──────────────────────────────────────────
 function openChart() {
   if (hoveredTradeId == null || !reportData?.has_chart) return;
-  const trade = (reportData?.trade_markers || []).find(t => t.trade_id === hoveredTradeId);
+  const trade = (reportData?.trade_markers || [])
+    .find(t => (t.uid ?? t.trade_id) === hoveredTradeId);
   if (!trade) return;
   if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({type: 'open_chart', trade_id: hoveredTradeId}));
+    ws.send(JSON.stringify({type: 'open_chart', trade_id: trade.trade_id}));
   }
   if (reportData.chart_port) {
     window.open(`http://127.0.0.1:${reportData.chart_port}/`, '_blank');
@@ -852,9 +922,17 @@ function _equityWheel(e) {
   equityChart.update('none');
 }
 
+// The canvas element survives re-renders (only the Chart.js instance is
+// rebuilt) — bind the listeners exactly once, or every push_update would
+// stack another wheel/mousedown handler (zoom would apply N× after N
+// updates).
+let _panZoomBound = false;
+
 function _bindEquityPanZoom() {
+  if (_panZoomBound) return;
   const canvas = _equityCanvas();
   if (!canvas) return;
+  _panZoomBound = true;
   canvas.addEventListener('mousedown', e => {
     if (e.button === 0) { _equityPanStart(e.clientX); }
   });

@@ -21,7 +21,7 @@ All default parameters and formulas match TradingView Pine Script v5.
 from __future__ import annotations
 
 import math
-from typing import Literal, Sequence
+from typing import Literal
 
 import pandas as pd
 
@@ -29,12 +29,14 @@ from ._base import (
     _BaseIndicator,
     _check_length,
     _ema_series,
+    _EwmState,
+    _ieee_div,
     _rma_series,
     _sma_series,
     _to_series,
+    _WindowState,
     _wma_series,
 )
-
 
 # ---------------------------------------------------------------------------
 # SMA
@@ -58,7 +60,7 @@ class SMA(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         length: int = DEFAULT_LENGTH,
     ) -> None:
         super().__init__()
@@ -74,6 +76,21 @@ class SMA(_BaseIndicator):
     @property
     def sma(self) -> pd.Series:
         return self.result["sma"]
+
+    def _init_stream(self) -> None:
+        state = _WindowState(self.length, "mean")
+        for v in self.source.to_numpy():
+            state.push(v)
+        self._stream = {"sma": state}
+
+    def update(self, value: float) -> float:
+        """Append one new source value; return the new SMA value."""
+        if self._stream is None:
+            self._init_stream()
+        new = self._stream["sma"].push(value)
+        self.source = self._append_value(self.source, value)
+        self._append_results({"sma": new})
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +114,7 @@ class EMA(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         length: int = DEFAULT_LENGTH,
     ) -> None:
         super().__init__()
@@ -112,6 +129,21 @@ class EMA(_BaseIndicator):
     @property
     def ema(self) -> pd.Series:
         return self.result["ema"]
+
+    def _init_stream(self) -> None:
+        state = _EwmState(2.0 / (self.length + 1), self.length)
+        for v in self.source.to_numpy():
+            state.push(v)
+        self._stream = {"ema": state}
+
+    def update(self, value: float) -> float:
+        """Append one new source value; return the new EMA value."""
+        if self._stream is None:
+            self._init_stream()
+        new = self._stream["ema"].push(value)
+        self.source = self._append_value(self.source, value)
+        self._append_results({"ema": new})
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +167,7 @@ class WMA(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         length: int = DEFAULT_LENGTH,
     ) -> None:
         super().__init__()
@@ -150,6 +182,21 @@ class WMA(_BaseIndicator):
     @property
     def wma(self) -> pd.Series:
         return self.result["wma"]
+
+    def _init_stream(self) -> None:
+        state = _WindowState(self.length, "wma")
+        for v in self.source.to_numpy():
+            state.push(v)
+        self._stream = {"wma": state}
+
+    def update(self, value: float) -> float:
+        """Append one new source value; return the new WMA value."""
+        if self._stream is None:
+            self._init_stream()
+        new = self._stream["wma"].push(value)
+        self.source = self._append_value(self.source, value)
+        self._append_results({"wma": new})
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -174,8 +221,8 @@ class VWMA(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
-        volume: "pd.Series | list",
+        source: pd.Series | list,
+        volume: pd.Series | list,
         length: int = DEFAULT_LENGTH,
     ) -> None:
         super().__init__()
@@ -196,6 +243,26 @@ class VWMA(_BaseIndicator):
     @property
     def vwma(self) -> pd.Series:
         return self.result["vwma"]
+
+    def _init_stream(self) -> None:
+        pv_state = _WindowState(self.length, "sum")
+        vol_state = _WindowState(self.length, "sum")
+        for s, v in zip(self.source.to_numpy(), self.volume.to_numpy()):
+            pv_state.push(s * v)
+            vol_state.push(v)
+        self._stream = {"pv": pv_state, "vol": vol_state}
+
+    def update(self, value: float, volume: float) -> float:
+        """Append one new (price, volume) pair; return the new VWMA value."""
+        if self._stream is None:
+            self._init_stream()
+        pv_sum = self._stream["pv"].push(float(value) * float(volume))
+        vol_sum = self._stream["vol"].push(volume)
+        new = _ieee_div(pv_sum, vol_sum)
+        self.source = self._append_value(self.source, value)
+        self.volume = self._append_value(self.volume, volume)
+        self._append_results({"vwma": new})
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +288,7 @@ class SMMA(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         length: int = DEFAULT_LENGTH,
     ) -> None:
         super().__init__()
@@ -236,6 +303,21 @@ class SMMA(_BaseIndicator):
     @property
     def smma(self) -> pd.Series:
         return self.result["smma"]
+
+    def _init_stream(self) -> None:
+        state = _EwmState(1.0 / self.length, self.length)
+        for v in self.source.to_numpy():
+            state.push(v)
+        self._stream = {"smma": state}
+
+    def update(self, value: float) -> float:
+        """Append one new source value; return the new SMMA (RMA) value."""
+        if self._stream is None:
+            self._init_stream()
+        new = self._stream["smma"].push(value)
+        self.source = self._append_value(self.source, value)
+        self._append_results({"smma": new})
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +341,7 @@ class DEMA(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         length: int = DEFAULT_LENGTH,
     ) -> None:
         super().__init__()
@@ -276,6 +358,25 @@ class DEMA(_BaseIndicator):
     @property
     def dema(self) -> pd.Series:
         return self.result["dema"]
+
+    def _init_stream(self) -> None:
+        alpha = 2.0 / (self.length + 1)
+        ema1 = _EwmState(alpha, self.length)
+        ema2 = _EwmState(alpha, self.length)
+        for v in self.source.to_numpy():
+            ema2.push(ema1.push(v))
+        self._stream = {"ema1": ema1, "ema2": ema2}
+
+    def update(self, value: float) -> float:
+        """Append one new source value; return the new DEMA value."""
+        if self._stream is None:
+            self._init_stream()
+        e1 = self._stream["ema1"].push(value)
+        e2 = self._stream["ema2"].push(e1)
+        new = 2 * e1 - e2
+        self.source = self._append_value(self.source, value)
+        self._append_results({"dema": new})
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +400,7 @@ class TEMA(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         length: int = DEFAULT_LENGTH,
     ) -> None:
         super().__init__()
@@ -317,6 +418,27 @@ class TEMA(_BaseIndicator):
     @property
     def tema(self) -> pd.Series:
         return self.result["tema"]
+
+    def _init_stream(self) -> None:
+        alpha = 2.0 / (self.length + 1)
+        ema1 = _EwmState(alpha, self.length)
+        ema2 = _EwmState(alpha, self.length)
+        ema3 = _EwmState(alpha, self.length)
+        for v in self.source.to_numpy():
+            ema3.push(ema2.push(ema1.push(v)))
+        self._stream = {"ema1": ema1, "ema2": ema2, "ema3": ema3}
+
+    def update(self, value: float) -> float:
+        """Append one new source value; return the new TEMA value."""
+        if self._stream is None:
+            self._init_stream()
+        e1 = self._stream["ema1"].push(value)
+        e2 = self._stream["ema2"].push(e1)
+        e3 = self._stream["ema3"].push(e2)
+        new = 3 * e1 - 3 * e2 + e3
+        self.source = self._append_value(self.source, value)
+        self._append_results({"tema": new})
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +464,7 @@ class HullMA(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         length: int = DEFAULT_LENGTH,
     ) -> None:
         super().__init__()
@@ -363,6 +485,27 @@ class HullMA(_BaseIndicator):
     @property
     def hma(self) -> pd.Series:
         return self.result["hma"]
+
+    def _init_stream(self) -> None:
+        half = max(1, self.length // 2)
+        sqrt_len = max(1, round(math.sqrt(self.length)))
+        wma_half = _WindowState(half, "wma")
+        wma_full = _WindowState(self.length, "wma")
+        wma_sqrt = _WindowState(sqrt_len, "wma")
+        for v in self.source.to_numpy():
+            wma_sqrt.push(2 * wma_half.push(v) - wma_full.push(v))
+        self._stream = {"half": wma_half, "full": wma_full, "sqrt": wma_sqrt}
+
+    def update(self, value: float) -> float:
+        """Append one new source value; return the new Hull MA value."""
+        if self._stream is None:
+            self._init_stream()
+        h = self._stream["half"].push(value)
+        f = self._stream["full"].push(value)
+        new = self._stream["sqrt"].push(2 * h - f)
+        self.source = self._append_value(self.source, value)
+        self._append_results({"hma": new})
+        return new
 
 
 # ---------------------------------------------------------------------------
@@ -401,12 +544,12 @@ class VWAP(_BaseIndicator):
 
     def __init__(
         self,
-        high: "pd.Series | list",
-        low: "pd.Series | list",
-        close: "pd.Series | list",
-        volume: "pd.Series | list",
+        high: pd.Series | list,
+        low: pd.Series | list,
+        close: pd.Series | list,
+        volume: pd.Series | list,
         anchor: Literal["session", "none"] = "session",
-        bands: "list[int] | None" = None,
+        bands: list[int] | None = None,
         band_multiplier: float = 1.0,
     ) -> None:
         super().__init__()
@@ -443,17 +586,13 @@ class VWAP(_BaseIndicator):
             std = var ** 0.5
 
         else:
-            # "session" anchor: group by date
-            dates = pd.to_datetime(
-                pd.RangeIndex(len(typical)), unit="ns"
-            )  # fallback — no real dates
+            # "session" anchor (fallback — no real dates available)
             vwap_vals = [float("nan")] * len(typical)
             std_vals = [float("nan")] * len(typical)
 
             cum_pv = 0.0
             cum_vol = 0.0
             cum_pv2 = 0.0
-            prev_group = 0  # anchor every 24*60 bars by default
 
             for i in range(len(typical)):
                 # Reset at session start: we use a simple "day" reset every
@@ -484,3 +623,73 @@ class VWAP(_BaseIndicator):
     @property
     def vwap(self) -> pd.Series:
         return self.result["vwap"]
+
+    # ------------------------------------------------------------------
+    # Streaming updates
+    # ------------------------------------------------------------------
+
+    def _init_stream(self) -> None:
+        self._stream = {"cum_pv": 0.0, "cum_vol": 0.0, "cum_pv2": 0.0}
+        rows = zip(
+            self.high.to_numpy(),
+            self.low.to_numpy(),
+            self.close.to_numpy(),
+            self.volume.to_numpy(),
+        )
+        for h, lo, c, v in rows:
+            self._push_vwap(h, lo, c, v)
+
+    def _push_vwap(self, high: float, low: float, close: float, volume: float):
+        """Advance the cumulative state one bar; return (vwap, std) — same maths as _compute()."""
+        typical = (float(high) + float(low) + float(close)) / 3.0
+        vol = float(volume)
+        pv = typical * vol
+        pv2 = (typical ** 2) * vol
+        st = self._stream
+
+        if self.anchor == "none":
+            # pandas cumsum: a NaN input leaves that bar NaN but the running
+            # total continues on later bars.
+            pv_ok = pv == pv
+            vol_ok = vol == vol
+            if pv_ok:
+                st["cum_pv"] += pv
+                st["cum_pv2"] += pv2
+            if vol_ok:
+                st["cum_vol"] += vol
+            cum_pv = st["cum_pv"] if pv_ok else float("nan")
+            cum_pv2 = st["cum_pv2"] if pv_ok else float("nan")
+            cum_vol = st["cum_vol"] if vol_ok else float("nan")
+
+            vwap = _ieee_div(cum_pv, cum_vol)
+            var = _ieee_div(cum_pv2, cum_vol) - vwap ** 2
+            if var == var and var < 0.0:
+                var = 0.0  # .clip(lower=0.0) — NaN passes through
+            return vwap, var ** 0.5
+
+        # "session" — mirror the batch loop body exactly
+        st["cum_pv"] += pv
+        st["cum_vol"] += vol
+        st["cum_pv2"] += pv2
+        if st["cum_vol"] == 0:
+            return float("nan"), float("nan")
+        vwap = st["cum_pv"] / st["cum_vol"]
+        var = max(0.0, (st["cum_pv2"] / st["cum_vol"]) - vwap ** 2)
+        return vwap, var ** 0.5
+
+    def update(self, high: float, low: float, close: float, volume: float) -> float:
+        """Append one new H/L/C/V bar; return the new VWAP value (bands appended too)."""
+        if self._stream is None:
+            self._init_stream()
+        vwap, std = self._push_vwap(high, low, close, volume)
+        self.high = self._append_value(self.high, high)
+        self.low = self._append_value(self.low, low)
+        self.close = self._append_value(self.close, close)
+        self.volume = self._append_value(self.volume, volume)
+        new_values = {"vwap": vwap}
+        for b in self.bands:
+            offset = std * b * self.band_multiplier
+            new_values[f"upper_{b}"] = vwap + offset
+            new_values[f"lower_{b}"] = vwap - offset
+        self._append_results(new_values)
+        return vwap

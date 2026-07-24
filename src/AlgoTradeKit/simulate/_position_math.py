@@ -1,0 +1,651 @@
+"""
+AlgoTradeKit.simulate._position_math
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Shared position mathematics — the single source of truth for position
+sizing, SL/TP price computation, close detection, PnL accounting, and the
+trailing / risk-free / multi-RR stop-loss transition logic.
+
+Factored out of ``_engine.py`` (v1.0.0) so that every consumer applies
+the exact same maths:
+
+* ``_engine.SimulationStepper`` — the step-driven engine core (v1.0.0)
+  behind ``Simulate.run`` single-pair backtests, ``_runner.run_multi``
+  shared-wallet multi-pair backtests, and the live simulation.
+* ``trader`` (v1.0.0) — the live trader sizes real orders and moves
+  venue-native SL values with these same functions, so live behaviour
+  matches the backtest by construction.
+
+Design contract
+---------------
+* Every function is stateless: all live state belongs to the
+  ``_InternalPosition`` passed in.  Functions that mutate the position say
+  so in their docstring; nothing here touches DataFrames or
+  ``StrategyResult`` objects.
+* All time values are UTC milliseconds.
+* PnL is computed with a single unified formula that works for both
+  exchange and MetaTrader instruments (see ``make_closed_trade``)::
+
+      pnl = direction_factor × (exit_price − entry_price) × pnl_per_price_unit
+
+  where ``pnl_per_price_unit = risk_amount / sl_distance`` for risk-based
+  sizing, or ``size × pip_value / pip_size`` for fixed-lot MT5 sizing.
+"""
+
+from __future__ import annotations
+
+from ._config import (
+    COMMISSION_TYPE_FIXED,
+    COMMISSION_TYPE_PER_LOT,
+    COMMISSION_TYPE_PERCENTAGE,
+    SIZING_FIXED_LOT,
+    SIZING_RISK_PERCENT,
+    SL_MODE_TRAILING,
+    TP_MODE_FIXED_RR,
+    TP_MODE_MULTI_RR,
+    TP_MODE_NONE,
+    TP_MODE_SIGNAL,
+    SimulateConfig,
+)
+from ._lot import calculate_mt5_lot, get_mt5_pip_info, round_lot
+from ._position import (
+    CLOSE_REASON_RF,
+    CLOSE_REASON_SL,
+    CLOSE_REASON_TP,
+    CLOSE_REASON_TP_PARTIAL,
+    ClosedTrade,
+    _InternalPosition,
+)
+
+# Tolerance below which a position's remaining size is treated as fully
+# closed (avoids float dust keeping a ~0-size position open forever).
+SIZE_EPSILON = 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Close-reason / TP-price helpers
+# ---------------------------------------------------------------------------
+
+def sl_reason(pos: _InternalPosition) -> str:
+    """
+    Map position state to the correct SL close-reason string.
+
+    * ``"rf"`` — risk-free SL hit: either a multi-RR TP level advanced the SL
+      (``last_rr_hit > 0``) or the standalone risk-free break-even was
+      activated (``risk_free_triggered``).
+    * ``"sl"`` — plain stop-loss hit with no prior TP advancement.
+    """
+    return CLOSE_REASON_RF if (pos.last_rr_hit > 0 or pos.risk_free_triggered) else CLOSE_REASON_SL
+
+
+def build_tp_level_prices(
+    signal_tp: float | None,
+    fill_price: float,
+    sl_distance: float,
+    direction_factor: float,
+    config: SimulateConfig,
+) -> list[float]:
+    """
+    Compute the ordered list of TP price targets from config.tp_mode.
+
+    Returns
+    -------
+    list[float]
+        Empty list means no TP (position closes only on SL / force-close).
+        One element → close at that price.
+        Multiple elements → multi-RR: SL moves after each hit; final level
+        closes the position.
+    """
+    if config.tp_mode == TP_MODE_NONE:
+        return []
+
+    if config.tp_mode == TP_MODE_SIGNAL:
+        return [signal_tp] if signal_tp is not None else []
+
+    if config.tp_mode == TP_MODE_FIXED_RR:
+        return [fill_price + direction_factor * config.tp_rr * sl_distance]
+
+    if config.tp_mode == TP_MODE_MULTI_RR:
+        return [
+            fill_price + direction_factor * lvl * sl_distance
+            for lvl in config.tp_levels
+        ]
+
+    return []
+
+
+# ---------------------------------------------------------------------------
+# SL transition logic (multi-RR ladder, trailing, risk-free)
+# ---------------------------------------------------------------------------
+
+def advance_multi_rr(pos: _InternalPosition, timestamp: int) -> None:
+    """
+    Mutate *pos* to advance to the next TP level after the current one is hit.
+
+    SL is moved to:
+    * entry price (break-even) after the first TP level
+    * previous TP level price after subsequent levels
+
+    ``pos.next_tp`` is updated to the next price, or ``None`` when the final
+    level was just hit (engine should close the position in that case).
+
+    Also records the new SL state in ``pos.sl_history`` (v0.7.4).
+    """
+    # Move SL
+    if pos.last_rr_hit == 0:
+        pos.stop_loss = pos.entry_price      # break-even
+    else:
+        pos.stop_loss = pos.tp_level_prices[pos.last_rr_hit - 1]
+
+    pos.last_rr_hit += 1
+
+    # Set next TP target
+    if pos.last_rr_hit < len(pos.tp_level_prices):
+        pos.next_tp = pos.tp_level_prices[pos.last_rr_hit]
+    else:
+        pos.next_tp = None  # all levels consumed
+
+    # Record SL state change (v0.7.4)
+    pos.sl_history.append({
+        "time": timestamp,
+        "sl": pos.stop_loss,
+        "next_tp": pos.next_tp,
+    })
+
+
+def update_trailing_sl(
+    pos: _InternalPosition,
+    config: SimulateConfig,
+    timestamp: int,
+) -> None:
+    """
+    Recompute and apply the trailing stop-loss from *pos.peak_price*.
+
+    Called AFTER ``pos.update_trailing_peak()`` has already updated the
+    running peak for the current candle, and AFTER the gap-open close check
+    has passed (so the SL advance cannot falsely trigger a "gap" close on a
+    candle that opened between the old and new SL levels).
+
+    Records a SL-state change in ``pos.sl_history`` whenever the SL
+    actually advances (v0.7.4).
+    """
+    if config.sl_mode != SL_MODE_TRAILING:
+        return
+
+    trail_pct = config.trailing_sl_percent / 100.0
+
+    if pos.direction == "long":
+        new_sl = pos.peak_price * (1.0 - trail_pct)
+        if new_sl > pos.stop_loss:
+            pos.stop_loss = new_sl
+            pos.sl_history.append({
+                "time": timestamp,
+                "sl": new_sl,
+                "next_tp": pos.next_tp,
+            })
+    else:  # short
+        new_sl = pos.peak_price * (1.0 + trail_pct)
+        if new_sl < pos.stop_loss:
+            pos.stop_loss = new_sl
+            pos.sl_history.append({
+                "time": timestamp,
+                "sl": new_sl,
+                "next_tp": pos.next_tp,
+            })
+
+
+def check_risk_free(
+    pos: _InternalPosition,
+    candle_high: float,
+    candle_low: float,
+    config: SimulateConfig,
+) -> None:
+    """
+    Activate break-even SL when profit >= ``risk_free_at_rr × sl_distance``.
+
+    Has no effect when the position's SL has already been moved (e.g. by
+    multi-RR TP advancement), or when ``risk_free_triggered`` is already set.
+    Called only when ``config.risk_free_enabled`` is True.
+    """
+    if pos.risk_free_triggered:
+        return
+
+    threshold_move = config.risk_free_at_rr * pos.sl_distance
+    direction_factor = 1.0 if pos.direction == "long" else -1.0
+    favourable_extreme = candle_high if pos.direction == "long" else candle_low
+
+    profit_move = direction_factor * (favourable_extreme - pos.entry_price)
+    if profit_move >= threshold_move:
+        pos.stop_loss = pos.entry_price
+        pos.risk_free_triggered = True
+
+
+# ---------------------------------------------------------------------------
+# Close detection
+# ---------------------------------------------------------------------------
+
+def check_close(
+    pos: _InternalPosition,
+    candle_open: float,
+    candle_high: float,
+    candle_low: float,
+    candle_close: float,
+    config: SimulateConfig,
+    timestamp: int,
+) -> list[tuple[float, str, float]]:
+    """
+    Determine whether *pos* should close (fully or partially) on this candle.
+
+    Returns
+    -------
+    list[tuple[float, str, float]]
+        Zero or more ``(exit_price, close_reason, closed_size)`` events.
+
+    Priority / ordering
+    -------------------
+    1. Gap opens past SL → fill at ``candle_open``.
+    2. Trailing SL advance from current candle peak (AFTER gap check, so the
+       newly-advanced SL cannot falsely trigger a gap-open close on a candle
+       that simply opened between the old and new SL levels).
+    3. TP hit (``pos.next_tp``): last level → close; intermediate → advance SL.
+    4. SL hit within candle body.
+    """
+    direction = pos.direction
+    is_long = direction == "long"
+    events: list[tuple[float, str, float]] = []
+    remaining = pos.size
+
+    # ------------------------------------------------------------------
+    # 1. Gap open past SL (uses SL as it stood at END of previous candle)
+    # ------------------------------------------------------------------
+    if is_long and candle_open <= pos.stop_loss:
+        events.append((candle_open, sl_reason(pos), remaining))
+        return events
+    if not is_long and candle_open >= pos.stop_loss:
+        events.append((candle_open, sl_reason(pos), remaining))
+        return events
+
+    # ------------------------------------------------------------------
+    # 2. Advance trailing SL from this candle's peak
+    #    (peak already updated in step A of the main loop)
+    # ------------------------------------------------------------------
+    update_trailing_sl(pos, config, timestamp)
+
+    # ------------------------------------------------------------------
+    # 3. Gap open past TP (favourable gap — fill at open)
+    # ------------------------------------------------------------------
+    if pos.next_tp is not None:
+        if is_long and candle_open >= pos.next_tp:
+            fully_closed, remaining = handle_tp_level_hit(
+                pos, candle_open, config, events, remaining, timestamp
+            )
+            if fully_closed:
+                return events
+        elif not is_long and candle_open <= pos.next_tp:
+            fully_closed, remaining = handle_tp_level_hit(
+                pos, candle_open, config, events, remaining, timestamp
+            )
+            if fully_closed:
+                return events
+
+    # ------------------------------------------------------------------
+    # 4. TP hit within candle body
+    # ------------------------------------------------------------------
+    if pos.next_tp is not None:
+        tp_hit = (is_long and candle_high >= pos.next_tp) or \
+                 (not is_long and candle_low <= pos.next_tp)
+        sl_hit = (is_long and candle_low <= pos.stop_loss) or \
+                 (not is_long and candle_high >= pos.stop_loss)
+
+        if tp_hit:
+            if sl_hit:
+                tp_first = candle_close > candle_open
+                if not tp_first:
+                    events.append((pos.stop_loss, sl_reason(pos), remaining))
+                    return events
+                handle_tp_level_hit(pos, pos.next_tp, config, events, remaining, timestamp)
+                return events
+            handle_tp_level_hit(pos, pos.next_tp, config, events, remaining, timestamp)
+            return events
+
+    # ------------------------------------------------------------------
+    # 5. SL hit within candle body
+    # ------------------------------------------------------------------
+    sl_hit = (is_long and candle_low <= pos.stop_loss) or \
+             (not is_long and candle_high >= pos.stop_loss)
+
+    if sl_hit:
+        events.append((pos.stop_loss, sl_reason(pos), remaining))
+        return events
+
+    return events
+
+
+# ---------------------------------------------------------------------------
+# PnL accounting (full and partial closes)
+# ---------------------------------------------------------------------------
+
+def make_closed_trade(
+    pos: _InternalPosition,
+    exit_price: float,
+    reason: str,
+    close_time: int,
+    config: SimulateConfig,
+    closed_size: float | None = None,
+) -> ClosedTrade:
+    """
+    Build an immutable ``ClosedTrade`` from a live position and exit info.
+
+    Parameters
+    ----------
+    closed_size : float | None
+        Absolute size realised by *this* close event.  ``None`` (default)
+        closes ``pos``'s entire current remaining size — the original,
+        pre-v0.7.3 behaviour, byte-for-byte (the fraction below evaluates
+        to ``1.0`` and every field reduces to the old formula exactly).
+
+        A value less than ``pos.size`` builds a record for a *partial*
+        close: every dollar figure (risk, margin, gross PnL, commission)
+        is scaled by ``closed_size / pos.size``.  The caller is responsible
+        for shrinking ``pos`` itself afterwards via ``apply_partial_close``
+        — this function only reads from ``pos``, it never mutates it.
+    """
+    if closed_size is None or closed_size >= pos.size:
+        frac = 1.0
+        closed_size = pos.size
+    elif pos.size > 0:
+        frac = closed_size / pos.size
+    else:
+        frac = 1.0
+
+    direction_factor = 1.0 if pos.direction == "long" else -1.0
+    slice_pnl_per_price_unit = pos.pnl_per_price_unit * frac
+    gross_pnl = direction_factor * (exit_price - pos.entry_price) * slice_pnl_per_price_unit
+    slice_commission = pos.open_commission * frac
+    net_pnl = gross_pnl - slice_commission
+    slice_risk_amount = pos.risk_amount * frac
+    pnl_r = net_pnl / slice_risk_amount if slice_risk_amount > 0 else 0.0
+    spread_paid = config.spread * slice_pnl_per_price_unit
+
+    return ClosedTrade(
+        trade_id=pos.trade_id,
+        symbol=pos.symbol,
+        direction=pos.direction,
+        open_time=pos.open_time,
+        close_time=close_time,
+        entry_price=pos.entry_price,
+        exit_price=exit_price,
+        initial_stop_loss=pos.initial_stop_loss,
+        final_stop_loss=pos.stop_loss,
+        take_profit=pos.take_profit,
+        size=closed_size,
+        margin_amount=pos.margin_amount * frac,
+        risk_amount=slice_risk_amount,
+        gross_pnl=gross_pnl,
+        commission=slice_commission,
+        net_pnl=net_pnl,
+        pnl_r=pnl_r,
+        close_reason=reason,
+        rr_levels_hit=pos.last_rr_hit,
+        max_favourable_excursion=pos._max_favourable,
+        max_adverse_excursion=pos._max_adverse,
+        leverage=config.leverage,
+        spread_paid=spread_paid,
+        signal_metadata=dict(pos.signal_metadata),
+        signal_candle_index=pos.signal_candle_index,
+        # v0.7.4 — snapshot SL trajectory + closing-moment info
+        sl_history=tuple(pos.sl_history),
+        final_next_tp=pos.next_tp,
+        peak_price=pos.peak_price,
+    )
+
+
+def apply_partial_close(pos: _InternalPosition, closed_size: float) -> None:
+    """
+    Shrink *pos* in place after realising *closed_size* units of profit/loss.
+
+    Scales ``size``, ``risk_amount``, ``margin_amount``, ``pnl_per_price_unit``,
+    and the not-yet-charged ``open_commission`` all by the same remaining
+    fraction, so:
+
+    * the position continues to behave as a smaller version of itself for
+      every subsequent candle, and
+    * commission/risk recorded across every ``ClosedTrade`` that shares this
+      ``trade_id`` sums back to the original totals (nothing is charged
+      twice, nothing is lost).
+    """
+    if pos.size <= 0:
+        return
+    frac = min(closed_size / pos.size, 1.0)
+    remaining_frac = max(1.0 - frac, 0.0)
+    pos.size *= remaining_frac
+    pos.risk_amount *= remaining_frac
+    pos.margin_amount *= remaining_frac
+    pos.pnl_per_price_unit *= remaining_frac
+    pos.open_commission *= remaining_frac
+
+
+def handle_tp_level_hit(
+    pos: _InternalPosition,
+    price: float,
+    config: SimulateConfig,
+    events: list[tuple[float, str, float]],
+    remaining: float,
+    timestamp: int,
+) -> tuple[bool, float]:
+    """
+    Process one multi-RR TP level being reached at *price*.
+
+    Always advances SL / ``next_tp`` / ``last_rr_hit`` bookkeeping via
+    ``advance_multi_rr`` (this part is independent of size and must stay
+    live for both this candle's later checks and every future candle).
+
+    Whether anything actually *closes* here depends on
+    ``config.tp_level_close_fractions``:
+
+    * ``None`` (default) — reproduces the pre-v0.7.3 behaviour exactly:
+      intermediate levels close nothing (SL only advances), the final
+      level closes 100 % of whatever remains.
+    * configured — closes exactly ``tp_level_close_fractions[level]`` of
+      the position's *original* size at every level, including the last
+      (no more automatic "close everything" special-case for the final
+      level — any unspecified remainder stays open, trailing at the last
+      level's price, until it is eventually stopped out, force-closed,
+      or hits end-of-data).
+
+    Note this function does **not** mutate ``pos.size``/``risk_amount``/
+    ``margin_amount`` — it only threads *remaining* (this candle's running
+    size total, local to one ``check_close`` call) so that a gap spanning
+    more than one level still computes each event's ``closed_size`` against
+    the correct just-reduced amount. The caller applies the real
+    ``apply_partial_close`` to ``pos`` once per returned event, in order,
+    right after building that event's ``ClosedTrade``.
+
+    Returns
+    -------
+    tuple[bool, float]
+        ``(fully_closed, new_remaining)`` — ``fully_closed`` is ``True``
+        when *new_remaining* is ~0 (caller should stop and return).
+    """
+    level_idx = pos.last_rr_hit
+    is_last = level_idx + 1 >= len(pos.tp_level_prices)
+
+    if config.tp_level_close_fractions is not None:
+        frac = config.tp_level_close_fractions[level_idx]
+    else:
+        frac = 1.0 if is_last else 0.0
+
+    advance_multi_rr(pos, timestamp)
+
+    if frac <= 0.0:
+        return False, remaining
+
+    closed_size = min(frac * pos.original_size, remaining)
+    if closed_size <= 0.0:
+        return False, remaining
+
+    new_remaining = remaining - closed_size
+    fully_closed = new_remaining <= SIZE_EPSILON
+    reason = CLOSE_REASON_TP if fully_closed else CLOSE_REASON_TP_PARTIAL
+    events.append((price, reason, closed_size))
+    return fully_closed, new_remaining
+
+
+# ---------------------------------------------------------------------------
+# Position sizing / entry gating
+# ---------------------------------------------------------------------------
+
+def compute_position_params(
+    sig,                   # Signal
+    config: SimulateConfig,
+    wallet: float,
+) -> tuple | None:
+    """
+    Compute all sizing parameters for a new position.
+
+    ``sig.risk_multiplier`` (default ``1.0``) scales whatever size/risk this
+    signal would otherwise receive from *config* — see ``Signal.risk_multiplier``.
+
+    Returns
+    -------
+    tuple | None
+        ``(margin_amount, size, pnl_per_price_unit, risk_amount,
+           commission, spread_paid, tp_level_prices, fill_price)``
+        ``None`` when the position cannot be opened (insufficient funds,
+        invalid SL distance, or impossible leverage ratio).
+    """
+    direction = sig.direction
+    direction_factor = 1.0 if direction == "long" else -1.0
+
+    # Apply spread to get actual fill price
+    fill_price = sig.entry_price + (config.spread if direction == "long" else -config.spread)
+
+    # SL distance from fill price (use signal's SL unchanged)
+    sl_distance = abs(fill_price - sig.stop_loss)
+    if sl_distance <= 0:
+        return None
+
+    is_mt5 = config.is_metatrader()
+
+    # ------------------------------------------------------------------
+    # Determine risk_amount ($ at risk) — not needed for fixed_lot yet
+    # ------------------------------------------------------------------
+    risk_amount: float
+    size: float
+    margin_amount: float
+    pnl_per_price_unit: float
+    commission: float
+
+    if config.position_sizing == SIZING_FIXED_LOT:
+        # ---- Fixed-lot: size is specified directly ----
+        fixed_l = config.fixed_lot * sig.risk_multiplier
+
+        if is_mt5:
+            pip_size, pip_value = get_mt5_pip_info(config.symbol, fill_price)
+            if pip_size <= 0 or pip_value <= 0:
+                return None
+            pnl_per_price_unit = fixed_l * pip_value / pip_size
+            risk_amount = pnl_per_price_unit * sl_distance
+            size = fixed_l
+            margin_amount = risk_amount  # simplified MT5 margin model
+
+            if config.commission_type == COMMISSION_TYPE_PER_LOT:
+                commission = fixed_l * config.commission
+            elif config.commission_type == COMMISSION_TYPE_FIXED:
+                commission = config.commission
+            else:  # percentage: approximate on risk amount
+                commission = risk_amount * config.commission * 2.0
+
+        else:
+            # Exchange: fixed_lot = base-asset units to CONTROL
+            size = fixed_l
+            pnl_per_price_unit = size   # $1 price move → $size gain/loss
+            risk_amount = size * sl_distance
+            margin_amount = size * fill_price / config.leverage
+
+            if config.commission_type == COMMISSION_TYPE_PERCENTAGE:
+                commission = (size * fill_price) * config.commission * 2.0
+            elif config.commission_type == COMMISSION_TYPE_FIXED:
+                commission = config.commission
+            else:  # per_lot: treat 1 unit as 1 lot
+                commission = size * config.commission
+
+    else:
+        # ---- Risk-based sizing: compute risk_amount first ----
+        if config.position_sizing == SIZING_RISK_PERCENT:
+            balance_ref = wallet if config.compound else config.initial_balance
+            risk_amount = balance_ref * config.risk_per_trade / 100.0 * sig.risk_multiplier
+        else:  # SIZING_FIXED_AMOUNT
+            risk_amount = config.fixed_amount * sig.risk_multiplier
+
+        if risk_amount <= 0:
+            return None
+
+        if is_mt5:
+            lots = calculate_mt5_lot(config.symbol, risk_amount, sl_distance, fill_price)
+            lots = round_lot(lots)
+            if lots <= 0:
+                return None
+            size = lots
+            margin_amount = risk_amount   # simplified MT5 margin
+            pnl_per_price_unit = risk_amount / sl_distance
+
+            if config.commission_type == COMMISSION_TYPE_PER_LOT:
+                commission = lots * config.commission
+            elif config.commission_type == COMMISSION_TYPE_FIXED:
+                commission = config.commission
+            else:  # percentage: approximate on risk amount notional
+                commission = risk_amount * config.commission * 2.0
+
+        else:
+            # Exchange with leverage
+            sl_percent = sl_distance / fill_price
+            effective_risk_ratio = sl_percent * config.leverage
+            if effective_risk_ratio >= 1.0:
+                # SL would wipe out more than 100 % of margin — reject
+                return None
+
+            size = risk_amount / sl_distance          # base-asset units controlled
+            margin_amount = size * fill_price / config.leverage
+            pnl_per_price_unit = risk_amount / sl_distance   # == size
+
+            if config.commission_type == COMMISSION_TYPE_PERCENTAGE:
+                commission = (size * fill_price) * config.commission * 2.0
+            elif config.commission_type == COMMISSION_TYPE_FIXED:
+                commission = config.commission
+            else:  # per_lot: not standard on exchange
+                commission = size * config.commission
+
+    # Wallet must cover margin + commission
+    if wallet < margin_amount + commission:
+        return None
+
+    spread_paid = config.spread * pnl_per_price_unit
+
+    tp_prices = build_tp_level_prices(
+        sig.take_profit, fill_price, sl_distance, direction_factor, config
+    )
+
+    return (
+        margin_amount, size, pnl_per_price_unit, risk_amount,
+        commission, spread_paid, tp_prices, fill_price,
+    )
+
+
+def can_open_position(
+    sig,
+    open_positions: list[_InternalPosition],
+    config: SimulateConfig,
+) -> bool:
+    """Check position-count limits before committing to a new entry."""
+    if len(open_positions) >= config.max_positions:
+        return False
+
+    longs = sum(1 for p in open_positions if p.direction == "long")
+    shorts = sum(1 for p in open_positions if p.direction == "short")
+
+    if sig.direction == "long" and longs >= config.max_long_positions:
+        return False
+    if sig.direction == "short" and shorts >= config.max_short_positions:
+        return False
+
+    return True

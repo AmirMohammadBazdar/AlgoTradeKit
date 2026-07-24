@@ -25,8 +25,8 @@ The first valid ATR value is computed using a simple average of the first
 
 Output keys (result dict)
 --------------------------
-``"atr"``  : ATR series (Wilder-smoothed, NaN for the first ``period`` bars)
-``"tr"``   : Raw True Range series (NaN at index 0 — no previous close)
+``"atr"``  : ATR series (Wilder-smoothed, NaN for the first ``period − 1`` bars)
+``"tr"``   : Raw True Range series (``high − low`` at index 0 — no previous close)
 
 Examples
 --------
@@ -50,6 +50,7 @@ import pandas as pd
 from ._base import (
     _BaseIndicator,
     _check_length,
+    _EwmState,
     _rma_series,
     _to_series,
     _true_range,
@@ -74,9 +75,9 @@ class ATR(_BaseIndicator):
     Attributes
     ----------
     atr    : pd.Series
-        ATR values (Wilder's smoothed).  NaN for the first ``period`` bars.
+        ATR values (Wilder's smoothed).  NaN for the first ``period − 1`` bars.
     tr     : pd.Series
-        Raw True Range.  NaN at the first bar (no previous close).
+        Raw True Range.  ``high − low`` at the first bar (no previous close).
 
     Output keys (``result`` dict)
     ------------------------------
@@ -91,9 +92,9 @@ class ATR(_BaseIndicator):
 
     def __init__(
         self,
-        high:   "pd.Series | list",
-        low:    "pd.Series | list",
-        close:  "pd.Series | list",
+        high:   pd.Series | list,
+        low:    pd.Series | list,
+        close:  pd.Series | list,
         period: int = DEFAULT_PERIOD,
     ) -> None:
         super().__init__()
@@ -124,6 +125,41 @@ class ATR(_BaseIndicator):
 
         self.result["tr"]  = tr
         self.result["atr"] = atr
+
+    # ------------------------------------------------------------------
+    # Streaming updates
+    # ------------------------------------------------------------------
+
+    def _init_stream(self) -> None:
+        self._stream = {
+            "prev_close": float("nan"),
+            "atr": _EwmState(1.0 / self.period, self.period),
+        }
+        rows = zip(self.high.to_numpy(), self.low.to_numpy(), self.close.to_numpy())
+        for h, lo, c in rows:
+            self._push_atr(float(h), float(lo), float(c))
+
+    def _push_atr(self, high: float, low: float, close: float):
+        """Advance the TR/ATR state one bar; return (tr, atr) — same maths as _compute()."""
+        st = self._stream
+        prev_close = st["prev_close"]
+        st["prev_close"] = close
+        candidates = [high - low, abs(high - prev_close), abs(low - prev_close)]
+        valid = [x for x in candidates if x == x]
+        # DataFrame.max(axis=1) skips NaN: the first bar's TR is high - low.
+        tr = max(valid) if valid else float("nan")
+        return tr, st["atr"].push(tr)
+
+    def update(self, high: float, low: float, close: float) -> float:
+        """Append one new H/L/C bar; return the new ATR value (TR appended too)."""
+        if self._stream is None:
+            self._init_stream()
+        tr, atr = self._push_atr(float(high), float(low), float(close))
+        self.high = self._append_value(self.high, high)
+        self.low = self._append_value(self.low, low)
+        self.close = self._append_value(self.close, close)
+        self._append_results({"tr": tr, "atr": atr})
+        return atr
 
     # ------------------------------------------------------------------
     # Convenience properties

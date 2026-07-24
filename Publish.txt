@@ -1,0 +1,56 @@
+1. Create a branch and develop:
+ 
+1-1. Create new branch
+git checkout main
+git pull origin main
+git checkout -b feature/simulate-module
+ 
+1-2. Write New code and commit them
+ 
+1-3. Write test and commit it. It there is fail solve it then commit again
+pytest tests/test_simulate.py -v
+ 
+1-4. Push the branch
+git push origin feature/simulate-module
+ 
+ 
+----------
+2. Open a Pull Request on GitHub and merge to main
+ 
+2-1. GO to github and Create a pull request and accept it
+ 
+2-2. Get the changes locally
+git checkout main
+git pull origin main
+ 
+ 
+----------
+3. Do last works and releases:
+ 
+3-1. Bump version in BOTH files:
+# - pyproject.toml  →  version = "0.6.0"
+# - src/algotradekit/__init__.py  →  __version__ = "0.6.0"
+git add pyproject.toml src/algotradekit/__init__.py
+git commit -m "chore(release): bump version to 0.6.0"
+ 
+3-2. Update README.md CHANGELOG.md
+# Update README.md CHANGELOG.md (Double check the date in CHANGELOG.md)
+git add README.md CHANGELOG.md
+git commit -m "docs: update CHANGELOG and README for v0.6.0"
+ 
+3-3. Create tag
+git tag v0.6.0
+git push origin main
+git push origin v0.6.0
+ 
+3-4 Create a GitHub Release (triggers auto-publish to PyPI)
+# → Go to github.com/YOUR_USERNAME/AlgoTradeKit/releases/new
+# → Tag: v0.6.0
+# → Title: v0.6.0 - Simulate module
+# → Body: paste your CHANGELOG entry (Double check the date in CHANGELOG.md)
+# → Click "Publish release"
+ 
+ 
+----------
+ 
+ 

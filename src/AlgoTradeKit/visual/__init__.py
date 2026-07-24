@@ -66,20 +66,20 @@ Strategy drawings (v0.7.0)
     chart = Chart.from_csv("data/binance-futures_BTCUSDT_1h.csv")
     add_strategy_drawings(chart, result)
     chart.show()
+
+Live trade push + rolling window (v1.0.0)
+------------------------------------------
+    chart = Chart(host="0.0.0.0")   # non-local viewing — SECURITY WARNING in docstring
+    chart.set_candle_limit(500)     # keep only the last 500 candles (chart + browser)
+
+    pid = chart.add_live_position(open_time_s, entry, sl, "long", next_tp=tp)
+    chart.update_live_position(pid, stop_loss=new_sl)   # trailing / risk-free move
+    chart.update_live_position(pid, next_tp=None)       # TP ladder exhausted
+    chart.remove_drawing(pid)                           # position closed
+    chart.update_drawing(drawing_id, price=...)         # generic live edit
 """
 
 from .chart import Chart
-from .models import (
-    Bar,
-    Box,
-    FibRetracement,
-    HorizontalLine,
-    IndicatorSeries,
-    PositionBox,
-    Signal,
-    TextLabel,
-    TrendLine,
-)
 from .indicator_renderer import (
     add_ichimoku,
     add_ma,
@@ -87,6 +87,18 @@ from .indicator_renderer import (
     add_rsi,
     add_simulation_positions,
     add_strategy_drawings,
+)
+from .models import (
+    Bar,
+    Box,
+    FibRetracement,
+    HorizontalLine,
+    IndicatorSeries,
+    LivePosition,
+    PositionBox,
+    Signal,
+    TextLabel,
+    TrendLine,
 )
 
 __all__ = [
@@ -98,6 +110,7 @@ __all__ = [
     "FibRetracement",
     "HorizontalLine",
     "IndicatorSeries",
+    "LivePosition",
     "PositionBox",
     "Signal",
     "TextLabel",

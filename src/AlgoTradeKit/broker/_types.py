@@ -9,7 +9,7 @@ vocabulary; each concrete connector maps its venue-specific payloads onto them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # String constants (re-exported from broker/__init__.py, mirroring the
@@ -25,6 +25,7 @@ ORDER_MARKET = "market"
 ORDER_LIMIT = "limit"
 ORDER_STOP = "stop"          # stop-market
 ORDER_STOP_LIMIT = "stop_limit"
+ORDER_TAKE_PROFIT = "take_profit"  # take-profit trigger — fires a market order (v1.0.0)
 
 # Time in force
 TIF_GTC = "gtc"
@@ -47,6 +48,13 @@ STATUS_FILLED = "filled"
 STATUS_CANCELED = "canceled"
 STATUS_REJECTED = "rejected"
 STATUS_EXPIRED = "expired"
+
+# Commission kind — the exact string values ``SimulateConfig.commission_type``
+# accepts, so a ``TradingCosts`` drops straight into an auto-built simulate
+# config.  (Deliberately duplicated: ``broker`` never imports ``simulate``.)
+COMMISSION_TYPE_PERCENTAGE = "percentage"   # fraction of notional (0.001 = 0.1 %)
+COMMISSION_TYPE_PER_LOT = "per_lot"         # fixed $ per lot (MetaTrader style)
+COMMISSION_TYPE_FIXED = "fixed"             # fixed $ per trade
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +104,25 @@ class Ticker:
 
 
 @dataclass(frozen=True)
+class TradingCosts:
+    """
+    A venue's trading costs for one symbol, in ``SimulateConfig`` vocabulary.
+
+    Produced by :meth:`BaseBroker.get_trading_costs`; the ``trader`` module uses
+    it to auto-build the display ``SimulateConfig`` with the broker's real fee
+    and spread.  ``commission`` follows ``commission_type`` semantics (fraction
+    of notional for ``"percentage"``, $ per lot for ``"per_lot"``, $ per trade
+    for ``"fixed"``); ``spread`` is in price units; ``contract_size`` is units
+    per lot (MetaTrader) or ``None`` where sizing is in the base asset (crypto).
+    """
+    commission_type: str = COMMISSION_TYPE_PERCENTAGE
+    commission: float = 0.0
+    spread: float = 0.0
+    contract_size: float | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+
+@dataclass(frozen=True)
 class Order:
     """A working / historical order (unified across venues)."""
     order_id: str
@@ -103,8 +130,8 @@ class Order:
     side: str                       # SIDE_BUY / SIDE_SELL
     type: str                       # ORDER_MARKET / ORDER_LIMIT / ...
     quantity: float
-    price: Optional[float] = None   # limit / stop price; None for pure market
-    stop_price: Optional[float] = None
+    price: float | None = None   # limit / stop price; None for pure market
+    stop_price: float | None = None
     status: str = STATUS_NEW
     filled_quantity: float = 0.0
     timestamp: int = 0              # UTC ms
@@ -147,9 +174,9 @@ class Position:
     mark_price: float = 0.0
     unrealized_pnl: float = 0.0
     leverage: float = 1.0
-    liquidation_price: Optional[float] = None
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
+    liquidation_price: float | None = None
+    stop_loss: float | None = None
+    take_profit: float | None = None
     position_id: str = ""           # futures: symbol; MT: ticket
     timestamp: int = 0              # UTC ms (open time when known)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)

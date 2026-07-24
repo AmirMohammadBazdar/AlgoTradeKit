@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from ._base import _BaseIndicator, _check_length, _to_series
+from ._base import _BaseIndicator, _check_length, _to_series, _WindowState
 
 
 class Ichimoku(_BaseIndicator):
@@ -91,9 +91,9 @@ class Ichimoku(_BaseIndicator):
 
     def __init__(
         self,
-        high: "pd.Series | list",
-        low: "pd.Series | list",
-        close: "pd.Series | list",
+        high: pd.Series | list,
+        low: pd.Series | list,
+        close: pd.Series | list,
         tenkan_period: int = DEFAULT_TENKAN,
         kijun_period: int = DEFAULT_KIJUN,
         senkou_b_period: int = DEFAULT_SENKOU_B,
@@ -180,6 +180,92 @@ class Ichimoku(_BaseIndicator):
         self.result["span_b_raw"] = span_b_raw
 
     # ------------------------------------------------------------------
+    # Streaming updates
+    # ------------------------------------------------------------------
+
+    def _init_stream(self) -> None:
+        self._stream = {
+            "tenkan_hh": _WindowState(self.tenkan_period, "max"),
+            "tenkan_ll": _WindowState(self.tenkan_period, "min"),
+            "kijun_hh": _WindowState(self.kijun_period, "max"),
+            "kijun_ll": _WindowState(self.kijun_period, "min"),
+            "senkou_hh": _WindowState(self.senkou_b_period, "max"),
+            "senkou_ll": _WindowState(self.senkou_b_period, "min"),
+        }
+        for h, lo in zip(self.high.to_numpy(), self.low.to_numpy()):
+            self._push_ichimoku(float(h), float(lo))
+
+    def _push_ichimoku(self, high: float, low: float) -> dict[str, float]:
+        """Advance the Donchian windows one bar; return the new unshifted line values."""
+        st = self._stream
+        tenkan = (st["tenkan_hh"].push(high) + st["tenkan_ll"].push(low)) / 2.0
+        kijun = (st["kijun_hh"].push(high) + st["kijun_ll"].push(low)) / 2.0
+        span_a_raw = (tenkan + kijun) / 2.0
+        span_b_raw = (st["senkou_hh"].push(high) + st["senkou_ll"].push(low)) / 2.0
+        return {
+            "tenkan": tenkan,
+            "kijun": kijun,
+            "span_a_raw": span_a_raw,
+            "span_b_raw": span_b_raw,
+        }
+
+    def update(self, high: float, low: float, close: float) -> dict[str, float]:
+        """Append one new H/L/C bar; return the new bar's line values as a dict.
+
+        Returned keys: ``tenkan``, ``kijun``, ``senkou_a``, ``senkou_b``,
+        ``span_a_raw``, ``span_b_raw``, ``chikou``. The new bar's own chikou
+        is always NaN (it needs a close ``displacement`` bars in the future);
+        instead the chikou of the bar ``displacement`` bars back is filled in
+        retroactively — exactly like the batch ``close.shift(-displacement)``.
+        The future-cloud series (``cloud_future_a``/``b``) are rebuilt past
+        the new last bar.
+        """
+        if self._stream is None:
+            self._init_stream()
+        disp = self.displacement
+        n_old = len(self.close)
+        lines = self._push_ichimoku(float(high), float(low))
+
+        # Forward-displaced spans for the new bar: raw values disp bars back.
+        if n_old - disp >= 0:
+            senkou_a = float(self.result["span_a_raw"].iloc[n_old - disp])
+            senkou_b = float(self.result["span_b_raw"].iloc[n_old - disp])
+        else:
+            senkou_a = float("nan")
+            senkou_b = float("nan")
+
+        # Chikou: the close appended now belongs to the bar disp candles back.
+        if n_old - disp >= 0:
+            self.result["chikou"].iloc[n_old - disp] = float(close)
+
+        self.high = self._append_value(self.high, high)
+        self.low = self._append_value(self.low, low)
+        self.close = self._append_value(self.close, close)
+
+        new_values = {
+            "tenkan": lines["tenkan"],
+            "kijun": lines["kijun"],
+            "senkou_a": senkou_a,
+            "senkou_b": senkou_b,
+            "chikou": float("nan"),
+            "span_a_raw": lines["span_a_raw"],
+            "span_b_raw": lines["span_b_raw"],
+        }
+        self._append_results(new_values)
+
+        # Future cloud: the last disp raw spans, re-anchored past the new last bar.
+        n_new = n_old + 1
+        future_idx = pd.RangeIndex(n_new, n_new + disp)
+        self.result["cloud_future_a"] = pd.Series(
+            self.result["span_a_raw"].iloc[-disp:].to_numpy(), index=future_idx
+        )
+        self.result["cloud_future_b"] = pd.Series(
+            self.result["span_b_raw"].iloc[-disp:].to_numpy(), index=future_idx
+        )
+
+        return dict(new_values)
+
+    # ------------------------------------------------------------------
     # Convenience accessors
     # ------------------------------------------------------------------
 
@@ -237,14 +323,10 @@ class Ichimoku(_BaseIndicator):
         Columns: index, senkou_a, senkou_b, cloud_color
         cloud_color is "up" (bullish, A>B) or "down" (bearish, B>A) per bar.
         """
-        n = len(self.senkou_a)
-        disp = self.displacement
-
         sa = self.senkou_a.copy()
         sb = self.senkou_b.copy()
 
         # Append future extension
-        future_idx = pd.RangeIndex(n, n + disp)
         sa_future = self.result["cloud_future_a"].copy()
         sb_future = self.result["cloud_future_b"].copy()
 
@@ -325,7 +407,7 @@ class Ichimoku(_BaseIndicator):
                     "color": self.COLOR_SENKOU_A,
                     "width": 1,
                     "style": "solid",
-                    "label": f"Span A",
+                    "label": "Span A",
                     "displacement": disp,
                 },
                 {

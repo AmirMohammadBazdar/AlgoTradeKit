@@ -1,22 +1,27 @@
 """
-Threaded async WebSocket client used by connectors for real-time feeds.
+Threaded real-time feed helpers used by connectors: WebSocket and polling.
 
 The library already depends on ``websockets`` (asyncio) for the ``visual`` /
 ``report`` servers.  Here we reuse it on the *client* side: each stream runs its
 own asyncio event loop inside a daemon thread, so callers get a simple
 synchronous ``Stream`` handle with a ``.stop()`` method and never touch asyncio.
+
+Venues without a push feed (MetaTrader) use :func:`start_poll_stream` instead —
+a plain daemon thread calling a poll function on an interval — and return the
+very same ``Stream`` handle, so subscribers cannot tell the transports apart.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import threading
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 
 class Stream:
     """
-    Handle to a running background WebSocket subscription.
+    Handle to a running background subscription (WebSocket or polling).
 
     Returned by ``broker.stream_candles(...)`` / ``stream_ticker(...)``.  Call
     :meth:`stop` to end the subscription and join the worker thread.
@@ -27,12 +32,12 @@ class Stream:
         name: str,
         thread: threading.Thread,
         stop_event: threading.Event,
-        loop: asyncio.AbstractEventLoop,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         self.name = name
         self._thread = thread
         self._stop_event = stop_event
-        self._loop = loop
+        self._loop = loop  # None for polling streams (no asyncio involved)
 
     @property
     def alive(self) -> bool:
@@ -41,10 +46,11 @@ class Stream:
     def stop(self, timeout: float = 5.0) -> None:
         """Signal the worker to close the socket and wait for it to exit."""
         self._stop_event.set()
-        try:
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        except RuntimeError:
-            pass  # loop already stopped
+        if self._loop is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except RuntimeError:
+                pass  # loop already stopped
         self._thread.join(timeout=timeout)
 
     def __repr__(self) -> str:
@@ -55,11 +61,11 @@ def start_ws_stream(
     url: str,
     on_message: Callable[[dict[str, Any]], None],
     *,
-    on_open_frames: Optional[list[dict]] = None,
+    on_open_frames: list[dict] | None = None,
     name: str = "ws",
     ping_interval: float = 20.0,
     reconnect: bool = True,
-    on_error: Optional[Callable[[Exception], None]] = None,
+    on_error: Callable[[Exception], None] | None = None,
 ) -> Stream:
     """
     Open *url* in a background daemon thread and deliver each JSON message to
@@ -137,3 +143,35 @@ def start_ws_stream(
     thread = threading.Thread(target=_thread_main, name=f"atk-{name}", daemon=True)
     thread.start()
     return Stream(name=name, thread=thread, stop_event=stop_event, loop=loop)
+
+
+def start_poll_stream(
+    poll_once: Callable[[], None],
+    *,
+    interval: float,
+    name: str = "poll",
+    on_error: Callable[[Exception], None] | None = None,
+) -> Stream:
+    """
+    Run *poll_once* every *interval* seconds in a background daemon thread.
+
+    The polling counterpart of :func:`start_ws_stream`, for venues without a
+    push feed (MetaTrader).  The first poll fires immediately; exceptions inside
+    *poll_once* are swallowed (optionally reported via *on_error*) so one bad
+    poll cannot kill the feed.  Returns the same stoppable :class:`Stream`
+    handle as the WebSocket streams.
+    """
+    stop_event = threading.Event()
+
+    def _thread_main() -> None:
+        while not stop_event.is_set():
+            try:
+                poll_once()
+            except Exception as exc:  # noqa: BLE001 — never kill the feed
+                if on_error is not None:
+                    on_error(exc)
+            stop_event.wait(interval)
+
+    thread = threading.Thread(target=_thread_main, name=f"atk-{name}", daemon=True)
+    thread.start()
+    return Stream(name=name, thread=thread, stop_event=stop_event)

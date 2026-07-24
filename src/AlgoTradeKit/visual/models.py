@@ -12,17 +12,56 @@ PositionBox — TradingView-style position box rendered on a candle chart.
               Shows loss zone (SL→entry) and profit zone (entry→TP) as two
               stacked coloured rectangles, with entry/exit markers and an
               R:R ratio label.
+
+v1.0.0 additions
+-----------------
+LivePosition — an OPEN (still running) trade rendered as horizontal lines
+               that auto-extend to the newest candle: dashed entry line,
+               solid current-SL line (colour = loss / break-even / profit
+               zone) and optional green next-TP line.  Updated live over
+               the WebSocket as the SL trails / jumps to break-even / the
+               next multi-RR target changes.
 """
 
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Literal
 import itertools
+from dataclasses import asdict, dataclass, field
+from typing import Literal
 
 _id_counter = itertools.count(1)
 
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{next(_id_counter)}"
+
+
+# ---------------------------------------------------------------------------
+# SL/TP zone colours (v0.7.4 dynamic lines; shared with LivePosition, v1.0.0)
+# ---------------------------------------------------------------------------
+
+COLOR_SL_LOSS      = "#f85149"  # red   — SL is in the loss zone
+COLOR_SL_BREAKEVEN = "#e3b341"  # amber — SL is at break-even (entry)
+COLOR_SL_PROFIT    = "#22d3ee"  # cyan  — SL is in profit territory
+COLOR_NEXT_TP      = "#3fb950"  # green — next TP target line
+
+
+def sl_zone_color(sl: float, entry: float, direction: str) -> str:
+    """
+    Return the colour for a stop-loss line based on whether the SL sits in
+    the loss zone, at break-even, or in profit territory.
+
+    Loss zone (red)     : for a long, SL < entry; for a short, SL > entry
+    Break-even (amber)  : SL is within a tiny epsilon of entry
+    Profit zone (cyan)  : for a long, SL > entry; for a short, SL < entry
+    """
+    factor = 1.0 if direction == "long" else -1.0
+    profit_margin = factor * (sl - entry)
+    eps = abs(entry) * 1e-7 or 1e-9    # relative epsilon
+    if profit_margin > eps:
+        return COLOR_SL_PROFIT
+    elif profit_margin > -eps:
+        return COLOR_SL_BREAKEVEN
+    else:
+        return COLOR_SL_LOSS
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +211,7 @@ class Signal:
     """
     time:   int
     side:   Literal["buy", "sell"]
-    price:  Optional[float] = None
+    price:  float | None = None
     label:  str  = ""
     color:  str  = ""            # auto-coloured if empty
     locked: bool = True
@@ -321,7 +360,7 @@ class PositionBox:
     close_time:       int           # Unix seconds
     entry_price:      float
     stop_loss:        float
-    take_profit:      Optional[float]
+    take_profit:      float | None
     direction:        str           # "long" | "short"
     net_pnl:          float
     close_reason:     str
@@ -398,4 +437,73 @@ class PositionBox:
             "id":            self.id,
             "locked":        self.locked,
             "source":        "server",
+        }
+
+
+@dataclass
+class LivePosition:
+    """
+    An OPEN (still running) trade rendered live on the chart (v1.0.0).
+
+    Unlike :class:`PositionBox` (a closed trade with a fixed time range),
+    a ``LivePosition`` has no close time: the frontend draws its lines from
+    ``open_time`` to the newest candle and keeps extending them as candles
+    stream in.  Rendered as:
+
+    * a dashed **entry** line at ``entry_price`` with a direction triangle;
+    * a solid **current-SL** line at ``stop_loss`` whose colour is computed
+      backend-side by :func:`sl_zone_color` (red = loss zone, amber =
+      break-even, cyan = profit — same scheme as the v0.7.4 dynamic lines);
+    * an optional dashed green **next-TP** line at ``next_tp``.
+
+    SL moves (trailing), risk-free jumps and next-TP changes are pushed as
+    ``update_drawing`` WebSocket messages carrying the full re-serialised
+    dict, so ``sl_color`` always reflects the current SL.
+
+    Parameters
+    ----------
+    open_time : int
+        Entry candle timestamp in **Unix seconds** (not milliseconds).
+    entry_price : float
+        Fill price.
+    stop_loss : float
+        Current stop-loss price (updated live as it moves).
+    direction : str
+        ``"long"`` or ``"short"``.
+    next_tp : float | None
+        Next take-profit target, or ``None`` when the mode has no TP
+        (trailing / risk-free flows).
+    trade_id : int
+        Trade ID from the live simulation / trader.
+    label : str
+        Optional short label drawn next to the entry line.
+    locked : bool
+        When ``True`` the drawing cannot be moved in the browser.
+    """
+
+    open_time:   int             # Unix seconds
+    entry_price: float
+    stop_loss:   float
+    direction:   str             # "long" | "short"
+    next_tp:     float | None = None
+    trade_id:    int  = -1
+    label:       str  = ""
+    locked:      bool = True
+    id:          str  = field(default_factory=lambda: _new_id("livepos"))
+
+    def to_dict(self) -> dict:
+        return {
+            "type":        "live_position",
+            "open_time":   self.open_time,
+            "entry_price": self.entry_price,
+            "stop_loss":   self.stop_loss,
+            "next_tp":     self.next_tp,
+            "direction":   self.direction,
+            "sl_color":    sl_zone_color(self.stop_loss, self.entry_price, self.direction),
+            "tp_color":    COLOR_NEXT_TP,
+            "trade_id":    self.trade_id,
+            "label":       self.label,
+            "id":          self.id,
+            "locked":      self.locked,
+            "source":      "server",
         }
