@@ -7,17 +7,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
-## [1.0.1] — 2026-07-24
+## [1.0.2] — 2026-07-24
 
-Packaging fix. The **1.0.0** wheel on PyPI was built from an incomplete tree and
-shipped **without** the `trader` module, the live-simulation core
-(`simulate._live`), the shared position maths (`simulate._position_math`),
-incremental indicators (`strategy._incremental`) and the MetaTrader native
-transport (`broker.metatrader._native` / `_ops`). `import AlgoTradeKit.trader`
-therefore failed after `pip install AlgoTradeKit`.
+Packaging fixes (no feature changes) — supersedes the withdrawn 1.0.0 and 1.0.1:
 
-1.0.1 ships the **complete v1.0.0 source** — no feature changes, just the files
-that should have been in 1.0.0. Upgrade with `pip install -U AlgoTradeKit`.
+- **1.0.0** was built from an incomplete tree and shipped **without** the
+  `trader` module, the live-simulation core (`simulate._live`), the shared
+  position maths (`simulate._position_math`), incremental indicators
+  (`strategy._incremental`) and the MetaTrader native transport
+  (`broker.metatrader._native` / `_ops`), so `import AlgoTradeKit.trader` failed.
+- **1.0.1** restored that source but its **source distribution** accidentally
+  bundled repository-only files that do not belong in a release.
+
+**1.0.2** ships the complete library and nothing else: the source distribution
+is now an explicit allow-list (`src`, `tests`, `README`, `CHANGELOG`, `LICENSE`,
+`MT5_WINE_SETUP.md`, `pyproject.toml`). Upgrade with
+`pip install -U AlgoTradeKit`.
 
 ## [1.0.0] — 2026-07-21
 
@@ -126,8 +131,8 @@ complete headless-setup guide, and a bridge fix for crypto / CFD symbols.
 ### Notes
 
 - Live-order safety: `testnet` is supported; live endpoints are the default.
-- Deferred to **v0.9.1** (see `v091.md`): the `trader` live-order module,
-  real-time simulation, live-updating chart/report, and the ichimoku live demo.
+- Deferred to **v0.9.1**: the `trader` live-order module, real-time simulation,
+  live-updating chart/report, and the ichimoku live demo.
 
 ---
 
@@ -179,7 +184,7 @@ complete headless-setup guide, and a bridge fix for crypto / CFD symbols.
 
 ### Changed
 
-- `ichimoku_strategy.py` now passes `chart_indicators` so the simulation chart
+- Example strategies can pass `chart_indicators` so the simulation chart
   automatically renders the Ichimoku cloud + RSI (matching the strategy's
   parameters, including the non-standard displacement).
 

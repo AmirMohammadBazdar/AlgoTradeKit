@@ -10,13 +10,13 @@ it on a headless Linux VPS (SSH only, no desktop) we:
    needed),
 3. run AlgoTradeKit's **bridge server** in that Wine Python; it exposes MT5 over
    a tiny TCP/JSON socket,
-4. run your actual code (`demo.py`) on the normal Linux side — or on your laptop
+4. run your own AlgoTradeKit code on the normal Linux side — or on your laptop
    — talking to the bridge.
 
 ```
 ┌─────────────────────── VPS (no GUI) ────────────────────────┐        your laptop
 │  Xvfb ┌───────────── Wine ─────────────┐                    │  TCP   ┌──────────┐
-│       │ MT5 terminal (logged in)       │                    │ 18812  │ demo.py  │
+│       │ MT5 terminal (logged in)       │                    │ 18812  │ your code│
 │       │ Windows Python + MetaTrader5   │◄── bridge_server ──┼────────┤ + browser│
 │       └────────────────────────────────┘   (JSON socket)    │        └──────────┘
 └─────────────────────────────────────────────────────────────┘
@@ -179,13 +179,12 @@ Re-attach later: `tmux attach -t mt5`.
 
 ---
 
-## Part G — run `demo.py` from your laptop (where a browser exists)
+## Part G — chart a symbol from your laptop (where a browser exists)
 
 On your **laptop** install the library (with `websockets` for the chart):
 
 ```bash
 pip install AlgoTradeKit websockets pandas
-# or, from the repo:  pip install -e ".[dev]"
 ```
 
 Open an SSH tunnel so `127.0.0.1:18812` on your laptop reaches the VPS bridge —
@@ -195,11 +194,31 @@ keep this terminal open:
 ssh -N -L 18812:127.0.0.1:18812  user@your-vps
 ```
 
-In another terminal, edit the config block at the top of `demo.py` (set your
-`SYMBOL`), then:
+In another terminal, save this as `chart_test.py` (set `SYMBOL` to one your
+broker offers — see Part H) and run it:
+
+```python
+import pandas as pd
+from AlgoTradeKit.broker import Broker
+from AlgoTradeKit.visual import Chart
+
+SYMBOL = "EURUSD"          # EXACT name from your broker's Market Watch
+
+mt = Broker("metatrader", host="127.0.0.1", port=18812)
+rows = mt.fetch_last_candles(SYMBOL, "15m", 100)
+
+if not rows:
+    print(f"No candles for {SYMBOL!r}. Available names:")
+    print(mt.list_symbols("*"))
+else:
+    print(pd.DataFrame(rows).tail())
+    chart = Chart(title=f"{SYMBOL} — 15m (MT5)")
+    chart.set_data(pd.DataFrame(rows))     # timestamps are UTC ms — handled
+    chart.show(block=True)                 # opens a browser tab; Ctrl+C to quit
+```
 
 ```bash
-python demo.py
+python chart_test.py
 ```
 
 The last 100 candles print to the console and a candle chart opens in your
@@ -207,11 +226,13 @@ browser. 🎉
 
 ### Alternative: run everything on the VPS
 
-If you'd rather run `demo.py` on the VPS, the chart server binds
-`127.0.0.1:<port>` there, so forward that port instead:
+If you'd rather run it on the VPS (no browser there), bind the chart server to a
+fixed port and forward it:
 
-- In `demo.py` set `OPEN_BROWSER = False` and `CHART_PORT = 8080`.
-- `python3 demo.py` on the VPS.
+- change the chart line to
+  `chart = Chart(title=..., host="127.0.0.1", port=8080)` and
+  `chart.show(open_browser=False, block=True)`.
+- `python3 chart_test.py` on the VPS.
 - From your laptop: `ssh -N -L 8080:127.0.0.1:8080 user@your-vps`
 - Open **http://127.0.0.1:8080** in your laptop browser.
 
@@ -224,7 +245,7 @@ If you'd rather run `demo.py` on the VPS, the chart server binds
 | `Could not reach the MetaTrader bridge` | The bridge isn't running, wrong port, or the SSH tunnel dropped. Re-attach tmux (`tmux attach -t mt5`); confirm it says `listening`. Re-open the tunnel. |
 | `mt5.login failed` | Wrong **server/login/password**, or the server isn't registered in the terminal. Use your **broker's** MT5 installer (not the generic one). Double-check the server string exactly. |
 | `mt5.initialize failed` | Terminal not found — pass the right `--path` to `terminal64.exe` (check `ls "$HOME/.mt5/drive_c/Program Files/"`). |
-| `symbol_select(BTCUSD) failed` / **no candles** | The symbol name is wrong. Names vary a lot (`BTCUSD`, `BTCUSD.`, `BTCUSD.r`, `Bitcoin`, `BTC/USD`). `demo.py` prints suggestions; or call `mt.list_symbols("*BTC*")`. |
+| `symbol_select(BTCUSD) failed` / **no candles** | The symbol name is wrong. Names vary a lot (`BTCUSD`, `BTCUSD.`, `BTCUSD.r`, `Bitcoin`, `BTC/USD`). Call `mt.list_symbols("*BTC*")` (or `mt.list_symbols("*")`) to find the exact spelling. |
 | Wine shows a **Mono / Gecko** pop-up and hangs | You skipped `WINEDLLOVERRIDES="mscoree,mshtml="`. Export it and retry that step. |
 | Terminal exits immediately / can't log in headless | A few brokers require the terminal to be logged in **once interactively** to accept the account. Do it via VNC once (see below), then the headless login works. |
 | `wine: command not found` after reboot | Re-export `WINEPREFIX`/`WINEARCH` (put them in `~/.bashrc`). |

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "AlgoTradeKit"
-version = "1.0.1"
+version = "1.0.2"
 description = "Algorithmic Trading Toolkit — data collection, indicators, strategy, simulation, and live trading"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -52,10 +52,26 @@ Issues     = "https://github.com/AmirMohammadBazdar/AlgoTradeKit/issues"
 Changelog  = "https://github.com/AmirMohammadBazdar/AlgoTradeKit/blob/main/CHANGELOG.md"
 
 # ---------------------------------------------------------------------------
-# Hatchling build — only include the src/ tree
+# Hatchling build
 # ---------------------------------------------------------------------------
+# Wheel: only the importable package.
 [tool.hatch.build.targets.wheel]
 packages = ["src/AlgoTradeKit"]
+
+# Sdist: an EXPLICIT allow-list — only these paths are packaged. Everything
+# else (private planning docs, personal strategy scripts, local settings, …)
+# is excluded by construction, so nothing private can ever leak into a release
+# again. Add a new public file here if the distribution needs it.
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src/AlgoTradeKit",
+    "tests",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "MT5_WINE_SETUP.md",
+    "pyproject.toml",
+]
 
 # ---------------------------------------------------------------------------
 # Ruff linting
