@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.0.1] — 2026-07-24
+
+Packaging fix. The **1.0.0** wheel on PyPI was built from an incomplete tree and
+shipped **without** the `trader` module, the live-simulation core
+(`simulate._live`), the shared position maths (`simulate._position_math`),
+incremental indicators (`strategy._incremental`) and the MetaTrader native
+transport (`broker.metatrader._native` / `_ops`). `import AlgoTradeKit.trader`
+therefore failed after `pip install AlgoTradeKit`.
+
+1.0.1 ships the **complete v1.0.0 source** — no feature changes, just the files
+that should have been in 1.0.0. Upgrade with `pip install -U AlgoTradeKit`.
+
 ## [1.0.0] — 2026-07-21
 
 Live trading. AlgoTradeKit can now place real orders, or paper-trade the same

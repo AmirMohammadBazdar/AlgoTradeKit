@@ -14,6 +14,8 @@ The server:
   3. Sends the full serialised ``SimulateReport`` as JSON on first connect
   4. Receives ``{type: "open_chart", trade_id: N}`` messages from the
      browser and calls the registered ``on_open_chart`` callback
+  5. Re-broadcasts fresh stats over the same WebSocket via
+     ``push_update()`` — the open page re-renders in place (v1.0.0)
 
 The server runs in a daemon background thread (same pattern as
 ``visual.server.ChartServer``) so it never blocks the Python process.
@@ -26,8 +28,8 @@ import json
 import logging
 import socket
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional, Set
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -44,19 +46,29 @@ _reserved_ports: set[int] = set()
 # Port helper
 # ---------------------------------------------------------------------------
 
-def _find_free_port(start: int = 8800) -> int:
-    """Find a free TCP port starting from *start* (scans up to start+200)."""
+def _find_free_port(start: int = 8800, host: str = "127.0.0.1") -> int:
+    """Find a free TCP port starting from *start* (scans up to start+200).
+
+    The probe binds on *host* so the port is guaranteed free on the same
+    interface(s) the server will later bind to (``"0.0.0.0"`` probes all
+    IPv4 interfaces; ``"::"`` probes IPv6).
+    """
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
     for port in range(start, start + 200):
         if port in _reserved_ports:
             continue
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        with socket.socket(family, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("127.0.0.1", port))
+                s.bind((host, port))
                 _reserved_ports.add(port)
                 return port
             except OSError:
                 continue
-    raise RuntimeError("No free TCP port found in range 8800–9000")
+    raise RuntimeError(
+        f"No free TCP port found in range 8800–9000 "
+        f"(probed on host {host!r} — is it a local interface? "
+        f"Pass an explicit port= to skip probing)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +77,7 @@ def _find_free_port(start: int = 8800) -> int:
 
 class _ConnectionManager:
     def __init__(self) -> None:
-        self.active: Set[WebSocket] = set()
+        self.active: set[WebSocket] = set()
 
     async def connect(self, ws: WebSocket) -> None:
         await ws.accept()
@@ -75,7 +87,7 @@ class _ConnectionManager:
         self.active.discard(ws)
 
     async def broadcast(self, message: dict) -> None:
-        dead: Set[WebSocket] = set()
+        dead: set[WebSocket] = set()
         for ws in list(self.active):
             try:
                 await ws.send_text(json.dumps(message))
@@ -101,21 +113,35 @@ class ReportServer:
     on_open_chart : callable | None
         Called when the browser requests to open the candle chart for a
         specific trade.  Signature: ``on_open_chart(trade_id: int) -> None``.
+    host : str
+        Network interface to bind to (v1.0.0).  Default ``"127.0.0.1"``
+        keeps the server reachable from this machine only.
+
+        .. warning::
+           **Security** — setting ``host="0.0.0.0"`` exposes the report
+           server on **every network interface**: anyone who can reach this
+           machine (LAN, or the whole internet on an unfirewalled VPS) can
+           open the report, see your data and send WebSocket messages.
+           There is no authentication.  Only use ``"0.0.0.0"`` on trusted /
+           firewalled networks; an SSH tunnel to the default
+           ``127.0.0.1`` binding is the safer alternative.
     """
 
     def __init__(
         self,
         title: str = "AlgoTradeKit Report",
         port: int = 0,
-        on_open_chart: Optional[Callable[[int], None]] = None,
+        on_open_chart: Callable[[int], None] | None = None,
+        host: str = "127.0.0.1",
     ) -> None:
         self.title         = title
-        self.port          = port or _find_free_port()
+        self.host          = host
+        self.port          = port or _find_free_port(host=host)
         self.on_open_chart = on_open_chart
         self._manager      = _ConnectionManager()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._pending_data: Optional[dict] = None   # sent to first WS connect
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._pending_data: dict | None = None   # sent to every new WS connect
         self._app          = self._build_app()
 
     # ── FastAPI app ────────────────────────────────────────────────────────
@@ -170,7 +196,7 @@ class ReportServer:
             asyncio.set_event_loop(self._loop)
             config = uvicorn.Config(
                 self._app,
-                host="127.0.0.1",
+                host=self.host,
                 port=self.port,
                 loop="asyncio",
                 log_level="warning",
@@ -191,14 +217,31 @@ class ReportServer:
 
         if open_browser:
             import webbrowser
-            webbrowser.open(f"http://127.0.0.1:{self.port}/")
+            webbrowser.open(f"{self.url}/")
 
-        log.info("ReportServer started → http://127.0.0.1:%d", self.port)
+        log.info("ReportServer started → %s (bound to %s)", self.url, self.host)
 
     def stop(self) -> None:
         _reserved_ports.discard(self.port)
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
+
+    # ── URLs ───────────────────────────────────────────────────────────────
+
+    @property
+    def display_host(self) -> str:
+        """Host usable in a browser URL.
+
+        ``0.0.0.0`` / ``::`` are bind-to-all addresses, not destinations —
+        substitute the loopback address for local display.  Remote viewers
+        replace it with the machine's real IP (prints those URLs).
+        """
+        return "127.0.0.1" if self.host in ("0.0.0.0", "::") else self.host
+
+    @property
+    def url(self) -> str:
+        """Browsable URL of this server (uses :attr:`display_host`)."""
+        return f"http://{self.display_host}:{self.port}"
 
     # ── Data push ─────────────────────────────────────────────────────────
 
@@ -217,3 +260,39 @@ class ReportServer:
         """
         self._pending_data = {"type": "report_data", **data}
         self.send(self._pending_data)
+
+    def push_update(self, report) -> None:
+        """
+        Re-broadcast fresh stats to every open report page (v1.0.0).
+
+        The page re-renders in place, and the replay cache is refreshed so
+        a page refresh (or a new tab) mid-live-run shows the current stats
+        instead of the state at ``start()`` time.
+
+        Parameters
+        ----------
+        report : SimulateReport | dict
+            A ``SimulateReport`` (serialised via ``build_report_payload``)
+            or an already-built payload dict — e.g. a combined payload from
+            ``build_combined_report_payload`` — pushed as-is.
+
+        Notes
+        -----
+        The chart-link keys (``has_chart`` / ``chart_port``) of the
+        previously pushed payload are carried forward when the new payload
+        does not set them: the linked chart server does not change between
+        stat refreshes.  To unlink a chart, push via ``set_report_data``
+        with the keys set explicitly.
+        """
+        if isinstance(report, dict):
+            payload = dict(report)
+        else:
+            from ._builder import build_report_payload
+            payload = build_report_payload(report)
+
+        prev = self._pending_data or {}
+        if not payload.get("has_chart") and prev.get("has_chart"):
+            payload["has_chart"] = prev["has_chart"]
+            payload["chart_port"] = prev.get("chart_port")
+
+        self.set_report_data(payload)

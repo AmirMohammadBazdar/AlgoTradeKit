@@ -19,10 +19,11 @@ Coverage
 
 from __future__ import annotations
 
-import math
-import pytest
+from dataclasses import asdict
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from AlgoTradeKit.simulate import (
     CLOSE_REASON_EOD,
@@ -31,17 +32,23 @@ from AlgoTradeKit.simulate import (
     CLOSE_REASON_SL,
     CLOSE_REASON_TP,
     CLOSE_REASON_TP_PARTIAL,
-    EXCHANGE_TYPE_EXCHANGE,
+    EVENT_CLOSE,
+    EVENT_OPEN,
+    EVENT_SIGNAL,
+    EVENT_SL_MOVE,
+    EVENT_TP_LEVEL,
     EXCHANGE_TYPE_METATRADER,
+    LiveSimulation,
     Simulate,
     SimulateConfig,
     SimulateReport,
+    SimulationStepper,
     run_batch,
     run_multi,
 )
 from AlgoTradeKit.simulate._lot import calculate_mt5_lot, get_mt5_pip_info, round_lot
 from AlgoTradeKit.simulate._position import _InternalPosition
-from AlgoTradeKit.simulate._report import DrawdownPeriod, build_report
+from AlgoTradeKit.simulate._report import build_report
 from AlgoTradeKit.simulate._session import (
     SESSION_LONDON,
     SESSION_NEW_YORK,
@@ -55,7 +62,6 @@ from AlgoTradeKit.simulate._session import (
 )
 from AlgoTradeKit.strategy import BaseStrategy, Signal, StrategyMode, StrategyResult
 from AlgoTradeKit.strategy._types import ExitSignal
-
 
 # ===========================================================================
 # Shared helpers
@@ -102,7 +108,9 @@ def _make_result(
     )
 
 
-def _long_signal(candle_idx: int, df: pd.DataFrame, sl_pct: float = 0.02, tp_pct: float | None = None) -> Signal:
+def _long_signal(
+    candle_idx: int, df: pd.DataFrame, sl_pct: float = 0.02, tp_pct: float | None = None
+) -> Signal:
     """Long signal at df.iloc[candle_idx].close with SL / optional TP."""
     entry = float(df.iloc[candle_idx]["close"])
     sl    = entry * (1 - sl_pct)
@@ -119,7 +127,9 @@ def _long_signal(candle_idx: int, df: pd.DataFrame, sl_pct: float = 0.02, tp_pct
     )
 
 
-def _short_signal(candle_idx: int, df: pd.DataFrame, sl_pct: float = 0.02, tp_pct: float | None = None) -> Signal:
+def _short_signal(
+    candle_idx: int, df: pd.DataFrame, sl_pct: float = 0.02, tp_pct: float | None = None
+) -> Signal:
     entry = float(df.iloc[candle_idx]["close"])
     sl    = entry * (1 + sl_pct)
     tp    = entry * (1 - tp_pct) if tp_pct else None
@@ -152,7 +162,9 @@ class TestSimulateConfig:
         assert cfg.sl_mode == "signal"
 
     def test_auto_id_generated(self):
-        cfg = SimulateConfig(symbol="btcusdt", leverage=10, risk_per_trade=2.0, tp_mode="fixed_rr", tp_rr=2.5)
+        cfg = SimulateConfig(
+            symbol="btcusdt", leverage=10, risk_per_trade=2.0, tp_mode="fixed_rr", tp_rr=2.5
+        )
         assert "BTCUSDT" in cfg.config_id
         assert "risk2.0pct" in cfg.config_id
         assert "lev10x" in cfg.config_id
@@ -314,7 +326,7 @@ class TestSession:
     def test_off_hours(self):
         ts = self._ts_utc_hour(23)  # 23 UTC: after NY close (22), before Sydney if after 21
         # Sydney starts at 21, so 23 UTC is actually IN Sydney
-        sessions = get_sessions(ts)
+        get_sessions(ts)
         # Check primary: should not be off_hours since Sydney is active
         primary = get_primary_session(ts)
         assert primary != SESSION_OFF_HOURS
@@ -343,8 +355,6 @@ class TestSession:
 class TestInternalPosition:
 
     def _make_pos(self, direction="long", entry=100.0, sl=98.0, risk=100.0, tp=None):
-        sl_dist = abs(entry - sl)
-        ppu     = risk / sl_dist
         return _InternalPosition(
             trade_id=0,
             symbol="btcusdt",
@@ -1181,9 +1191,7 @@ class TestReportStatistics:
         """
         Build a SimulateReport by simulating a known mix of wins and losses.
         """
-        from AlgoTradeKit.simulate._position import (
-            CLOSE_REASON_SL, CLOSE_REASON_TP, ClosedTrade
-        )
+        from AlgoTradeKit.simulate._position import CLOSE_REASON_SL, CLOSE_REASON_TP, ClosedTrade
         trades = []
         ts = _BASE_TS
         for i, pnl in enumerate(win_pnl_list):
@@ -1199,7 +1207,8 @@ class TestReportStatistics:
                 max_favourable_excursion=pnl, max_adverse_excursion=0.0,
                 leverage=1.0, spread_paid=0.0,
             )
-            trades.append(ct); ts += 2 * _1H_MS
+            trades.append(ct)
+            ts += 2 * _1H_MS
 
         for i, pnl in enumerate(loss_pnl_list):
             loss_pnl = -abs(pnl)   # losses must be negative
@@ -1215,7 +1224,8 @@ class TestReportStatistics:
                 max_favourable_excursion=0.0, max_adverse_excursion=abs(loss_pnl),
                 leverage=1.0, spread_paid=0.0,
             )
-            trades.append(ct); ts += 2 * _1H_MS
+            trades.append(ct)
+            ts += 2 * _1H_MS
 
         bal_history = []
         equity = 10_000.0
@@ -1312,9 +1322,15 @@ class TestRunBatch:
     def test_returns_one_report_per_config(self):
         strat   = self._FlatStrategy()
         configs = [
-            SimulateConfig(risk_per_trade=0.5, tp_mode="none", commission_type="fixed", commission=0),
-            SimulateConfig(risk_per_trade=1.0, tp_mode="none", commission_type="fixed", commission=0),
-            SimulateConfig(risk_per_trade=2.0, tp_mode="none", commission_type="fixed", commission=0),
+            SimulateConfig(
+                risk_per_trade=0.5, tp_mode="none", commission_type="fixed", commission=0
+            ),
+            SimulateConfig(
+                risk_per_trade=1.0, tp_mode="none", commission_type="fixed", commission=0
+            ),
+            SimulateConfig(
+                risk_per_trade=2.0, tp_mode="none", commission_type="fixed", commission=0
+            ),
         ]
         reports = run_batch(strat, self._data(), configs, max_workers=1)
         assert len(reports) == 3
@@ -1732,3 +1748,1155 @@ class TestSlHistory:
         box = boxes[0]
         # TP shown on the box must be TP2 (110) not TP1 (105)
         assert box.take_profit == pytest.approx(110.0)
+
+# ===========================================================================
+# 17. SimulationStepper — step-driven engine (v1.0.0)
+# ===========================================================================
+
+def _random_walk_df(
+    n: int, seed: int, start: float = 100.0, start_ts: int = _BASE_TS
+) -> pd.DataFrame:
+    """Deterministic OHLCV random walk — busy enough to hit every close path."""
+    rng = np.random.default_rng(seed)
+    closes = start * np.cumprod(1.0 + rng.normal(0.0005, 0.01, n))
+    opens = np.concatenate([[start], closes[:-1]])
+    wick = np.abs(rng.normal(0.0, 0.004, n)) * closes
+    return pd.DataFrame({
+        "timestamp": [start_ts + i * _1H_MS for i in range(n)],
+        "open":      opens,
+        "high":      np.maximum(opens, closes) + wick,
+        "low":       np.minimum(opens, closes) - wick,
+        "close":     closes,
+        "volume":    np.full(n, 1000.0),
+    })
+
+
+def _walk_signal(df, i, direction, sl_pct=0.02, tp_pct=None, risk_multiplier=1.0) -> Signal:
+    entry = float(df.iloc[i]["close"])
+    f = -1.0 if direction == "long" else 1.0
+    tp = entry * (1 - f * tp_pct) if tp_pct is not None else None
+    return Signal(
+        direction=direction, entry_price=entry, stop_loss=entry * (1 + f * sl_pct),
+        take_profit=tp, timestamp=int(df.iloc[i]["timestamp"]), candle_index=i,
+        timeframe="1h", risk_multiplier=risk_multiplier,
+    )
+
+
+def _drive_stepper(strategy_result, config, **stepper_kwargs):
+    """Drive a SimulationStepper by hand over the full frame — the step-driven
+    counterpart of ``Simulate.run()`` — and return ``(stepper, report)``."""
+    df = strategy_result.data[config.primary_timeframe]
+    sigs_by_idx: dict[int, list] = {}
+    for s in strategy_result.signals:
+        sigs_by_idx.setdefault(s.candle_index, []).append(s)
+    exits_by_idx: dict[int, list] = {}
+    for e in strategy_result.exit_signals:
+        exits_by_idx.setdefault(e.candle_index, []).append(e)
+
+    stepper = SimulationStepper(config, **stepper_kwargs)
+    for i, row in enumerate(df.itertuples(index=False)):
+        stepper.step(
+            {
+                "timestamp": row.timestamp,
+                "open": row.open,
+                "high": row.high,
+                "low": row.low,
+                "close": row.close,
+                "volume": row.volume,   # extra key — must be ignored
+            },
+            sigs_by_idx.get(i, []),
+            exits_by_idx.get(i, []),
+        )
+    stepper.finalize()
+    return stepper, stepper.build_report()
+
+
+def _report_blob(report) -> str:
+    """Full-precision serialisation of everything the engine computes."""
+    trades = repr([asdict(t) for t in report.closed_trades])
+    return trades + "|" + repr(report.balance_history)
+
+
+class _TableStrategy(BaseStrategy):
+    """Replays a pre-built signal/exit table (for run_multi comparisons)."""
+
+    primary_timeframe = "1h"
+    warmup_period = 0
+
+    def __init__(self, signals, exits=None):
+        self._sig_table: dict[int, list] = {}
+        for s in signals:
+            self._sig_table.setdefault(s.candle_index, []).append(s)
+        self._exit_table: dict[int, list] = {}
+        for e in exits or []:
+            self._exit_table.setdefault(e.candle_index, []).append(e)
+
+    def prepare_indicators(self, data):
+        return data
+
+    def setup(self, data):
+        pass
+
+    def generate_signals(self, candle_index, data):
+        return list(self._sig_table.get(candle_index, []))
+
+    def detect_exit_signals(self, candle_index, data):
+        return list(self._exit_table.get(candle_index, []))
+
+
+class TestStepBatchParity:
+    """ core requirement: driving the stepper candle-by-candle is
+    byte-identical to the batch path (Simulate.run) on recorded data."""
+
+    _NAMES = [
+        "tp_signal", "fixed_rr", "multi_rr", "multi_rr_fractions",
+        "multi_rr_remainder", "trailing", "risk_free", "force_close",
+        "end_of_data", "metatrader", "fixed_lot_exchange", "fixed_amount",
+        "compound", "limits", "risk_multiplier",
+    ]
+
+    def _scenario(self, name: str):
+        df = _random_walk_df(300, seed=7)
+        mixed = [_walk_signal(df, i, "long" if i % 2 else "short", 0.02, 0.05)
+                 for i in range(10, 290, 23)]
+        no_tp = [_walk_signal(df, i, "long" if i % 3 else "short", 0.015)
+                 for i in range(10, 290, 17)]
+        base = dict(symbol="btcusdt", show_chart=False, report_mode="none")
+
+        if name == "tp_signal":
+            return _make_result(mixed, df), SimulateConfig(**base, tp_mode="signal")
+        if name == "fixed_rr":
+            return _make_result(no_tp, df), SimulateConfig(**base, tp_mode="fixed_rr", tp_rr=2.0)
+        if name == "multi_rr":
+            return _make_result(no_tp, df), SimulateConfig(
+                **base, tp_mode="multi_rr", tp_levels=[1, 2, 3])
+        if name == "multi_rr_fractions":
+            return _make_result(no_tp, df), SimulateConfig(
+                **base, tp_mode="multi_rr", tp_levels=[1, 2, 3],
+                tp_level_close_fractions=[0.4, 0.3, 0.3])
+        if name == "multi_rr_remainder":
+            return _make_result(no_tp, df), SimulateConfig(
+                **base, tp_mode="multi_rr", tp_levels=[1, 2],
+                tp_level_close_fractions=[0.3, 0.3])
+        if name == "trailing":
+            return _make_result(no_tp, df), SimulateConfig(
+                **base, tp_mode="none", sl_mode="trailing", trailing_sl_percent=1.5)
+        if name == "risk_free":
+            return _make_result(mixed, df), SimulateConfig(
+                **base, tp_mode="signal", risk_free_enabled=True, risk_free_at_rr=1.0)
+        if name == "force_close":
+            exits = [ExitSignal(reason="flip", exit_price=None,
+                                timestamp=int(df.iloc[i]["timestamp"]), candle_index=i)
+                     for i in range(20, 290, 41)]
+            exits += [ExitSignal(reason="flip_px",
+                                 exit_price=float(df.iloc[i]["close"]) * 0.999,
+                                 timestamp=int(df.iloc[i]["timestamp"]), candle_index=i)
+                      for i in range(35, 290, 57)]
+            exits.sort(key=lambda e: e.candle_index)
+            return _make_result(mixed, df, exits), SimulateConfig(
+                **base, tp_mode="none", force_close_on_exit_signal=True)
+        if name == "end_of_data":
+            sigs = [_walk_signal(df, 295, "long", 0.10), _walk_signal(df, 296, "short", 0.10)]
+            return _make_result(sigs, df), SimulateConfig(
+                **base, tp_mode="none", max_positions=2,
+                max_long_positions=2, max_short_positions=2)
+        if name == "metatrader":
+            fx = _random_walk_df(300, seed=11, start=1.10)
+            fx_sigs = [_walk_signal(fx, i, "long" if i % 2 else "short", 0.005, 0.01)
+                       for i in range(10, 290, 19)]
+            return _make_result(fx_sigs, fx), SimulateConfig(
+                symbol="eurusd", show_chart=False, report_mode="none",
+                exchange_type=EXCHANGE_TYPE_METATRADER, tp_mode="signal",
+                commission_type="per_lot", commission=7.0)
+        if name == "fixed_lot_exchange":
+            return _make_result(mixed, df), SimulateConfig(
+                **base, position_sizing="fixed_lot", fixed_lot=0.05,
+                tp_mode="signal", leverage=5)
+        if name == "fixed_amount":
+            return _make_result(mixed, df), SimulateConfig(
+                **base, position_sizing="fixed_amount", fixed_amount=150.0, tp_mode="signal")
+        if name == "compound":
+            return _make_result(mixed, df), SimulateConfig(
+                **base, compound=True, leverage=10, risk_per_trade=2.0,
+                tp_mode="signal", spread=0.05, commission=0.0004)
+        if name == "limits":
+            dense = [_walk_signal(df, i, "long" if i % 2 else "short", 0.03, 0.06)
+                     for i in range(10, 290, 5)]
+            return _make_result(dense, df), SimulateConfig(
+                **base, tp_mode="signal", max_positions=3,
+                max_long_positions=2, max_short_positions=2)
+        if name == "risk_multiplier":
+            halves = [_walk_signal(df, i, "long", 0.02, 0.04, risk_multiplier=0.5)
+                      for i in range(15, 280, 37)]
+            return _make_result(halves, df), SimulateConfig(**base, tp_mode="signal")
+        raise AssertionError(f"unknown scenario {name}")
+
+    @pytest.mark.parametrize("name", _NAMES)
+    def test_step_equals_batch(self, name):
+        strategy_result, config = self._scenario(name)
+        batch = Simulate(config).run(strategy_result)
+        _, stepped = _drive_stepper(strategy_result, config)
+
+        assert len(batch.closed_trades) > 0            # scenario must not be vacuous
+        assert _report_blob(stepped) == _report_blob(batch)
+        assert repr(stepped.final_balance) == repr(batch.final_balance)
+
+    def test_step_drive_does_not_mutate_inputs(self):
+        strategy_result, config = self._scenario("multi_rr_fractions")
+        df_before = strategy_result.data["1h"].copy(deep=True)
+        signals_before = list(strategy_result.signals)
+        _drive_stepper(strategy_result, config)
+        pd.testing.assert_frame_equal(strategy_result.data["1h"], df_before)
+        assert strategy_result.signals == signals_before
+
+
+class TestSimulationStepperUnit:
+    """Behaviour of the stepper's own surface: step returns, finalize,
+    snapshots, initial state, candle-mapping handling."""
+
+    def _cfg(self, **over):
+        base = dict(
+            initial_balance=10_000, leverage=1, spread=0.0,
+            commission=0.0, commission_type="fixed", risk_per_trade=1.0,
+            symbol="btcusdt", primary_timeframe="1h",
+            show_chart=False, report_mode="none",
+        )
+        base.update(over)
+        return SimulateConfig(**base)
+
+    def _long(self, df, i=0, sl=95.0, tp=None):
+        return Signal(
+            direction="long", entry_price=float(df.iloc[i]["close"]), stop_loss=sl,
+            take_profit=tp, timestamp=int(df.iloc[i]["timestamp"]),
+            candle_index=i, timeframe="1h",
+        )
+
+    @staticmethod
+    def _candle(df, i) -> dict:
+        row = df.iloc[i]
+        return {
+            "timestamp": int(row["timestamp"]),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+        }
+
+    def test_step_returns_trades_closed_this_candle(self):
+        # entry 100, TP 110 — high crosses 110 on candle 2 (111.5)
+        df = _make_ohlcv([100, 104, 111, 108])
+        stepper = SimulationStepper(self._cfg(tp_mode="signal"))
+
+        assert stepper.step(self._candle(df, 0), [self._long(df, tp=110.0)]) == []
+        assert len(stepper.open_positions) == 1
+        assert stepper.step(self._candle(df, 1)) == []
+
+        closed = stepper.step(self._candle(df, 2))
+        assert len(closed) == 1
+        assert closed[0].close_reason == CLOSE_REASON_TP
+        assert closed[0] is stepper.closed_trades[-1]
+        assert stepper.open_positions == []
+
+    def test_step_returns_partial_slices(self):
+        # entry 100, sl 95 → tp1 105, tp2 110; fractions close half at each
+        df = _make_ohlcv([100, 106, 111, 108])
+        cfg = self._cfg(tp_mode="multi_rr", tp_levels=[1, 2],
+                        tp_level_close_fractions=[0.5, 0.5])
+        stepper = SimulationStepper(cfg)
+
+        stepper.step(self._candle(df, 0), [self._long(df)])
+        partial = stepper.step(self._candle(df, 1))
+        assert [t.close_reason for t in partial] == [CLOSE_REASON_TP_PARTIAL]
+        assert len(stepper.open_positions) == 1        # half still open
+
+        final = stepper.step(self._candle(df, 2))
+        assert [t.close_reason for t in final] == [CLOSE_REASON_TP]
+        assert final[0].trade_id == partial[0].trade_id
+        assert stepper.open_positions == []
+
+    def test_finalize_closes_open_at_last_stepped_close(self):
+        df = _make_ohlcv([100, 101, 102])
+        stepper = SimulationStepper(self._cfg(tp_mode="none"))
+        for i in range(3):
+            sigs = [self._long(df, 0, sl=90.0)] if i == 0 else []
+            assert stepper.step(self._candle(df, i), sigs) == []
+
+        eod = stepper.finalize()
+        assert [t.close_reason for t in eod] == [CLOSE_REASON_EOD]
+        assert eod[0].exit_price == pytest.approx(102.0)
+        assert eod[0].close_time == int(df.iloc[-1]["timestamp"])
+        assert stepper.open_positions == []
+        assert stepper.finalized
+
+    def test_finalize_idempotent_and_empty_stepper(self):
+        empty = SimulationStepper(self._cfg())
+        assert empty.finalize() == []
+        assert empty.finalize() == []
+        assert empty.finalized
+
+        df = _make_ohlcv([100, 101])
+        stepper = SimulationStepper(self._cfg(tp_mode="none"))
+        stepper.step(self._candle(df, 0), [self._long(df, 0, sl=90.0)])
+        stepper.step(self._candle(df, 1))
+        assert len(stepper.finalize()) == 1
+        assert stepper.finalize() == []                # second call: no-op
+        assert len(stepper.closed_trades) == 1
+
+    def test_step_after_finalize_raises(self):
+        df = _make_ohlcv([100, 101])
+        stepper = SimulationStepper(self._cfg())
+        stepper.step(self._candle(df, 0))
+        stepper.finalize()
+        with pytest.raises(RuntimeError):
+            stepper.step(self._candle(df, 1))
+
+    def test_build_report_is_a_frozen_midrun_snapshot(self):
+        df = _make_ohlcv([100, 101, 102, 103])
+        stepper = SimulationStepper(self._cfg(tp_mode="none"))
+        stepper.step(self._candle(df, 0), [self._long(df, 0, sl=90.0)])
+        stepper.step(self._candle(df, 1))
+
+        snap = stepper.build_report()
+        assert len(snap.open_at_end) == 1              # live position visible
+        assert snap.open_at_end[0]["trade_id"] == 0
+        assert snap.closed_trades == []
+        assert len(snap.balance_history) == 2
+        assert snap.final_balance == snap.balance_history[-1]["equity"]
+
+        stepper.step(self._candle(df, 2))
+        stepper.step(self._candle(df, 3))
+        stepper.finalize()
+        # the earlier snapshot must not have grown
+        assert len(snap.balance_history) == 2
+        assert snap.closed_trades == []
+
+        final = stepper.build_report()
+        assert len(final.closed_trades) == 1
+        assert final.open_at_end == []
+
+    def test_initial_wallet_and_trade_id(self):
+        df = _make_ohlcv([100, 101])
+        stepper = SimulationStepper(
+            self._cfg(tp_mode="none"), initial_wallet=5_000.0, initial_trade_id=100)
+        assert stepper.wallet == pytest.approx(5_000.0)
+        stepper.step(self._candle(df, 0), [self._long(df, 0, sl=90.0)])
+        stepper.step(self._candle(df, 1))
+        eod = stepper.finalize()
+        assert eod[0].trade_id == 100
+        assert stepper.trade_id_seq == 101
+
+    def test_record_balance_history_off(self):
+        df = _make_ohlcv([100, 101, 102])
+        stepper = SimulationStepper(self._cfg(), record_balance_history=False)
+        for i in range(3):
+            stepper.step(self._candle(df, i))
+        assert stepper.balance_history == []
+        assert stepper.build_report().final_balance == pytest.approx(10_000.0)
+
+    def test_candle_mapping_untouched_and_extra_keys_ignored(self):
+        df = _make_ohlcv([100, 101])
+        candle = self._candle(df, 0)
+        candle["volume"] = 1234.5
+        candle["closed"] = True                        # broker-stream flag
+        before = dict(candle)
+        stepper = SimulationStepper(self._cfg())
+        stepper.step(candle, [self._long(df, 0, sl=90.0)])
+        assert candle == before
+
+    def test_missing_candle_key_raises(self):
+        stepper = SimulationStepper(self._cfg())
+        with pytest.raises(KeyError):
+            stepper.step({"timestamp": _BASE_TS, "open": 1.0, "high": 1.0, "low": 1.0})
+
+
+class TestRunMultiOnStepper:
+    """run_multi now drives one SimulationStepper per pair (v1.0.0)."""
+
+    def _cfg(self, **over):
+        base = dict(
+            initial_balance=10_000, spread=0.0, commission=0.0,
+            commission_type="fixed", risk_per_trade=1.0,
+            show_chart=False, report_mode="none",
+        )
+        base.update(over)
+        return SimulateConfig(**base)
+
+    def test_single_pair_run_multi_matches_simulate(self):
+        """With one pair, run_multi must equal the single-pair engine
+        trade-for-trade (the v0.7.4 sl_history entry state included)."""
+        df = _random_walk_df(200, seed=31)
+        sigs = [_walk_signal(df, i, "long" if i % 2 else "short", 0.02)
+                for i in range(10, 190, 13)]
+        cfg = self._cfg(symbol="btcusdt", tp_mode="multi_rr", tp_levels=[1, 2],
+                        tp_level_close_fractions=[0.5, 0.5])
+        strat = _TableStrategy(sigs)
+
+        single = Simulate(cfg).run(strat.run({"1h": df}, mode=StrategyMode.BACKTEST))
+        multi = run_multi([(strat, {"1h": df}, cfg)], max_workers=1)
+
+        assert len(multi.closed_trades) > 0
+        assert [asdict(t) for t in multi.closed_trades] == \
+               [asdict(t) for t in single.closed_trades]
+        assert multi.balance_history == single.balance_history
+
+    def test_run_multi_trades_record_entry_sl_state(self):
+        """Unification fix: portfolio trades now carry the entry-state
+        sl_history record, like single-pair trades (v0.7.4)."""
+        df = _random_walk_df(150, seed=32)
+        sigs = [_walk_signal(df, i, "long", 0.02) for i in range(10, 140, 17)]
+        cfg = self._cfg(symbol="btcusdt", tp_mode="multi_rr", tp_levels=[1, 2, 3])
+        report = run_multi([(_TableStrategy(sigs), {"1h": df}, cfg)], max_workers=1)
+
+        assert len(report.closed_trades) > 0
+        for t in report.closed_trades:
+            assert len(t.sl_history) >= 1
+            first = t.sl_history[0]
+            assert first["time"] == t.open_time
+            assert first["sl"] == pytest.approx(t.initial_stop_loss)
+
+    def test_two_pair_shared_wallet_and_trade_ids(self):
+        df_a = _random_walk_df(150, seed=33)
+        df_b = _random_walk_df(150, seed=34, start=50.0,
+                               start_ts=_BASE_TS + 20 * _1H_MS)  # offset timeline
+        sigs_a = [_walk_signal(df_a, i, "long", 0.02, 0.04) for i in range(10, 140, 11)]
+        sigs_b = [_walk_signal(df_b, i, "short", 0.02, 0.04) for i in range(10, 140, 13)]
+        report = run_multi([
+            (_TableStrategy(sigs_a), {"1h": df_a}, self._cfg(symbol="aaausdt")),
+            (_TableStrategy(sigs_b), {"1h": df_b}, self._cfg(symbol="bbbusdt")),
+        ], max_workers=1)
+
+        trades = report.closed_trades
+        assert {t.symbol for t in trades} == {"aaausdt", "bbbusdt"}
+        # one shared id sequence across pairs: ids are contiguous from 0
+        ids = {t.trade_id for t in trades}
+        assert ids == set(range(len(ids)))
+        # balance history covers the union timeline of both pairs
+        history_ts = [h["timestamp"] for h in report.balance_history]
+        union_ts = sorted(set(df_a["timestamp"]) | set(df_b["timestamp"]))
+        assert history_ts == union_ts
+
+
+# ===========================================================================
+# v1.0.0 — LiveSimulation (seed / step / window / display)
+# ===========================================================================
+
+
+def _df_rows(df: pd.DataFrame) -> list[dict]:
+    """DataFrame → library-standard candle dicts (broker feed shape)."""
+    return [
+        {
+            "timestamp": int(r.timestamp), "open": float(r.open),
+            "high": float(r.high), "low": float(r.low),
+            "close": float(r.close), "volume": float(r.volume),
+        }
+        for r in df.itertuples(index=False)
+    ]
+
+
+def _flat_rows(n: int, price: float = 100.0, start_ts: int = _BASE_TS) -> list[dict]:
+    return [
+        {
+            "timestamp": start_ts + i * _1H_MS, "open": price,
+            "high": price + 0.5, "low": price - 0.5,
+            "close": price, "volume": 10.0,
+        }
+        for i in range(n)
+    ]
+
+
+def _candle(i: int, o: float, h: float, low: float, c: float,
+            start_ts: int = _BASE_TS) -> dict:
+    return {"timestamp": start_ts + i * _1H_MS, "open": o, "high": h,
+            "low": low, "close": c, "volume": 10.0}
+
+
+class _FakeStream:
+    def __init__(self):
+        self._alive = True
+
+    @property
+    def alive(self):
+        return self._alive
+
+    def stop(self, timeout: float = 5.0):
+        self._alive = False
+
+
+class _FakeLiveBroker:
+    """Market-data-only fake broker: recorded fetches + manual stream push."""
+
+    def __init__(self, rows: list[dict]):
+        self.rows = rows
+        self.calls: list[tuple] = []
+        self.on_candle = None
+        self.stream_args: tuple | None = None
+        self.streams: list[_FakeStream] = []
+
+    def fetch_last_candles(self, symbol, timeframe, count):
+        self.calls.append(("last", symbol, timeframe, count))
+        return [dict(r) for r in self.rows[-count:]]
+
+    def fetch_candles(self, symbol, timeframe, start_ms, end_ms):
+        self.calls.append(("range", symbol, timeframe, start_ms, end_ms))
+        return [dict(r) for r in self.rows if start_ms <= r["timestamp"] <= end_ms]
+
+    def stream_candles(self, symbol, timeframe, on_candle, *, closed_only=True):
+        self.on_candle = on_candle
+        self.stream_args = (symbol, timeframe, closed_only)
+        stream = _FakeStream()
+        self.streams.append(stream)
+        return stream
+
+    def push(self, candle: dict, closed: bool = True):
+        self.on_candle({**candle, "closed": closed})
+
+
+class _LiveSMAStrategy(BaseStrategy):
+    """Windowed SMA(3) column + deterministic signal cadence — exact under
+    the tail recompute, so live stepping must equal the batch run."""
+
+    primary_timeframe = "1h"
+    warmup_period = 5
+
+    def prepare_indicators(self, data):
+        df = data[self.primary_timeframe].copy()
+        df["_sma"] = df["close"].rolling(3).mean()
+        data[self.primary_timeframe] = df
+        return data
+
+    def setup(self, data):
+        pass
+
+    def generate_signals(self, candle_index, data):
+        df = data[self.primary_timeframe]
+        row = df.iloc[candle_index]
+        if candle_index % 7 == 0 and not pd.isna(row["_sma"]):
+            entry = float(row["close"])
+            return [Signal(
+                direction="long", entry_price=entry, stop_loss=entry * 0.98,
+                take_profit=entry * 1.04, timestamp=int(row["timestamp"]),
+                candle_index=candle_index, timeframe="1h",
+            )]
+        return []
+
+
+class _PlanStrategy(BaseStrategy):
+    """Signals scripted by **timestamp** (stable under window trimming)."""
+
+    primary_timeframe = "1h"
+    warmup_period = 0
+
+    def __init__(self, plan: dict[int, list[dict]]):
+        self._plan = plan
+
+    def prepare_indicators(self, data):
+        return data
+
+    def setup(self, data):
+        pass
+
+    def generate_signals(self, candle_index, data):
+        df = data[self.primary_timeframe]
+        ts = int(df.iloc[candle_index]["timestamp"])
+        out = []
+        for spec in self._plan.get(ts, []):
+            out.append(Signal(
+                direction=spec.get("direction", "long"),
+                entry_price=spec["entry"], stop_loss=spec["sl"],
+                take_profit=spec.get("tp"), timestamp=ts,
+                candle_index=candle_index, timeframe="1h",
+            ))
+        return out
+
+
+def _headless_cfg(**kw) -> SimulateConfig:
+    base = dict(symbol="btcusdt", show_chart=False, report_mode="none",
+                commission=0.0, spread=0.0)
+    base.update(kw)
+    return SimulateConfig(**base)
+
+
+def _seeded_live(rows, seed_n, strategy, config, **live_kw):
+    """Build a fake broker over the first *seed_n* rows, seed, and return
+    ``(live, broker)`` — remaining rows are pushed by the caller."""
+    broker = _FakeLiveBroker(rows[:seed_n])
+    live = LiveSimulation(broker, strategy, config,
+                          display_candles=seed_n, **live_kw)
+    live.seed()
+    return live, broker
+
+
+class TestLiveSimulationSeed:
+
+    def test_seed_fetches_display_candles(self):
+        rows = _df_rows(_random_walk_df(60, seed=41))
+        broker = _FakeLiveBroker(rows)
+        live = LiveSimulation(broker, _LiveSMAStrategy(), _headless_cfg(),
+                              display_candles=40)
+        report = live.seed()
+        assert broker.calls == [("last", "btcusdt", "1h", 40)]
+        assert live.seeded
+        assert len(live.data["1h"]) == 40
+        assert live.last_report is report
+
+    def test_seed_fetches_from_display_start(self):
+        rows = _df_rows(_random_walk_df(60, seed=42))
+        start_ms = rows[10]["timestamp"]
+        broker = _FakeLiveBroker(rows)
+        live = LiveSimulation(broker, _LiveSMAStrategy(), _headless_cfg(),
+                              display_start=start_ms)
+        live.seed()
+        kind, symbol, tf, got_start, got_end = broker.calls[0]
+        assert (kind, symbol, tf, got_start) == ("range", "btcusdt", "1h", start_ms)
+        assert got_end >= rows[-1]["timestamp"]      # "until now"
+        assert int(live.data["1h"]["timestamp"].iloc[0]) == start_ms
+        assert len(live.data["1h"]) == 50
+
+    def test_seed_does_not_finalize_open_positions_carry(self):
+        rows = _flat_rows(10)
+        # Signal on the LAST seed candle, SL far away → still open at seed end.
+        plan = {rows[9]["timestamp"]: [{"entry": 100.0, "sl": 90.0}]}
+        cfg = _headless_cfg(tp_mode="none")
+        live, _ = _seeded_live(rows, 10, _PlanStrategy(plan), cfg)
+        report = live.last_report
+        assert not live.stepper.finalized
+        assert len(live.stepper.open_positions) == 1
+        assert len(report.open_at_end) == 1
+        assert report.total_trades == 0              # nothing force-closed
+
+    def test_seed_closed_trades_equal_batch_without_eod(self):
+        df = _random_walk_df(60, seed=43)
+        rows = _df_rows(df)
+        cfg = _headless_cfg()
+        live, _ = _seeded_live(rows, 60, _LiveSMAStrategy(), cfg)
+        batch = Simulate(cfg).run(_LiveSMAStrategy().run({"1h": df.copy()}))
+        batch_live_trades = [t for t in batch.closed_trades
+                             if t.close_reason != CLOSE_REASON_EOD]
+        assert len(live.stepper.closed_trades) > 0
+        assert (repr([asdict(t) for t in live.stepper.closed_trades])
+                == repr([asdict(t) for t in batch_live_trades]))
+
+    def test_seed_emits_no_events_and_no_report_callback(self):
+        rows = _df_rows(_random_walk_df(60, seed=44))
+        events, reports = [], []
+        live, _ = _seeded_live(rows, 60, _LiveSMAStrategy(), _headless_cfg(),
+                               on_event=events.append, on_report=reports.append)
+        assert len(live.stepper.closed_trades) > 0   # the seed did trade
+        assert events == []
+        assert reports == []
+
+    def test_seed_twice_and_unseeded_calls_raise(self):
+        rows = _flat_rows(10)
+        live, broker = _seeded_live(rows, 10, _PlanStrategy({}), _headless_cfg())
+        with pytest.raises(RuntimeError):
+            live.seed()
+
+        fresh = LiveSimulation(_FakeLiveBroker(rows), _PlanStrategy({}),
+                               _headless_cfg(), display_candles=10)
+        with pytest.raises(RuntimeError):
+            fresh.start()
+        with pytest.raises(RuntimeError):
+            fresh.process_closed_candle(_candle(10, 100, 101, 99, 100))
+        with pytest.raises(RuntimeError):
+            fresh.process_forming_candle(_candle(10, 100, 101, 99, 100))
+
+    def test_ctor_validation(self):
+        rows = _flat_rows(10)
+        broker = _FakeLiveBroker(rows)
+        strat = _PlanStrategy({})
+        cfg = _headless_cfg()
+        with pytest.raises(ValueError):     # neither seed input
+            LiveSimulation(broker, strat, cfg)
+        with pytest.raises(ValueError):     # both seed inputs
+            LiveSimulation(broker, strat, cfg,
+                           display_candles=10, display_start=_BASE_TS)
+        with pytest.raises(ValueError):
+            LiveSimulation(broker, strat, cfg, display_candles=0)
+        with pytest.raises(ValueError):
+            LiveSimulation(broker, strat, cfg, display_candles=10,
+                           candle_count_limit=0)
+        with pytest.raises(ValueError):
+            LiveSimulation(broker, strat, cfg, display_candles=10,
+                           recompute_window=0)
+        with pytest.raises(ValueError):     # symbol required for the feed
+            LiveSimulation(broker, strat, _headless_cfg(symbol=""),
+                           display_candles=10)
+
+        class _FourHour(_PlanStrategy):
+            primary_timeframe = "4h"
+
+        with pytest.raises(ValueError):     # strategy TF must match config TF
+            LiveSimulation(broker, _FourHour({}), cfg, display_candles=10)
+
+    def test_seed_empty_fetch_raises(self):
+        live = LiveSimulation(_FakeLiveBroker([]), _PlanStrategy({}),
+                              _headless_cfg(), display_candles=10)
+        with pytest.raises(ValueError):
+            live.seed()
+
+
+class TestLiveSimulationStep:
+
+    def test_step_parity_with_batch(self):
+        """ core invariant: seed + live stepping equals the batch run
+        over the concatenated data (byte-identical trades + history)."""
+        df = _random_walk_df(70, seed=45)
+        rows = _df_rows(df)
+        cfg = _headless_cfg(commission=0.001, spread=0.05)
+        live, _ = _seeded_live(rows, 40, _LiveSMAStrategy(), cfg)
+        for row in rows[40:]:
+            live.process_closed_candle(row)
+
+        batch = Simulate(cfg).run(_LiveSMAStrategy().run({"1h": df.copy()}))
+        live.stepper.finalize()              # align end-of-data with batch
+        stepped = live.stepper.build_report()
+        assert len(batch.closed_trades) > 0
+        assert _report_blob(stepped) == _report_blob(batch)
+        assert repr(stepped.final_balance) == repr(batch.final_balance)
+
+    def test_duplicate_and_stale_candles_skipped(self):
+        rows = _df_rows(_random_walk_df(30, seed=46))
+        live, _ = _seeded_live(rows, 20, _LiveSMAStrategy(), _headless_cfg())
+        n_bh = len(live.stepper.balance_history)
+        n_rows = len(live.data["1h"])
+        assert live.process_closed_candle(rows[19]) == []    # duplicate of seed end
+        assert live.process_closed_candle(rows[5]) == []     # stale
+        assert len(live.stepper.balance_history) == n_bh
+        assert len(live.data["1h"]) == n_rows
+
+    def test_signal_and_open_events(self):
+        rows = _flat_rows(5)
+        entry_c = _candle(5, 100, 100.5, 99.5, 100)
+        plan = {entry_c["timestamp"]: [{"entry": 100.0, "sl": 99.0, "tp": 104.0}]}
+        events = []
+        live, _ = _seeded_live(rows, 5, _PlanStrategy(plan), _headless_cfg(),
+                               on_event=events.append)
+        live.process_closed_candle(entry_c)
+        assert [e["type"] for e in events] == [EVENT_SIGNAL, EVENT_OPEN]
+        sig_ev, open_ev = events
+        assert sig_ev["symbol"] == "btcusdt"
+        assert isinstance(sig_ev["signal"], Signal)
+        assert open_ev["trade_id"] == 0
+        assert open_ev["direction"] == "long"
+        assert open_ev["entry_price"] == pytest.approx(100.0)
+        assert open_ev["stop_loss"] == pytest.approx(99.0)
+        assert open_ev["next_tp"] == pytest.approx(104.0)
+        assert open_ev["size"] > 0 and open_ev["risk_amount"] > 0
+
+    def test_close_event_and_slice_cleanup(self):
+        rows = _flat_rows(5)
+        entry_c = _candle(5, 100, 100.5, 99.5, 100)
+        sl_hit = _candle(6, 100, 100.2, 98.5, 99.2)      # low breaks SL 99
+        plan = {entry_c["timestamp"]: [{"entry": 100.0, "sl": 99.0, "tp": 104.0}]}
+        events = []
+        live, _ = _seeded_live(rows, 5, _PlanStrategy(plan), _headless_cfg(),
+                               on_event=events.append)
+        live.process_closed_candle(entry_c)
+        closed = live.process_closed_candle(sl_hit)
+        assert len(closed) == 1 and closed[0].close_reason == CLOSE_REASON_SL
+        close_ev = events[-1]
+        assert close_ev["type"] == EVENT_CLOSE
+        assert close_ev["trade_id"] == 0
+        assert close_ev["trade"] is closed[0]
+        assert live._slices == {} and live._sl_seen == {}   # cleaned up
+
+    def test_tp_level_and_ladder_sl_move_events(self):
+        rows = _flat_rows(3)
+        entry_c = _candle(3, 100, 100.5, 99.5, 100)
+        level1 = _candle(4, 100, 101.3, 99.6, 100.8)      # hits L1 = 101
+        level2 = _candle(5, 100.8, 102.5, 100.2, 101.5)   # hits L2 = 102
+        plan = {entry_c["timestamp"]: [{"entry": 100.0, "sl": 99.0}]}
+        cfg = _headless_cfg(tp_mode="multi_rr", tp_levels=[1.0, 2.0],
+                            tp_level_close_fractions=[0.5, 0.5])
+        events = []
+        live, _ = _seeded_live(rows, 3, _PlanStrategy(plan), cfg,
+                               on_event=events.append)
+        live.process_closed_candle(entry_c)
+
+        closed = live.process_closed_candle(level1)
+        assert len(closed) == 1
+        assert closed[0].close_reason == CLOSE_REASON_TP_PARTIAL
+        kinds = [e["type"] for e in events]
+        assert kinds == [EVENT_SIGNAL, EVENT_OPEN, EVENT_TP_LEVEL, EVENT_SL_MOVE]
+        tp_ev = events[2]
+        assert tp_ev["trade"] is closed[0] and tp_ev["levels_hit"] == 1
+        move_ev = events[3]
+        assert move_ev["old_sl"] == pytest.approx(99.0)
+        assert move_ev["new_sl"] == pytest.approx(100.0)   # ladder → entry
+        assert move_ev["next_tp"] == pytest.approx(102.0)
+
+        closed2 = live.process_closed_candle(level2)
+        assert len(closed2) == 1
+        assert events[-1]["type"] == EVENT_CLOSE           # nothing remains open
+        assert live.stepper.open_positions == []
+        assert live._slices == {}
+
+    def test_trailing_sl_move_events(self):
+        rows = _flat_rows(3)
+        entry_c = _candle(3, 100, 100.5, 99.5, 100)
+        # Tight rising candles: the 1% trail must stay below each candle's low.
+        up1 = _candle(4, 100, 100.9, 100.0, 100.85)
+        up2 = _candle(5, 100.85, 101.8, 100.8, 101.7)
+        plan = {entry_c["timestamp"]: [{"entry": 100.0, "sl": 99.0}]}
+        cfg = _headless_cfg(tp_mode="none", sl_mode="trailing",
+                            trailing_sl_percent=1.0)
+        events = []
+        live, _ = _seeded_live(rows, 3, _PlanStrategy(plan), cfg,
+                               on_event=events.append)
+        live.process_closed_candle(entry_c)
+        live.process_closed_candle(up1)
+        live.process_closed_candle(up2)
+        assert len(live.stepper.open_positions) == 1        # never stopped out
+        moves = [e for e in events if e["type"] == EVENT_SL_MOVE]
+        assert len(moves) == 2                              # one per candle, coalesced
+        assert moves[0]["old_sl"] == pytest.approx(99.0)
+        assert moves[0]["new_sl"] == pytest.approx(100.9 * 0.99)
+        assert moves[1]["old_sl"] == pytest.approx(100.9 * 0.99)
+        assert moves[1]["new_sl"] == pytest.approx(101.8 * 0.99)
+        assert moves[0]["next_tp"] is None                  # trailing has no TP
+
+    def test_on_report_called_each_closed_candle(self):
+        rows = _df_rows(_random_walk_df(30, seed=47))
+        reports = []
+        live, _ = _seeded_live(rows, 20, _LiveSMAStrategy(), _headless_cfg(),
+                               on_report=reports.append)
+        for row in rows[20:]:
+            live.process_closed_candle(row)
+        assert len(reports) == 10
+        assert live.last_report is reports[-1]
+        assert isinstance(reports[-1], SimulateReport)
+
+    def test_forming_candle_is_display_only(self):
+        rows = _flat_rows(5)
+        plan = {rows[4]["timestamp"]: [{"entry": 100.0, "sl": 90.0}]}
+        events = []
+        live, _ = _seeded_live(rows, 5, _PlanStrategy(plan),
+                               _headless_cfg(tp_mode="none"),
+                               on_event=events.append)
+        df_before = live.data["1h"].copy(deep=True)
+        n_bh = len(live.stepper.balance_history)
+        forming = _candle(5, 100, 108.0, 99.0, 107.0)      # would move everything
+        live.process_forming_candle(forming)
+        live.process_forming_candle({**forming, "close": 90.0})   # updated form
+        pd.testing.assert_frame_equal(live.data["1h"], df_before)
+        assert len(live.stepper.balance_history) == n_bh
+        assert len(live.stepper.open_positions) == 1       # untouched
+        assert events == []
+        live.process_forming_candle(rows[4])               # stale ts → no-op
+
+    def test_callback_exceptions_warn_not_raise(self):
+        rows = _flat_rows(5)
+        plan = {_flat_rows(6)[5]["timestamp"]: [{"entry": 100.0, "sl": 99.0}]}
+
+        def _boom(_):
+            raise RuntimeError("subscriber bug")
+
+        live, _ = _seeded_live(rows, 5, _PlanStrategy(plan),
+                               _headless_cfg(tp_mode="none"),
+                               on_event=_boom, on_report=_boom)
+        with pytest.warns(UserWarning, match="callback failed"):
+            live.process_closed_candle(_candle(5, 100, 100.5, 99.5, 100))
+        assert len(live.stepper.open_positions) == 1       # step still applied
+
+    def test_feed_routing_stop_and_error_tolerance(self):
+        rows = _df_rows(_random_walk_df(30, seed=48))
+        live, broker = _seeded_live(rows, 20, _LiveSMAStrategy(), _headless_cfg())
+        stream = live.start()
+        assert broker.stream_args == ("btcusdt", "1h", True)   # headless → closed_only
+        assert live.stream is stream
+
+        n_rows = len(live.data["1h"])
+        broker.push(rows[20], closed=True)
+        assert len(live.data["1h"]) == n_rows + 1
+        broker.push(rows[21], closed=False)                # forming → not appended
+        assert len(live.data["1h"]) == n_rows + 1
+        with pytest.warns(UserWarning, match="candle processing failed"):
+            broker.push({"timestamp": rows[21]["timestamp"]})   # broken candle
+
+        with pytest.raises(RuntimeError):
+            live.start()                                    # already running
+        live.stop()
+        assert not stream.alive and live.stream is None
+        live.stop()                                         # idempotent
+        assert live.start() is broker.streams[-1]           # restart allowed
+
+
+class TestLiveSimulationWindow:
+
+    def test_deque_bounded_and_engagement(self):
+        rows = _df_rows(_random_walk_df(40, seed=49))
+        live, _ = _seeded_live(rows, 15, _LiveSMAStrategy(), _headless_cfg(),
+                               candle_count_limit=20)
+        assert not live._window_engaged                     # 15 < 20 so far
+        for row in rows[15:40]:
+            live.process_closed_candle(row)
+        assert len(live._window) == 20
+        assert live._window_engaged
+        assert int(live._window[0]["timestamp"]) == rows[20]["timestamp"]
+
+    def test_windowed_report_baseline_is_equity_entering_window(self):
+        df = _random_walk_df(80, seed=50)
+        rows = _df_rows(df)
+        cfg = _headless_cfg()
+        live, _ = _seeded_live(rows, 40, _LiveSMAStrategy(), cfg,
+                               candle_count_limit=30)
+        for row in rows[40:]:
+            live.process_closed_candle(row)
+
+        # Independent expectation from the (parity-proven) batch history.
+        batch = Simulate(cfg).run(_LiveSMAStrategy().run({"1h": df.copy()}))
+        window_start = int(live._window[0]["timestamp"])
+        dropped = [h for h in batch.balance_history if h["timestamp"] < window_start]
+        expected_baseline = dropped[-1]["equity"]
+
+        report = live.last_report
+        assert report.initial_balance == pytest.approx(expected_baseline)
+        assert report.balance_history[0]["timestamp"] == window_start
+        assert len(report.balance_history) == 30
+        assert report.final_balance == pytest.approx(
+            batch.balance_history[-1]["equity"])
+        assert report.total_pnl == pytest.approx(
+            report.final_balance - expected_baseline)
+
+    def test_windowed_report_drops_out_of_window_trades(self):
+        df = _random_walk_df(80, seed=51)
+        rows = _df_rows(df)
+        cfg = _headless_cfg()
+        live, _ = _seeded_live(rows, 40, _LiveSMAStrategy(), cfg,
+                               candle_count_limit=25)
+        for row in rows[40:]:
+            live.process_closed_candle(row)
+
+        batch = Simulate(cfg).run(_LiveSMAStrategy().run({"1h": df.copy()}))
+        window_start = int(live._window[0]["timestamp"])
+        expected = [t for t in batch.closed_trades
+                    if t.close_reason != CLOSE_REASON_EOD
+                    and t.close_time >= window_start]
+        dropped = [t for t in batch.closed_trades
+                   if t.close_reason != CLOSE_REASON_EOD
+                   and t.close_time < window_start]
+        assert dropped, "scenario must actually drop a trade"
+        assert (repr([asdict(t) for t in live.last_report.closed_trades])
+                == repr([asdict(t) for t in expected]))
+
+    def test_trade_spanning_window_start_kept_until_close_leaves(self):
+        rows = _flat_rows(4)
+        entry_c = _candle(4, 100, 100.5, 99.5, 100)        # open at ts4
+        plan = {entry_c["timestamp"]: [{"entry": 100.0, "sl": 90.0}]}
+        cfg = _headless_cfg(tp_mode="none")
+        live, _ = _seeded_live(rows, 4, _PlanStrategy(plan), cfg,
+                               candle_count_limit=4)
+        live.process_closed_candle(entry_c)
+        live.process_closed_candle(_candle(5, 100, 100.5, 99.5, 100))
+        live.process_closed_candle(_candle(6, 100, 100.5, 99.5, 100))
+        closed = live.process_closed_candle(_candle(7, 100, 100.2, 89.0, 95.0))
+        assert len(closed) == 1                            # SL hit at ts7
+
+        # Window now [ts4..ts7]: open_time ts4 is inside; trade kept.
+        assert len(live.last_report.closed_trades) == 1
+        live.process_closed_candle(_candle(8, 95, 95.5, 94.5, 95))
+        # Window [ts5..ts8]: opened before the window but closed inside → kept.
+        assert len(live.last_report.closed_trades) == 1
+        for i in (9, 10, 11):
+            live.process_closed_candle(_candle(i, 95, 95.5, 94.5, 95))
+        # Window [ts8..ts11]: close ts7 < ts8 → whole lifetime left → dropped.
+        assert live.last_report.closed_trades == []
+        assert live.last_report.total_trades == 0
+
+    def test_frame_and_state_lists_stay_bounded(self):
+        rows = _df_rows(_random_walk_df(120, seed=52))
+        live, _ = _seeded_live(rows, 60, _LiveSMAStrategy(),
+                               _headless_cfg(), candle_count_limit=25,
+                               recompute_window=30)
+        for row in rows[60:]:
+            live.process_closed_candle(row)
+        keep = max(25, 30, _LiveSMAStrategy.warmup_period + 1)
+        assert len(live.data["1h"]) == keep                # trimmed master frame
+        assert len(live.stepper.balance_history) == 25
+        window_start = int(live._window[0]["timestamp"])
+        assert all(t.close_time >= window_start
+                   for t in live.stepper.closed_trades)
+
+    def test_no_window_nothing_trimmed(self):
+        rows = _df_rows(_random_walk_df(70, seed=53))
+        live, _ = _seeded_live(rows, 40, _LiveSMAStrategy(), _headless_cfg())
+        for row in rows[40:]:
+            live.process_closed_candle(row)
+        assert live._window is None
+        assert len(live.data["1h"]) == 70
+        assert len(live.stepper.balance_history) == 70
+        assert live.last_report.initial_balance == pytest.approx(10_000.0)
+
+    def test_window_engages_during_seed(self):
+        df = _random_walk_df(50, seed=54)
+        rows = _df_rows(df)
+        cfg = _headless_cfg()
+        live, _ = _seeded_live(rows, 50, _LiveSMAStrategy(), cfg,
+                               candle_count_limit=30)
+        report = live.last_report
+        assert live._window_engaged
+        assert len(report.balance_history) == 30
+        batch = Simulate(cfg).run(_LiveSMAStrategy().run({"1h": df.copy()}))
+        window_start = int(live._window[0]["timestamp"])
+        dropped = [h for h in batch.balance_history if h["timestamp"] < window_start]
+        assert report.initial_balance == pytest.approx(dropped[-1]["equity"])
+
+
+class TestLiveSimulationDisplay:
+    """Chart / report production — real servers, browser never opened."""
+
+    @pytest.fixture(autouse=True)
+    def _no_keep_alive(self, monkeypatch):
+        """Never register the real atexit blocker inside pytest."""
+        import AlgoTradeKit.simulate._live as live_mod
+        calls = []
+        monkeypatch.setattr(live_mod, "_register_keep_alive",
+                            lambda: calls.append(True))
+        self._keep_alive_calls = calls
+
+    def _display_live(self, rows, seed_n, strategy, cfg, **live_kw):
+        broker = _FakeLiveBroker(rows[:seed_n])
+        live = LiveSimulation(broker, strategy, cfg, display_candles=seed_n,
+                              open_browser=False, **live_kw)
+        live.seed()
+        return live, broker
+
+    def test_chart_seed_state_live_position_and_boxes(self):
+        from AlgoTradeKit.visual.models import LivePosition, PositionBox
+
+        rows = _flat_rows(12)
+        # One trade fully closed in the seed + one still open at seed end.
+        plan = {
+            rows[4]["timestamp"]: [{"entry": 100.0, "sl": 99.0, "tp": 100.4}],
+            rows[9]["timestamp"]: [{"entry": 100.0, "sl": 90.0}],
+        }
+        cfg = _headless_cfg(tp_mode="signal", show_chart=True)
+        live, _ = self._display_live(rows, 12, _PlanStrategy(plan), cfg,
+                                     candle_count_limit=200)
+        try:
+            chart = live.chart
+            assert chart is not None
+            assert chart._candle_count_limit == 200
+            lives = [d for d in chart._drawings if isinstance(d, LivePosition)]
+            boxes = [d for d in chart._drawings if isinstance(d, PositionBox)]
+            assert len(lives) == 1                     # the open trade
+            assert len(boxes) == 1                     # the closed seed trade
+            assert lives[0].stop_loss == pytest.approx(90.0)
+            assert self._keep_alive_calls == [True]
+        finally:
+            live.stop()
+            chart.stop()
+
+    def test_live_close_swaps_live_drawing_for_final_box(self):
+        from AlgoTradeKit.visual.models import LivePosition, PositionBox, TrendLine
+
+        rows = _flat_rows(3)
+        entry_c = _candle(3, 100, 100.5, 99.5, 100)
+        level1 = _candle(4, 100, 101.3, 99.6, 100.8)
+        level2 = _candle(5, 100.8, 102.5, 100.2, 101.5)
+        plan = {entry_c["timestamp"]: [{"entry": 100.0, "sl": 99.0}]}
+        cfg = _headless_cfg(tp_mode="multi_rr", tp_levels=[1.0, 2.0],
+                            tp_level_close_fractions=[0.5, 0.5], show_chart=True)
+        live, _ = self._display_live(rows, 3, _PlanStrategy(plan), cfg)
+        try:
+            chart = live.chart
+            live.process_closed_candle(entry_c)
+            lives = [d for d in chart._drawings if isinstance(d, LivePosition)]
+            assert len(lives) == 1
+            live.process_closed_candle(level1)         # partial: still live
+            lives = [d for d in chart._drawings if isinstance(d, LivePosition)]
+            assert len(lives) == 1
+            assert lives[0].stop_loss == pytest.approx(100.0)   # ladder move pushed
+            assert lives[0].next_tp == pytest.approx(102.0)
+
+            live.process_closed_candle(level2)         # full close
+            lives = [d for d in chart._drawings if isinstance(d, LivePosition)]
+            boxes = [d for d in chart._drawings if isinstance(d, PositionBox)]
+            segments = [d for d in chart._drawings if isinstance(d, TrendLine)]
+            assert lives == []                         # live drawing removed
+            assert len(boxes) == 1                     # final posbox
+            assert boxes[0].trade_id == 0
+            assert segments                            # dynamic SL/TP segments
+            # the streamed candles reached the chart too
+            assert chart._bars[-1]["time"] == level2["timestamp"] // 1000
+        finally:
+            live.stop()
+            chart.stop()
+
+    def test_report_webpage_push_updates_pending_payload(self):
+        rows = _df_rows(_random_walk_df(40, seed=55))
+        cfg = _headless_cfg(report_mode="webpage")
+        live, _ = self._display_live(rows, 30, _LiveSMAStrategy(), cfg)
+        try:
+            server = live.report_server
+            assert server is not None
+            seed_total = server._pending_data["summary"]["total_trades"]
+            for row in rows[30:]:
+                live.process_closed_candle(row)
+            new_total = server._pending_data["summary"]["total_trades"]
+            assert new_total == live.last_report.total_trades
+            assert new_total > seed_total
+            assert self._keep_alive_calls == [True]
+        finally:
+            live.stop()
+            server.stop()
+
+    def test_report_save_mode_writes_file_once_at_seed(self, tmp_path):
+        out = tmp_path / "live_report.html"
+        rows = _df_rows(_random_walk_df(30, seed=56))
+        cfg = _headless_cfg(report_mode="save", report_save_path=str(out))
+        live, _ = self._display_live(rows, 30, _LiveSMAStrategy(), cfg)
+        assert out.exists() and out.stat().st_size > 0
+        assert live.report_server is None              # save-only: no server
+        assert self._keep_alive_calls == []            # no browser UI
+
+    def test_chart_indicator_specs_loaded_at_seed(self):
+        rows = _df_rows(_random_walk_df(30, seed=57))
+        cfg = _headless_cfg(show_chart=True,
+                            chart_indicators=[{"kind": "ema", "period": 5}])
+        live, _ = self._display_live(rows, 30, _LiveSMAStrategy(), cfg)
+        try:
+            assert any("EMA" in ind.name for ind in live.chart._indicators)
+        finally:
+            live.stop()
+            live.chart.stop()
+
+    def test_headless_seed_registers_no_keep_alive(self):
+        rows = _df_rows(_random_walk_df(30, seed=58))
+        live, _ = self._display_live(rows, 30, _LiveSMAStrategy(),
+                                     _headless_cfg())
+        assert live.chart is None and live.report_server is None
+        assert self._keep_alive_calls == []
+
+    def test_draw_trade_group_equals_batch_rendering(self):
+        """The factored per-trade helper renders exactly what
+        add_simulation_positions renders for the same trades."""
+        from AlgoTradeKit.visual import Chart
+        from AlgoTradeKit.visual.indicator_renderer import (
+            add_simulation_positions,
+            draw_trade_group,
+        )
+
+        df = _random_walk_df(120, seed=59)
+        sigs = [_walk_signal(df, i, "long", 0.02) for i in range(10, 110, 20)]
+        cfg = _headless_cfg(tp_mode="multi_rr", tp_levels=[1.0, 2.0],
+                            tp_level_close_fractions=[0.5, 0.5])
+        report = Simulate(cfg).run(_make_result(sigs, df))
+        assert report.total_trades > 0
+
+        chart_batch, chart_live = Chart(), Chart()
+        add_simulation_positions(chart_batch, report, config=cfg)
+        groups: dict[int, list[dict]] = {}
+        for m in report.trade_markers:
+            groups.setdefault(m["trade_id"], []).append(m)
+        for markers in groups.values():
+            draw_trade_group(chart_live, markers, config=cfg)
+
+        def _no_ids(drawings):
+            out = []
+            for d in drawings:
+                payload = {k: v for k, v in d.to_dict().items() if k != "id"}
+                out.append(payload)
+            return out
+
+        assert _no_ids(chart_batch._drawings) == _no_ids(chart_live._drawings)

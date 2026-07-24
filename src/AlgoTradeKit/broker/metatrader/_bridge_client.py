@@ -9,19 +9,50 @@ one response, over a persistent socket.  Standard library only.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import socket
 import threading
+from pathlib import Path
 from typing import Any
 
 from .._errors import BrokerError, ConnectionFailed
 
-_SETUP_HINT = (
-    "Could not reach the MetaTrader bridge. On the VPS, start it inside the Wine "
-    "Python (headless, no GUI) with:\n"
-    "    xvfb-run wine python bridge_server.py --host 127.0.0.1 --port 18812 \\\n"
-    "        --login <LOGIN> --password <PASSWORD> --server <BROKER-SERVER>\n"
-    "See AlgoTradeKit/broker/metatrader/bridge_server.py for the full setup."
-)
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _diagnose_unreachable(host: str, port: int, exc: OSError) -> str:
+    """
+    Explain WHY the bridge is unreachable and name the exact MT5_WINE_SETUP.md
+    section that fixes it (decision: diagnose + guide + stop — no silent
+    fallback, no auto-start).
+    """
+    if host not in _LOCAL_HOSTS:
+        # Remote bridge — local wine/prefix checks are meaningless here.
+        return (
+            f"Could not reach the MetaTrader bridge at {host}:{port}. Check that "
+            "bridge_server.py is running on that machine — see MT5_WINE_SETUP.md Part G "
+            "(run bridge_server.py inside tmux) — and that the port is reachable from "
+            f"here (open or SSH-tunnelled). (underlying error: {exc})"
+        )
+    if shutil.which("wine") is None:
+        return (
+            "Wine is not installed — see MT5_WINE_SETUP.md Part A. (The MetaTrader "
+            f"bridge runs inside Wine, so nothing can be listening on {host}:{port}. "
+            f"underlying error: {exc})"
+        )
+    prefix = Path(os.environ.get("WINEPREFIX", "") or (Path.home() / ".mt5"))
+    if not prefix.exists():
+        return (
+            f"MT5 Wine prefix not found ({prefix}) — see MT5_WINE_SETUP.md Part B "
+            "(create the prefix), then Parts C-D (install the MT5 terminal and the "
+            f"Windows Python inside it). (underlying error: {exc})"
+        )
+    return (
+        "Bridge is not running — see MT5_WINE_SETUP.md Part G (run bridge_server.py "
+        f"inside tmux). Wine and the prefix look fine, but nothing answered on "
+        f"{host}:{port}. (underlying error: {exc})"
+    )
 
 
 class BridgeClient:
@@ -44,7 +75,7 @@ class BridgeClient:
         try:
             sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except OSError as exc:
-            raise ConnectionFailed(f"{_SETUP_HINT}\n\n(underlying error: {exc})") from exc
+            raise ConnectionFailed(_diagnose_unreachable(self.host, self.port, exc)) from exc
         sock.settimeout(self.timeout)
         self._sock = sock
         self._buf = b""

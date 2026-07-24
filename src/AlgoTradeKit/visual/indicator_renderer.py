@@ -38,16 +38,26 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from .models import RawIndicator
+# Segment colours + SL zone rule live in models since v1.0.0 (shared with
+# LivePosition); the pre-1.0 private names stay as aliases for this module.
+from .models import (
+    COLOR_NEXT_TP as _COLOR_NEXT_TP,
+)
+from .models import (
+    RawIndicator,
+)
+from .models import (
+    sl_zone_color as _sl_segment_color,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
-    from AlgoTradeKit.visual.chart import Chart
-    from AlgoTradeKit.indicator.rsi import RSI
-    from AlgoTradeKit.indicator.macd import MACD
-    from AlgoTradeKit.indicator.ichimoku import Ichimoku
     from AlgoTradeKit.indicator._base import _BaseIndicator
+    from AlgoTradeKit.indicator.ichimoku import Ichimoku
+    from AlgoTradeKit.indicator.macd import MACD
+    from AlgoTradeKit.indicator.rsi import RSI
     from AlgoTradeKit.simulate._report import SimulateReport
     from AlgoTradeKit.strategy._types import StrategyResult
+    from AlgoTradeKit.visual.chart import Chart
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +77,7 @@ def _to_seconds(ts_series: pd.Series) -> pd.Series:
 
 def _series_to_tv(
     series: pd.Series,
-    timestamps: "pd.Series | None" = None,
+    timestamps: pd.Series | None = None,
 ) -> list[dict]:
     """
     Convert a pandas Series to [{time: int_seconds, value: float}].
@@ -89,7 +99,7 @@ def _series_to_tv(
 def _series_to_hist(
     series: pd.Series,
     colors: pd.Series,
-    timestamps: "pd.Series | None" = None,
+    timestamps: pd.Series | None = None,
 ) -> list[dict]:
     """
     Convert histogram Series to [{time, value, color}].
@@ -108,7 +118,7 @@ def _series_to_hist(
     return result
 
 
-def _next_pane(chart: "Chart") -> int:
+def _next_pane(chart: Chart) -> int:
     """
     Return the next free sub-pane index (1+).
     Reads .pane from both RawIndicator payloads and IndicatorSeries objects.
@@ -125,7 +135,7 @@ def _next_pane(chart: "Chart") -> int:
     return p
 
 
-def _push(chart: "Chart", name: str, payload: dict) -> None:
+def _push(chart: Chart, name: str, payload: dict) -> None:
     """Append a RawIndicator to chart._indicators, initialising the list if needed."""
     if not hasattr(chart, "_indicators"):
         chart._indicators = []
@@ -137,12 +147,12 @@ def _push(chart: "Chart", name: str, payload: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def add_ma(
-    chart: "Chart",
-    ma_obj: "_BaseIndicator",
-    timestamps: "pd.Series | None" = None,
-    color: "str | None" = None,
+    chart: Chart,
+    ma_obj: _BaseIndicator,
+    timestamps: pd.Series | None = None,
+    color: str | None = None,
     line_width: int = 1,
-    title: "str | None" = None,
+    title: str | None = None,
 ) -> None:
     """
     Overlay any MA line (SMA, EMA, WMA, SMMA, DEMA, TEMA, HullMA, VWMA, VWAP)
@@ -200,9 +210,9 @@ def add_ma(
 
 
 def add_rsi(
-    chart: "Chart",
-    rsi: "RSI",
-    timestamps: "pd.Series | None" = None,
+    chart: Chart,
+    rsi: RSI,
+    timestamps: pd.Series | None = None,
 ) -> None:
     """
     Add RSI as a new oscillator sub-pane below the chart.
@@ -241,9 +251,9 @@ def add_rsi(
 
 
 def add_macd(
-    chart: "Chart",
-    macd: "MACD",
-    timestamps: "pd.Series | None" = None,
+    chart: Chart,
+    macd: MACD,
+    timestamps: pd.Series | None = None,
 ) -> None:
     """
     Add MACD as a new oscillator sub-pane below the chart.
@@ -295,9 +305,9 @@ def add_macd(
 
 
 def add_ichimoku(
-    chart: "Chart",
-    ichi: "Ichimoku",
-    timestamps: "pd.Series | None" = None,
+    chart: Chart,
+    ichi: Ichimoku,
+    timestamps: pd.Series | None = None,
 ) -> None:
     """
     Overlay the full Ichimoku system on the price pane.
@@ -436,34 +446,8 @@ def add_ichimoku(
 # Dynamic SL/TP line helpers (v0.7.4)
 # ---------------------------------------------------------------------------
 
-# Segment colours based on SL position relative to entry
-_COLOR_SL_LOSS      = "#f85149"  # red   — SL is in the loss zone
-_COLOR_SL_BREAKEVEN = "#e3b341"  # amber — SL is at break-even (entry)
-_COLOR_SL_PROFIT    = "#22d3ee"  # cyan  — SL is in profit territory
-_COLOR_NEXT_TP      = "#3fb950"  # green — next TP target line
 
-
-def _sl_segment_color(sl: float, entry: float, direction: str) -> str:
-    """
-    Return the colour for a SL horizontal line segment based on whether
-    the stop-loss is in the loss zone, at break-even, or in profit.
-
-    Loss zone (red)  : for a long, SL < entry; for a short, SL > entry
-    Break-even (yellow): SL is within a tiny epsilon of entry
-    Profit zone (cyan): for a long, SL > entry; for a short, SL < entry
-    """
-    factor = 1.0 if direction == "long" else -1.0
-    profit_margin = factor * (sl - entry)
-    eps = abs(entry) * 1e-7 or 1e-9    # relative epsilon
-    if profit_margin > eps:
-        return _COLOR_SL_PROFIT
-    elif profit_margin > -eps:
-        return _COLOR_SL_BREAKEVEN
-    else:
-        return _COLOR_SL_LOSS
-
-
-def _draw_sl_line(chart: "Chart", t1: int, t2: int, price: float, color: str) -> None:
+def _draw_sl_line(chart: Chart, t1: int, t2: int, price: float, color: str) -> None:
     """Draw a horizontal SL line segment as a TrendLine."""
     from .models import TrendLine
     line = TrendLine(
@@ -471,12 +455,10 @@ def _draw_sl_line(chart: "Chart", t1: int, t2: int, price: float, color: str) ->
         time2=t2, price2=price,
         color=color, line_width=2, label="",
     )
-    chart._drawings.append(line)
-    if chart._shown:
-        chart._server.send({"type": "add_drawing", "drawing": line.to_dict()})
+    chart._add_drawing(line)
 
 
-def _draw_tp_line(chart: "Chart", t1: int, t2: int, price: float) -> None:
+def _draw_tp_line(chart: Chart, t1: int, t2: int, price: float) -> None:
     """Draw a horizontal next-TP line segment (green) as a TrendLine."""
     from .models import TrendLine
     line = TrendLine(
@@ -484,13 +466,11 @@ def _draw_tp_line(chart: "Chart", t1: int, t2: int, price: float) -> None:
         time2=t2, price2=price,
         color=_COLOR_NEXT_TP, line_width=1, label="",
     )
-    chart._drawings.append(line)
-    if chart._shown:
-        chart._server.send({"type": "add_drawing", "drawing": line.to_dict()})
+    chart._add_drawing(line)
 
 
 def _draw_dynamic_sl_tp_lines(
-    chart: "Chart",
+    chart: Chart,
     marker: dict,
     close_time_ms: int,
     draw_tp_lines: bool,
@@ -545,16 +525,126 @@ def _draw_dynamic_sl_tp_lines(
 
 
 # ---------------------------------------------------------------------------
-# Simulation positions (v0.7.0, enhanced v0.7.4)
+# Simulation positions (v0.7.0, enhanced v0.7.4, per-trade helper v1.0.0)
 # ---------------------------------------------------------------------------
 
+def draw_trade_group(
+    chart: Chart,
+    markers: list[dict],
+    *,
+    opacity: float = 0.15,
+    config=None,
+) -> None:
+    """
+    Draw ONE completed trade — all its partial-close slices — as a single
+    position box plus the v0.7.4 dynamic SL/TP line segments (v1.0.0).
+
+    This is the per-trade body of :func:`add_simulation_positions`, factored
+    out so the live simulation renders a trade that closes mid-run through
+    the **same code path** as the batch chart — live rendering equals batch
+    rendering by construction.
+
+    Parameters
+    ----------
+    chart : Chart
+        Target candle chart.
+    markers : list[dict]
+        The trade's marker dicts (``SimulateReport.trade_markers`` shape,
+        built by ``simulate._report._build_trade_markers``), **all sharing
+        one ``trade_id``**, in close order: the first carries entry data,
+        the last carries exit data and the most-complete ``sl_history``.
+    opacity : float
+        Fill opacity for the position box (default 0.15).
+    config : SimulateConfig | None
+        Same mode-detection semantics as :func:`add_simulation_positions`.
+    """
+    tp_mode = getattr(config, "tp_mode", None) if config is not None else None
+    sl_mode = getattr(config, "sl_mode", None) if config is not None else None
+
+    is_multi_rr = (tp_mode == "multi_rr") if tp_mode is not None else None
+    is_trailing  = (sl_mode == "trailing") if sl_mode is not None else None
+
+    # First marker carries entry data; last marker carries exit data and
+    # the most-complete sl_history snapshot.
+    first = markers[0]
+    last  = markers[-1]
+
+    open_ms   = first["open_time"]
+    close_ms  = last["close_time"]
+    open_sec  = open_ms  // 1000
+    close_sec = close_ms // 1000
+
+    entry_price  = first["entry_price"]
+    initial_sl   = first["initial_stop_loss"]
+    direction    = first["direction"]
+    net_pnl      = sum(m["net_pnl"] for m in markers)
+    close_reason = last["close_reason"]
+    rr           = last.get("pnl_r", 0.0)
+    sl_history   = last.get("sl_history", [])
+    final_next_tp = last.get("final_next_tp")
+    peak_price   = last.get("peak_price", entry_price)
+
+    # ---- Determine posbox TP (v0.7.4 fix) ----
+    # For trailing SL, the top of the profit zone is the peak price
+    # (the furthest price the trailing SL ever chased).
+    # For multi_rr, use the final_next_tp so the box shows the TP target
+    # that was active at the moment the position closed.
+    visual_tp = first.get("take_profit")   # initial TP (fallback)
+
+    if is_trailing or (is_trailing is None and sl_mode == "trailing"
+                       and len(sl_history) > 1):
+        # Peak-based profit zone for trailing positions
+        visual_tp = peak_price
+    elif final_next_tp is not None:
+        # Use the closing-moment next-TP for multi_rr and other modes
+        visual_tp = final_next_tp
+    elif last.get("close_reason") == "tp" and last.get("exit_price"):
+        # Position closed exactly at the final TP — use exit price
+        visual_tp = last["exit_price"]
+
+    # ---- Position box ----
+    chart.add_position_box(
+        open_time    = open_sec,
+        close_time   = close_sec,
+        entry_price  = entry_price,
+        stop_loss    = initial_sl,
+        take_profit  = visual_tp,
+        direction    = direction,
+        net_pnl      = net_pnl,
+        close_reason = close_reason,
+        trade_id     = first["trade_id"],
+        rr_ratio     = rr,
+        opacity      = opacity,
+    )
+
+    # ---- Dynamic SL/TP lines (v0.7.4) ----
+    has_sl_history = bool(sl_history) and len(sl_history) > 1
+
+    draw_dynamic = (
+        has_sl_history
+        and (
+            is_multi_rr is True
+            or is_trailing is True
+            or is_multi_rr is None  # config not provided: draw if data present
+        )
+    )
+
+    if draw_dynamic:
+        # For multi_rr: draw SL lines + green TP lines
+        # For trailing: draw SL lines only (no TP line)
+        draw_tp_lines = not is_trailing   # True for multi_rr / unknown
+        _draw_dynamic_sl_tp_lines(
+            chart, last, close_ms, draw_tp_lines=draw_tp_lines
+        )
+
+
 def add_simulation_positions(
-    chart: "Chart",
-    report: "SimulateReport",
+    chart: Chart,
+    report: SimulateReport,
     opacity: float = 0.15,
     max_trades: int | None = None,
     config=None,
-) -> "Chart":
+) -> Chart:
     """
     Overlay all simulated trades on a candle chart as position boxes.
 
@@ -618,13 +708,6 @@ def add_simulation_positions(
     """
     from AlgoTradeKit.simulate._report import SimulateReport  # noqa: F401
 
-    # Determine active modes from config if provided
-    tp_mode = getattr(config, "tp_mode", None) if config is not None else None
-    sl_mode = getattr(config, "sl_mode", None) if config is not None else None
-
-    is_multi_rr = (tp_mode == "multi_rr") if tp_mode is not None else None
-    is_trailing  = (sl_mode == "trailing") if sl_mode is not None else None
-
     # Group markers by trade_id so that partial-close positions (multiple
     # ClosedTrade rows per trade) are rendered as a single posbox + SL lines.
     groups: dict[int, list[dict]] = {}
@@ -632,92 +715,19 @@ def add_simulation_positions(
         groups.setdefault(m["trade_id"], []).append(m)
 
     drawn = 0
-    for tid, g_markers in groups.items():
+    for g_markers in groups.values():
         if max_trades is not None and drawn >= max_trades:
             break
-
-        # First marker carries entry data; last marker carries exit data and
-        # the most-complete sl_history snapshot.
-        first = g_markers[0]
-        last  = g_markers[-1]
-
-        open_ms   = first["open_time"]
-        close_ms  = last["close_time"]
-        open_sec  = open_ms  // 1000
-        close_sec = close_ms // 1000
-
-        entry_price  = first["entry_price"]
-        initial_sl   = first["initial_stop_loss"]
-        direction    = first["direction"]
-        net_pnl      = sum(m["net_pnl"] for m in g_markers)
-        close_reason = last["close_reason"]
-        rr           = last.get("pnl_r", 0.0)
-        sl_history   = last.get("sl_history", [])
-        final_next_tp = last.get("final_next_tp")
-        peak_price   = last.get("peak_price", entry_price)
-
-        # ---- Determine posbox TP (v0.7.4 fix) ----
-        # For trailing SL, the top of the profit zone is the peak price
-        # (the furthest price the trailing SL ever chased).
-        # For multi_rr, use the final_next_tp so the box shows the TP target
-        # that was active at the moment the position closed.
-        visual_tp = first.get("take_profit")   # initial TP (fallback)
-
-        if is_trailing or (is_trailing is None and sl_mode == "trailing"
-                           and len(sl_history) > 1):
-            # Peak-based profit zone for trailing positions
-            visual_tp = peak_price
-        elif final_next_tp is not None:
-            # Use the closing-moment next-TP for multi_rr and other modes
-            visual_tp = final_next_tp
-        elif last.get("close_reason") == "tp" and last.get("exit_price"):
-            # Position closed exactly at the final TP — use exit price
-            visual_tp = last["exit_price"]
-
-        # ---- Position box ----
-        chart.add_position_box(
-            open_time    = open_sec,
-            close_time   = close_sec,
-            entry_price  = entry_price,
-            stop_loss    = initial_sl,
-            take_profit  = visual_tp,
-            direction    = direction,
-            net_pnl      = net_pnl,
-            close_reason = close_reason,
-            trade_id     = tid,
-            rr_ratio     = rr,
-            opacity      = opacity,
-        )
-
-        # ---- Dynamic SL/TP lines (v0.7.4) ----
-        has_sl_history = bool(sl_history) and len(sl_history) > 1
-
-        draw_dynamic = (
-            has_sl_history
-            and (
-                is_multi_rr is True
-                or is_trailing is True
-                or is_multi_rr is None  # config not provided: draw if data present
-            )
-        )
-
-        if draw_dynamic:
-            # For multi_rr: draw SL lines + green TP lines
-            # For trailing: draw SL lines only (no TP line)
-            draw_tp_lines = not is_trailing   # True for multi_rr / unknown
-            _draw_dynamic_sl_tp_lines(
-                chart, last, close_ms, draw_tp_lines=draw_tp_lines
-            )
-
+        draw_trade_group(chart, g_markers, opacity=opacity, config=config)
         drawn += 1
 
     return chart
 
 
 def add_strategy_drawings(
-    chart: "Chart",
-    strategy_result: "StrategyResult",
-) -> "Chart":
+    chart: Chart,
+    strategy_result: StrategyResult,
+) -> Chart:
     """
     Add all strategy-generated drawings (signal zones, support/resistance
     lines, indicator levels, etc.) from *strategy_result* to *chart*.
@@ -754,7 +764,6 @@ def add_strategy_drawings(
             d["source"] = "server"
 
         # Store as a raw dict wrapper so chart._drawings can serialise it
-        from .models import RawIndicator
 
         class _RawDrawing:
             """Thin wrapper that gives a dict the .id and .to_dict() interface."""
@@ -766,8 +775,6 @@ def add_strategy_drawings(
                 return self._payload
 
         wrapped = _RawDrawing(d)
-        chart._drawings.append(wrapped)  # type: ignore[arg-type]
-        if chart._shown:
-            chart._server.send({"type": "add_drawing", "drawing": d})
+        chart._add_drawing(wrapped)  # broadcasts + keeps the init replay fresh
 
     return chart

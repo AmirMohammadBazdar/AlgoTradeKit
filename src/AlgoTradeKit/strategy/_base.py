@@ -10,6 +10,10 @@ Lifecycle (called in order by ``run()``)
 3. ``generate_signals(i, data)`` — per-candle entry detection (main loop).
 4. ``detect_exit_signals(i, data)`` — per-candle exit detection (optional).
 
+Live stepping (v1.0.0): the optional ``update_indicators(data, new_index)``
+hook enables O(1) per-candle updates — driven by the helpers in
+``AlgoTradeKit.strategy._incremental``, never by ``run()``.
+
 Run modes
 ---------
 BACKTEST  Every candle is processed; all signals are returned.
@@ -29,7 +33,6 @@ instance is reused across multiple runs.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
 
 import pandas as pd
 
@@ -192,13 +195,49 @@ class BaseStrategy(ABC):
         """
         return []
 
+    def update_indicators(
+        self, data: dict[str, pd.DataFrame], new_index: int
+    ) -> None:
+        """
+        Incremental update for exactly one new closed candle (optional).
+
+        Live-trading hook (v1.0.0).  Called after the new candle row is
+        appended to ``data[primary_timeframe]``, exactly once per closed
+        candle, in order.  Override to update:
+
+        - indicator columns for row ``new_index`` (e.g. the next EMA/RSI/ATR
+          value from carried-forward state — every ``AlgoTradeKit.indicator``
+          class supports O(1) streaming via its ``update()`` method), and
+        - any custom structures: order-block lists, supply/demand zones,
+          swing points, any ``self.*`` state (SMC / price-action strategies).
+
+        Live lifecycle: ``prepare_indicators`` (once, over the seed history)
+        → ``setup`` (once) → per closed candle: **append row →
+        ``update_indicators`` → ``generate_signals(i)`` →
+        ``detect_exit_signals(i)``**.
+
+        Strategies that do **not** override this hook fall back to a tail
+        recompute of ``prepare_indicators`` over the last
+        ``recompute_window`` candles (see
+        :func:`AlgoTradeKit.strategy.advance_live_candle`) — exact for
+        windowed indicators whose lookback fits the window, approximate for
+        infinite-memory recursions (EMA/RMA), and **not safe** for
+        strategies that build python-object state inside
+        ``prepare_indicators``: implement this hook instead.
+
+        Never called for forming (unclosed) candles — forming-candle
+        evaluation runs on a throwaway copy, so recursive/SMC state only
+        ever advances on final values.  ``run()`` (BACKTEST/LIVE) never
+        calls this hook either; it is driven by the live stepping helpers.
+        """
+
     # ------------------------------------------------------------------
     # Framework entry point — do NOT override
     # ------------------------------------------------------------------
 
     def run(
         self,
-        data: "dict[str, pd.DataFrame] | pd.DataFrame",
+        data: dict[str, pd.DataFrame] | pd.DataFrame,
         mode: StrategyMode = StrategyMode.BACKTEST,
     ) -> StrategyResult:
         """

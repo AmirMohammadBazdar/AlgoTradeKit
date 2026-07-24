@@ -37,6 +37,9 @@ from ._base import (
     _BaseIndicator,
     _check_length,
     _ema_series,
+    _EwmState,
+    _ieee_div,
+    _ma_state,
     _rma_series,
     _sma_series,
     _to_series,
@@ -90,7 +93,7 @@ class RSI(_BaseIndicator):
 
     def __init__(
         self,
-        source: "pd.Series | list",
+        source: pd.Series | list,
         length: int = DEFAULT_LENGTH,
         overbought: float = DEFAULT_OVERBOUGHT,
         oversold: float = DEFAULT_OVERSOLD,
@@ -144,6 +147,50 @@ class RSI(_BaseIndicator):
                 f"Choose from: {list(dispatch.keys())}"
             )
         return dispatch[ma_type]
+
+    # ------------------------------------------------------------------
+    # Streaming updates
+    # ------------------------------------------------------------------
+
+    def _init_stream(self) -> None:
+        self._stream = {
+            "prev": float("nan"),
+            "avg_gain": _EwmState(1.0 / self.length, self.length),
+            "avg_loss": _EwmState(1.0 / self.length, self.length),
+        }
+        if self.show_ma:
+            self._stream["rsi_ma"] = _ma_state(self.ma_type, self.ma_length)
+        for v in self.source.to_numpy():
+            self._push_rsi(float(v))
+
+    def _push_rsi(self, value: float):
+        """Advance the RSI state one bar; return (rsi, rsi_ma) — same maths as _compute()."""
+        st = self._stream
+        change = value - st["prev"]
+        st["prev"] = value
+        if change != change:
+            gain = loss = float("nan")  # .clip() keeps NaN
+        else:
+            gain = change if change > 0.0 else 0.0
+            loss = -change if change < 0.0 else 0.0
+        avg_gain = st["avg_gain"].push(gain)
+        avg_loss = st["avg_loss"].push(loss)
+        rs = _ieee_div(avg_gain, avg_loss)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        rsi_ma = st["rsi_ma"].push(rsi) if self.show_ma else float("nan")
+        return rsi, rsi_ma
+
+    def update(self, value: float) -> float:
+        """Append one new source value; return the new RSI value."""
+        if self._stream is None:
+            self._init_stream()
+        rsi, rsi_ma = self._push_rsi(float(value))
+        self.source = self._append_value(self.source, value)
+        new_values = {"rsi": rsi}
+        if self.show_ma:
+            new_values["rsi_ma"] = rsi_ma
+        self._append_results(new_values)
+        return rsi
 
     # ------------------------------------------------------------------
     # Convenience accessors
