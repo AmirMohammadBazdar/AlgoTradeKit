@@ -64,6 +64,7 @@ function mkEl(id) {
     children: [],
     previousElementSibling: null, nextElementSibling: null,
     querySelectorAll: () => [], querySelector: () => null,
+    dataset: {}, firstChild: null, lastChild: null,
     getBoundingClientRect: () => ({left: 0, top: 0, width: 800, height: 400}),
     getContext: () => autoStub('ctx2d'),
     clientWidth: 800, clientHeight: 400,
@@ -118,6 +119,14 @@ function autoStub(name, overrides = {}) {
       if (k === 'toString' || k === Symbol.toPrimitive) return () => name;
       if (typeof k === 'symbol') return undefined;
       if (['clientWidth','clientHeight','width','height'].includes(k)) return 800;
+      if (k === 'setData' || k === 'update') {
+        if (!cache.has(k)) {
+          const fn = (...a) => { fn._calls.push(a[0]); fn._last = a[0]; };
+          fn._calls = [];
+          cache.set(k, fn);
+        }
+        return cache.get(k);
+      }
       if (!cache.has(k)) cache.set(k, autoStub(name + '.' + String(k)));
       return cache.get(k);
     },
@@ -151,6 +160,7 @@ const ctx = {
   location: {host: 'vps.example:9100', hostname: 'vps.example', protocol: 'http:',
              search: '', href: 'http://vps.example:9100/'},
   URLSearchParams, URL, TextEncoder, TextDecoder,
+  CSS: {escape: v => String(v).replace(/[^\w-]/g, '_')},
   WebSocket: function () { return {readyState: 0, send() {}, close() {}}; },
   Chart: Object.assign(
     function () {
@@ -595,3 +605,329 @@ out.compact  = document.body._cls.has('compact');
     assert result["embedded"] is False
     assert result["viewId"] is None
     assert result["compact"] is False
+
+
+# ---------------------------------------------------------------------------
+# index.html — bar replay (v1.1.0)
+# ---------------------------------------------------------------------------
+# 1m source candles displayed at 5m, so a cursor inside a bucket has something
+# finer to build the forming candle from.
+
+_REPLAY_SETUP = """
+const MIN = 60, T0 = 1700000000 - (1700000000 % 300);
+const src = [];
+for (let i = 0; i < 60; i++) {
+  src.push({time: T0 + i * MIN, open: 100 + i, high: 110 + i,
+            low: 90 + i, close: 105 + i, volume: 10});
+}
+// the 5m candles the server would have sent
+const bars = [];
+for (let b = 0; b < 12; b++) {
+  const slice = src.slice(b * 5, b * 5 + 5);
+  bars.push({time: slice[0].time, open: slice[0].open,
+             high: Math.max(...slice.map(x => x.high)),
+             low: Math.min(...slice.map(x => x.low)),
+             close: slice[4].close, volume: 50});
+}
+ctx.__src = src; ctx.__bars = bars; ctx.__T0 = T0;
+
+ev('ws = {readyState: 1, send: m => globalThis.__sent.push(JSON.parse(m))}');
+ctx.__init = {type: 'init', title: 'BTC', bars: bars, drawings: [],
+  sourceTimeframe: '1m', displayTimeframe: '5m', timeframes: ['1m', '5m'],
+  indicators: [{name: 'EMA', data: bars.map(b => ({time: b.time, value: b.close})),
+                color: '#fff', overlay: true, pane: 0, lineWidth: 1,
+                seriesType: 'line', group: 'EMA'}]};
+ev('handleMsg(globalThis.__init)');
+
+// what the series was told to show, most recent call wins
+const shown = () => {
+  const calls = ev('mainSeries').setData._calls || [];
+  return calls.length ? calls[calls.length - 1] : null;
+};
+"""
+
+
+@pytest.fixture(scope="module")
+def replay_result() -> dict:
+    return _run(CHART_HTML, _REPLAY_SETUP + """
+// arming asks the server for the source candles
+ev('replayToggle()');
+out.armRequest = ctx.__sent.filter(m => m.type === 'replay_arm');
+out.picking    = document.body._cls.has('rp-picking');
+
+ev('handleMsg({type: "replay_data", sourceTimeframe: "1m", stepSeconds: 60,'
+   + ' sourceBars: globalThis.__src})');
+out.stepSec = ev('replay.stepSec');
+
+// pick the 4th candle (index 3) as the start
+ev('replayPick(globalThis.__bars[3].time)');
+out.active     = ev('replay.active');
+out.barVisible = ev('document.getElementById("rp-bar")._cls.has("open")');
+out.cursor     = ev('replay.cursor');
+out.shownBars  = ev('replay.shownBars');
+
+// the cursor sits on a boundary, so nothing is forming yet
+out.formingAtBoundary = ev('buildForming(4, replay.cursor, 300)');
+
+// one 1m step into the next 5m candle
+ev('replayStep(1)');
+out.cursorAfterStep = ev('replay.cursor');
+out.forming1 = ev('buildForming(4, replay.cursor, 300)');
+ev('replayStep(1)');
+out.forming2 = ev('buildForming(4, replay.cursor, 300)');
+
+// five 1m steps close that candle
+ev('replayStep(1); replayStep(1); replayStep(1)');
+out.shownAfterClose = ev('replay.shownBars');
+out.cursorClosed    = ev('replay.cursor');
+
+// indicators never run past the last CLOSED candle
+out.indCut = ev('(() => {const m = Object.values(indMeta)[0];'
+              + ' const d = m.series.setData._last || [];'
+              + ' return d.length ? d[d.length - 1].time : null;})()');
+out.lastClosedOpen = ev('allBars[replay.shownBars - 1].time');
+
+// stepping back
+ev('replayStep(-1)');
+out.cursorBack = ev('replay.cursor');
+
+// play / pause flips the button and the flag
+ev('replayPlayPause()');
+out.playing    = ev('replay.playing');
+out.playLabel  = document.getElementById('rp-play').textContent;
+ev('replayPlayPause()');
+out.pausedFlag = ev('replay.playing');
+
+// the cursor cannot run past the data
+ev('replaySeek(globalThis.__T0 + 999999)');
+out.clamped = ev('replay.cursor === replayBounds().last');
+
+// leaving replay puts everything back
+ev('replayExit()');
+out.exited      = ev('replay.active');
+out.barHidden   = !ev('document.getElementById("rp-bar")._cls.has("open")');
+out.restoredLen = ev('(mainSeries.setData._last || []).length');
+""")
+
+
+class TestBarReplay:
+    def test_page_script_runs_clean(self, replay_result):
+        assert replay_result["topLevelError"] is None
+
+    def test_arming_asks_the_server_for_source_candles(self, replay_result):
+        assert replay_result["armRequest"] == [{"type": "replay_arm"}]
+        assert replay_result["picking"] is True
+        assert replay_result["stepSec"] == 60
+
+    def test_picking_a_bar_starts_the_replay_there(self, replay_result):
+        assert replay_result["active"] is True
+        assert replay_result["barVisible"] is True
+        # the picked candle is complete, so four candles are shown
+        assert replay_result["shownBars"] == 4
+
+    def test_nothing_is_forming_exactly_on_a_boundary(self, replay_result):
+        assert replay_result["formingAtBoundary"] is None
+
+    def test_the_forming_candle_grows_a_minute_at_a_time(self, replay_result):
+        """The whole point of stepping by the source timeframe: a 5m candle is
+        watched being built out of its 1m candles."""
+        one, two = replay_result["forming1"], replay_result["forming2"]
+        assert one["volume"] == 10 and two["volume"] == 20
+        assert two["high"] >= one["high"]
+        assert one["open"] == two["open"]           # the bucket's open is fixed
+
+    def test_a_candle_closes_on_its_boundary(self, replay_result):
+        assert replay_result["shownAfterClose"] == 5
+
+    def test_indicators_stop_at_the_last_closed_candle(self, replay_result):
+        assert replay_result["indCut"] == replay_result["lastClosedOpen"]
+
+    def test_stepping_back_moves_the_cursor_back(self, replay_result):
+        assert replay_result["cursorBack"] == replay_result["cursorClosed"] - 60
+
+    def test_play_and_pause(self, replay_result):
+        assert replay_result["playing"] is True
+        assert replay_result["playLabel"] == "⏸"
+        assert replay_result["pausedFlag"] is False
+
+    def test_the_cursor_is_clamped_to_the_data(self, replay_result):
+        assert replay_result["clamped"] is True
+
+    def test_leaving_restores_every_candle(self, replay_result):
+        assert replay_result["exited"] is False
+        assert replay_result["barHidden"] is True
+        assert replay_result["restoredLen"] == 12
+
+
+def test_replay_hides_drawings_that_have_not_happened_yet():
+    """A trade that opens after the cursor must not be on the chart, and one
+    still open must not show the label that says how it ends."""
+    result = _run(CHART_HTML, _REPLAY_SETUP + """
+const t = ctx.__bars.map(b => b.time);
+ctx.__d = [
+  {id: 'past',   type: 'position_box', open_time: t[1], close_time: t[2], label: 'TP +2R'},
+  {id: 'open',   type: 'position_box', open_time: t[2], close_time: t[9], label: 'SL -1R'},
+  {id: 'future', type: 'position_box', open_time: t[8], close_time: t[9], label: 'TP +3R'},
+  {id: 'line',   type: 'hline',        price: 100},
+];
+ev('globalThis.__d.forEach(d => { drawings[d.id] = d; })');
+
+ev('replayToggle()');
+ev('handleMsg({type: "replay_data", stepSeconds: 60, sourceBars: globalThis.__src})');
+ev('replayPick(globalThis.__bars[4].time)');
+
+out.visible = ev('replayVisibleDrawings().map(d => d.id)');
+out.clipped = ev('(() => {const d = replayVisibleDrawings().find(x => x.id === "open");'
+              + ' return {close: d.close_time, label: d.label};})()');
+out.cursor  = ev('replay.cursor');
+out.stored  = ev('drawings.open.close_time');    // the original is untouched
+
+ev('replayExit()');
+out.afterExit = ev('replayVisibleDrawings().map(d => d.id)');
+""")
+    assert result["topLevelError"] is None
+    assert result["visible"] == ["past", "open", "line"]      # 'future' withheld
+    assert result["clipped"]["close"] == result["cursor"]     # stops at the cursor
+    assert result["clipped"]["label"] == ""                   # outcome not leaked
+    assert result["stored"] != result["cursor"]               # only the copy is clipped
+    assert sorted(result["afterExit"]) == ["future", "line", "open", "past"]
+
+
+def test_an_embedded_chart_hides_its_own_replay_controls():
+    """In a page the shell owns the cursor; a second set of controls in each
+    frame would let the charts drift apart."""
+    result = _run(CHART_HTML, """
+out.btn = document.getElementById('rp-btn').style.display;
+out.sep = document.getElementById('rp-sep').style.display;
+""", extra_globals="ctx.location.search = '?view=v1&chrome=compact';"
+                   "ctx.window.parent = {postMessage: () => {}};")
+    assert result["btn"] == "none"
+    assert result["sep"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# page.html — replay across every chart at once (v1.1.0)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def page_replay_result() -> dict:
+    return _run(PAGE_HTML, _SETTLE + """
+const posted = id => win(id)._posted.slice();
+const clear  = () => ['v1','v2','v3'].forEach(id => win(id)._posted.length = 0);
+
+// arming reaches every frame and asks each what it can replay
+ev('replayToggle()');
+out.armBroadcast = posted('v2');
+out.noteShown    = document.getElementById('rp-note')._cls.has('show');
+
+// the frames answer: v1 is 1m under a 3m display, v2 and v3 are 1m under 5m
+fromFrame('v1', {t: 'replay-info', first: 1000, last: 9000, step: 60,  tf: 180});
+fromFrame('v2', {t: 'replay-info', first: 1200, last: 8000, step: 60,  tf: 300});
+fromFrame('v3', {t: 'replay-info', first:  900, last: 9500, step: 300, tf: 300});
+out.step  = ev('replay.step');
+out.first = ev('replay.first');
+out.last  = ev('replay.last');
+
+// clicking a candle on one chart starts the replay everywhere
+clear();
+fromFrame('v2', {t: 'replay-pick', time: 3000});
+out.active      = ev('replay.active');
+out.pickedTo1   = posted('v1');
+out.pickedTo3   = posted('v3');
+out.controlsOpen = document.getElementById('rp-controls')._cls.has('open');
+
+// one step moves the shared cursor by the finest step on the page
+clear();
+ev('replayStep(1)');
+out.cursorAfterStep = ev('replay.cursor');
+out.stepTo1 = posted('v1');
+out.stepTo3 = posted('v3');
+
+// the cursor stays inside the span every chart has data for
+ev('replaySeek(99999)');
+out.clampedHigh = ev('replay.cursor');
+ev('replaySeek(0)');
+out.clampedLow  = ev('replay.cursor');
+
+// play / pause
+ev('replayPlayPause()');
+out.playing   = ev('replay.playing');
+out.playLabel = document.getElementById('rp-play').textContent;
+ev('replayPlayPause()');
+out.paused    = ev('replay.playing');
+
+// leaving tells every frame to restore itself
+clear();
+ev('replayExit()');
+out.exitTo1  = posted('v1');
+out.exitTo2  = posted('v2');
+out.inactive = ev('replay.active');
+""", extra_globals=_LAYOUT)
+
+
+class TestPageWideReplay:
+    def test_shell_script_runs_clean(self, page_replay_result):
+        assert page_replay_result["topLevelError"] is None
+
+    def test_arming_reaches_every_chart(self, page_replay_result):
+        assert {m["t"] for m in page_replay_result["armBroadcast"]} == {
+            "replay-arm", "replay-info"
+        }
+        assert page_replay_result["noteShown"] is True
+
+    def test_the_page_steps_as_finely_as_its_finest_chart(self, page_replay_result):
+        assert page_replay_result["step"] == 60          # min(60, 60, 300)
+
+    def test_the_range_is_what_every_chart_can_cover(self, page_replay_result):
+        assert page_replay_result["first"] == 1200       # max of the firsts
+        assert page_replay_result["last"]  == 8000       # min of the lasts
+
+    def test_picking_on_one_chart_starts_them_all(self, page_replay_result):
+        assert page_replay_result["active"] is True
+        assert page_replay_result["controlsOpen"] is True
+        assert page_replay_result["pickedTo1"] == [{"t": "replay-cursor", "time": 3000}]
+        assert page_replay_result["pickedTo3"] == [{"t": "replay-cursor", "time": 3000}]
+
+    def test_one_step_moves_every_chart_to_the_same_instant(self, page_replay_result):
+        """Not 'one candle each' — a 3m and a 5m chart would drift apart."""
+        assert page_replay_result["cursorAfterStep"] == 3060
+        assert page_replay_result["stepTo1"] == [{"t": "replay-cursor", "time": 3060}]
+        assert page_replay_result["stepTo3"] == [{"t": "replay-cursor", "time": 3060}]
+
+    def test_the_cursor_is_clamped_to_the_shared_span(self, page_replay_result):
+        assert page_replay_result["clampedHigh"] == 8000
+        assert page_replay_result["clampedLow"]  == 1200
+
+    def test_play_and_pause(self, page_replay_result):
+        assert page_replay_result["playing"] is True
+        assert page_replay_result["playLabel"] == "⏸"
+        assert page_replay_result["paused"] is False
+
+    def test_leaving_restores_every_chart(self, page_replay_result):
+        assert page_replay_result["exitTo1"] == [{"t": "replay-exit"}]
+        assert page_replay_result["exitTo2"] == [{"t": "replay-exit"}]
+        assert page_replay_result["inactive"] is False
+
+
+def test_a_timeframe_switch_during_replay_keeps_the_cursor():
+    """A switch arrives as a fresh init; without re-cutting it, the chart would
+    silently show the whole history again while still 'in' replay."""
+    result = _run(CHART_HTML, _REPLAY_SETUP + """
+ev('replayToggle()');
+ev('handleMsg({type: "replay_data", stepSeconds: 60, sourceBars: globalThis.__src})');
+ev('replayPick(globalThis.__bars[3].time)');
+const cursor = ev('replay.cursor');
+
+// the server answers a timeframe switch with a whole new init
+ctx.__init2 = Object.assign({}, ctx.__init, {displayTimeframe: '15m'});
+ev('handleMsg(globalThis.__init2)');
+
+out.stillActive = ev('replay.active');
+out.cursorKept  = ev('replay.cursor') === cursor;
+out.shownCount  = ev('(mainSeries.setData._last || []).length');
+out.totalBars   = ev('allBars.length');
+""")
+    assert result["topLevelError"] is None
+    assert result["stillActive"] is True
+    assert result["cursorKept"] is True
+    assert result["shownCount"] < result["totalBars"]      # still cut at the cursor
