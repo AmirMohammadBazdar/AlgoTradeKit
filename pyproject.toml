@@ -102,3 +102,14 @@ target-version = ["py310", "py311", "py312"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts   = "-v --tb=short"
+# uvicorn's WebSocket implementation still calls the deprecated websockets
+# legacy API, and the websockets client warns about its own ConnectionClosed
+# accessor. Nothing in AlgoTradeKit can act on either, and left unfiltered they
+# bury the warnings that do matter. Anything raised by our own code must stay
+# visible, so these are matched by message rather than blanket-ignored.
+filterwarnings = [
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
+    "ignore:remove second argument of ws_handler:DeprecationWarning",
+    "ignore:ConnectionClosed.code is deprecated:DeprecationWarning",
+]
