@@ -209,3 +209,26 @@ class TestPublicApiSurface:
                      "check_close", "sl_reason", "make_closed_trade",
                      "apply_partial_close", "handle_tp_level_hit"):
             assert hasattr(_position_math, name), name
+
+
+# ===========================================================================
+# examples/ — the runnable demos ship with the package
+# ===========================================================================
+
+class TestExamplesShip:
+    """A demo that is not packaged is a demo nobody runs."""
+
+    def test_examples_are_in_the_sdist_allow_list(self):
+        pyproject = _read(ROOT / "pyproject.toml")
+        allow_list = pyproject.split("only-include = [")[1].split("]")[0]
+        assert '"examples"' in allow_list
+
+    def test_every_example_is_listed_in_the_readme(self):
+        readme = _read(ROOT / "README.md")
+        scripts = sorted(
+            p.name for p in (ROOT / "examples").glob("*.py")
+            if not p.name.startswith("_")
+        )
+        assert scripts, "examples/ has no demos"
+        for name in scripts:
+            assert name in readme, f"{name} is not mentioned in README.md"
