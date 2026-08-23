@@ -97,6 +97,9 @@ class IndicatorSeries:
     line_width:  int   = 1
     series_type: Literal["line", "histogram", "area"] = "line"
     group:       str   = ""
+    #: True when the points were thinned to a higher display timeframe rather
+    #: than recomputed on it (v1.1.0) — the legend marks these as approximate.
+    approx:      bool  = False
 
     def to_dict(self) -> dict:
         return {
@@ -108,6 +111,7 @@ class IndicatorSeries:
             "lineWidth":  self.line_width,
             "seriesType": self.series_type,
             "group":      self.group,
+            "approx":     self.approx,
         }
 
 
