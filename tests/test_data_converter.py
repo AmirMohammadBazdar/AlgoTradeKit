@@ -10,6 +10,8 @@ Groups
 5. _resolve_filepath   — output path / filename logic
 6. _load_source        — CSV and DataFrame inputs
 7. convert()           — end-to-end integration
+8. resample_ohlcv()    — the pure API extracted in v1.1.0, and its parity
+                         with what Converter writes
 """
 
 import os
@@ -566,3 +568,173 @@ class TestConvertIntegration:
         r    = repr(conv)
         assert "Converter" in r
         assert "4h"        in r
+
+
+# ===========================================================================
+# 8. v1.1.0 — the pure resampling API extracted out of Converter
+# ===========================================================================
+
+class TestResampleOhlcvParity:
+    """resample_ohlcv() must produce exactly what Converter writes to CSV —
+    they are the same maths, called two ways."""
+
+    def test_matches_what_converter_writes(self, tmp_path, capsys):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 96)   # 4 days of 1h
+
+        conv = _make_converter(df, "4h")
+        conv.destination = str(tmp_path)
+        out = conv.convert()
+        capsys.readouterr()                            # swallow the summary print
+        from_csv = pd.read_csv(out)
+
+        direct = resample_ohlcv(df, "4h")
+
+        pd.testing.assert_frame_equal(
+            direct.reset_index(drop=True),
+            from_csv[direct.columns].reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    @pytest.mark.parametrize("target", ["4h", "1d", "1w"])
+    def test_matches_the_private_method(self, target):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df   = _make_candles(ANCHOR, ONE_HOUR_MS, 24 * 21)
+        conv = _make_converter(df, target)
+        legacy = conv._resample(df.copy(), "1h", target)
+
+        pd.testing.assert_frame_equal(resample_ohlcv(df, target), legacy)
+
+
+class TestResampleOhlcvBehaviour:
+    def test_does_not_mutate_the_input(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 48)
+        before = df.copy(deep=True)
+        resample_ohlcv(df, "4h")
+        pd.testing.assert_frame_equal(df, before)
+
+    def test_aggregation_values(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        # 4 one-hour candles → one 4h candle with known OHLCV
+        df = pd.DataFrame({
+            "timestamp": [ANCHOR + i * ONE_HOUR_MS for i in range(4)],
+            "open":      [100.0, 104.0, 101.0, 103.0],
+            "high":      [105.0, 108.0, 106.0, 107.0],
+            "low":       [ 99.0, 100.0,  95.0, 102.0],
+            "close":     [104.0, 101.0, 103.0, 106.0],
+            "volume":    [ 10.0,  20.0,  30.0,  40.0],
+        })
+        out = resample_ohlcv(df, "4h")
+
+        assert len(out) == 1
+        row = out.iloc[0]
+        assert row["timestamp"] == ANCHOR
+        assert row["open"]   == 100.0     # first
+        assert row["high"]   == 108.0     # max
+        assert row["low"]    ==  95.0     # min
+        assert row["close"]  == 106.0     # last
+        assert row["volume"] == 100.0     # sum
+
+    def test_drop_incomplete_true_drops_the_forming_bucket(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 6)     # 4h + 2h leftover
+        out = resample_ohlcv(df, "4h")
+        assert len(out) == 1                            # partial bucket dropped
+
+    def test_drop_incomplete_false_keeps_it(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 6)
+        out = resample_ohlcv(df, "4h", drop_incomplete=False)
+
+        assert len(out) == 2                            # the forming candle survives
+        assert out.iloc[-1]["timestamp"] == ANCHOR + FOUR_HOUR_MS
+        # and it aggregates only the candles that exist so far
+        assert out.iloc[-1]["volume"] == 2000.0         # 2 × 1000, not 4 ×
+
+    def test_source_timeframe_hint_must_match(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 24)
+        with pytest.raises(ValueError, match="does not match the detected timeframe"):
+            resample_ohlcv(df, "4h", source_timeframe="15m")
+
+    def test_correct_hint_is_accepted(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 24)
+        assert len(resample_ohlcv(df, "4h", source_timeframe="1h")) == 6
+
+    def test_rejects_empty_frame(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        with pytest.raises(ValueError, match="empty"):
+            resample_ohlcv(pd.DataFrame(), "4h")
+
+    def test_rejects_missing_timestamp_column(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 24).drop(columns=["timestamp"])
+        with pytest.raises(ValueError, match="no 'timestamp' column"):
+            resample_ohlcv(df, "4h")
+
+    def test_rejects_a_downward_conversion(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 24)
+        with pytest.raises(ValueError, match="Downsampling is not supported"):
+            resample_ohlcv(df, "15m")
+
+    def test_unsorted_input_is_sorted_first(self):
+        from AlgoTradeKit.data import resample_ohlcv
+
+        df = _make_candles(ANCHOR, ONE_HOUR_MS, 8)
+        shuffled = df.iloc[::-1].reset_index(drop=True)
+        pd.testing.assert_frame_equal(resample_ohlcv(shuffled, "4h"), resample_ohlcv(df, "4h"))
+
+
+class TestTimeframeHelpers:
+    def test_detect_timeframe_is_exported(self):
+        from AlgoTradeKit.data import detect_timeframe
+
+        assert detect_timeframe(_make_candles(ANCHOR, ONE_HOUR_MS, 10)) == "1h"
+        assert detect_timeframe(_make_candles(ANCHOR, ONE_DAY_MS, 10)) == "1d"
+
+    def test_validate_conversion_is_exported(self):
+        from AlgoTradeKit.data import validate_conversion
+
+        validate_conversion("1h", "4h")                 # must not raise
+        with pytest.raises(ValueError):
+            validate_conversion("1h", "1h")
+
+    def test_can_convert(self):
+        from AlgoTradeKit.data import can_convert
+
+        assert can_convert("1m", "5m") is True
+        assert can_convert("1h", "1d") is True
+        assert can_convert("4h", "6h") is False         # 1.5× is not a whole multiple
+        assert can_convert("1h", "1h") is False
+        assert can_convert("1d", "1h") is False
+        assert can_convert("1M", "1w") is False
+
+    def test_converter_delegates_rather_than_duplicating(self):
+        """The maths must exist once: the methods are thin wrappers now."""
+        import inspect
+
+        from AlgoTradeKit.data import converter as conv_mod
+
+        for method, target in (
+            (conv_mod.Converter._detect_timeframe,  "detect_timeframe"),
+            (conv_mod.Converter._validate_conversion, "validate_conversion"),
+            (conv_mod.Converter._resample,          "_resample_frame"),
+            (conv_mod.Converter._drop_incomplete,   "_drop_incomplete_groups"),
+        ):
+            body = inspect.getsource(method)
+            assert target in body, f"{method.__name__} should delegate to {target}"
+            assert len(body.splitlines()) <= 12, f"{method.__name__} still holds logic"
