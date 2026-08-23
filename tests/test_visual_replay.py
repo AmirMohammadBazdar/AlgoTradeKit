@@ -144,18 +144,20 @@ class TestArming:
         assert {m["stepSeconds"] for _, m in seen} == {60}
 
 
+@pytest.fixture(scope="module")
+def chart_html() -> str:
+    import AlgoTradeKit.visual.server as _srv
+    return (_srv.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def page_html() -> str:
+    import AlgoTradeKit.visual.server as _srv
+    return (_srv.STATIC_DIR / "page.html").read_text(encoding="utf-8")
+
+
 class TestFrontendWiring:
     """The shipped pages carry the replay protocol and controls."""
-
-    @pytest.fixture(scope="class")
-    def chart_html(self) -> str:
-        import AlgoTradeKit.visual.server as _srv
-        return (_srv.STATIC_DIR / "index.html").read_text(encoding="utf-8")
-
-    @pytest.fixture(scope="class")
-    def page_html(self) -> str:
-        import AlgoTradeKit.visual.server as _srv
-        return (_srv.STATIC_DIR / "page.html").read_text(encoding="utf-8")
 
     def test_chart_handles_the_replay_protocol(self, chart_html):
         assert "case 'replay_data'" in chart_html

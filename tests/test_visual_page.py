@@ -174,18 +174,21 @@ class TestViewProxy:
 # Served for real
 # ---------------------------------------------------------------------------
 
-class TestServedPage:
-    @pytest.fixture(scope="class")
-    def page(self):
-        page = ChartPage(title="BTC desk")
-        page.add(_chart("BTC 3m", "3m"))                 # v1, row 0
-        page.add(_chart("BTC 5m", "5m"))                 # v2, row 1
-        page.add(_chart("ETH 5m", "5m"), row=1)          # v3, beside v2
-        page.show(block=False, open_browser=False)
-        time.sleep(0.5)
-        yield page
-        page.stop()
+@pytest.fixture(scope="module")
+def page():
+    """One served page for the whole module — starting a server per test would
+    dominate the runtime."""
+    page = ChartPage(title="BTC desk")
+    page.add(_chart("BTC 3m", "3m"))                 # v1, row 0
+    page.add(_chart("BTC 5m", "5m"))                 # v2, row 1
+    page.add(_chart("ETH 5m", "5m"), row=1)          # v3, beside v2
+    page.show(block=False, open_browser=False)
+    time.sleep(0.5)
+    yield page
+    page.stop()
 
+
+class TestServedPage:
     @staticmethod
     def _get(page, path: str) -> str:
         with urllib.request.urlopen(page.url + path, timeout=5) as resp:
