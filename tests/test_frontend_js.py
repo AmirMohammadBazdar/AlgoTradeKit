@@ -46,9 +46,9 @@ const allElements = [];
 
 function mkEl(id) {
   const cls = new Set();
-  let className = '', text = '', inner = '';
+  let className = '', text = '', inner = '', elementId = id;
   const el = {
-    id, value: '', tagName: String(id || '').toUpperCase(),
+    value: '', tagName: String(id || '').toUpperCase(),
     style: new Proxy({}, {get: (t, k) => t[k] ?? '', set: (t, k, v) => (t[k] = v, true)}),
     classList: {
       add: c => cls.add(c), remove: c => cls.delete(c),
@@ -84,6 +84,11 @@ function mkEl(id) {
     set(v) { text = String(v); el.children.length = 0; },
   });
   // Assigning innerHTML replaces the children, which is how pages clear a list
+  // Giving a created element an id makes it findable, as attaching it would
+  Object.defineProperty(el, 'id', {
+    get: () => elementId,
+    set(v) { elementId = String(v); els[elementId] = el; },
+  });
   Object.defineProperty(el, 'innerHTML', {
     get: () => inner,
     set(v) { inner = String(v); el.children.length = 0; },
@@ -137,8 +142,21 @@ function autoStub(name, overrides = {}) {
 }
 
 const els = {}, docListeners = {};
+
+// Only ids the page actually declares can be found, exactly as in a browser.
+// An auto-vivifying stub answers every lookup with an element, which hides the
+// one mistake this harness most needs to catch: code dereferencing an element
+// that is not there. Elements the page creates register themselves below.
+const KNOWN_IDS = new Set(
+  [...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1])
+);
+
 const document = {
-  getElementById(id) { return els[id] ??= mkEl(id); },
+  getElementById(id) {
+    if (els[id]) return els[id];
+    if (!KNOWN_IDS.has(id)) return null;
+    return (els[id] = mkEl(id));
+  },
   querySelectorAll: sel => queryAll(sel),
   querySelector: sel => queryAll(sel)[0] || null,
   addEventListener(type, fn) { (docListeners[type] ??= []).push(fn); },
