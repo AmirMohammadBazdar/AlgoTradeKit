@@ -38,6 +38,21 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .tb svg{flex-shrink:0}
 #ml{margin-left:auto}
 
+/* ── Timeframe selector (v1.1.0) ─────────────────────────────── */
+#tf-wrap{position:relative;flex-shrink:0}
+#tf-btn{font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em}
+#tf-btn.busy{opacity:.5;pointer-events:none}
+#tf-menu{display:none;position:absolute;top:30px;left:0;z-index:300;min-width:78px;
+         background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+         padding:4px;box-shadow:0 8px 24px #000a;max-height:60vh;overflow-y:auto}
+#tf-menu.open{display:block}
+.tf-opt{display:block;width:100%;text-align:left;padding:5px 9px;border:0;border-radius:4px;
+        background:transparent;color:var(--text2);cursor:pointer;font-size:11px;
+        font-family:'Courier New',monospace}
+.tf-opt:hover{background:var(--bg3);color:var(--text)}
+.tf-opt.on{background:var(--accent)22;color:var(--accent)}
+.tf-opt .tf-src{float:right;font-size:9px;opacity:.6}
+
 /* ── Panes ───────────────────────────────────────────────────── */
 #panes{flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative}
 .pane-wrap{position:relative;overflow:hidden}
@@ -272,6 +287,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
     INDICATORS
   </button>
   <div class="tsep"></div>
+  <div id="tf-wrap" style="display:none">
+    <button class="tb" id="tf-btn" onclick="toggleTfMenu()" title="Timeframe — resampled in Python">1m</button>
+    <div id="tf-menu"></div>
+  </div>
+  <div class="tsep" id="tf-sep" style="display:none"></div>
   <button class="tb on" id="ct-btn" onclick="toggleChartType()"
           style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em">CANDLE</button>
   <div class="tsep"></div>
@@ -591,6 +611,10 @@ let allBars=[];
 // Set by the server (init payload / set_candle_limit message), enforced here
 // after every streamed bar.
 let candleCountLimit=null;
+
+// Timeframe switching (v1.1.0). The browser never resamples anything: it
+// shows what the server offers, asks for one, and redraws on the new init.
+let sourceTimeframe=null, displayTimeframe=null, timeframeList=[], tfPending=null;
 
 const panes={};
 let mainChart=null, mainSeries=null, volumeSeries=null;
@@ -2468,6 +2492,61 @@ function fmtVol(v){
   return v.toFixed(0);
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  TIMEFRAME SELECTOR (v1.1.0)
+//  All resampling is done in Python. Clicking an entry sends
+//  {type:'set_timeframe'} and the server answers with a fresh init.
+// ═══════════════════════════════════════════════════════════════
+function renderTfSelector(){
+  const wrap=document.getElementById('tf-wrap'), sep=document.getElementById('tf-sep');
+  const btn=document.getElementById('tf-btn'), menu=document.getElementById('tf-menu');
+  const show = timeframeList.length > 1;
+  wrap.style.display = show ? '' : 'none';
+  sep.style.display  = show ? '' : 'none';
+  if(!show){ menu.classList.remove('open'); return; }
+
+  const current = tfPending || displayTimeframe || sourceTimeframe;
+  btn.textContent = current || '—';
+  btn.classList.toggle('busy', tfPending !== null);
+
+  menu.innerHTML='';
+  timeframeList.forEach(tf => {
+    const b=document.createElement('button');
+    b.className='tf-opt'+(tf===(displayTimeframe||sourceTimeframe)?' on':'');
+    b.textContent=tf;
+    if(tf===sourceTimeframe){
+      const tag=document.createElement('span');
+      tag.className='tf-src'; tag.textContent='source';
+      b.appendChild(tag);
+    }
+    b.onclick=()=>selectTimeframe(tf);
+    menu.appendChild(b);
+  });
+}
+
+function toggleTfMenu(){
+  document.getElementById('tf-menu').classList.toggle('open');
+}
+
+function closeTfMenu(){
+  document.getElementById('tf-menu').classList.remove('open');
+}
+
+function selectTimeframe(tf){
+  closeTfMenu();
+  if(tf === (displayTimeframe||sourceTimeframe)) return;
+  tfPending = tf;
+  renderTfSelector();
+  // null = "show the source unchanged"; the server treats them the same way
+  sendMsg({type:'set_timeframe', tf: tf===sourceTimeframe ? null : tf});
+}
+
+// Click anywhere else closes the menu
+document.addEventListener('mousedown', e => {
+  const wrap=document.getElementById('tf-wrap');
+  if(wrap && !wrap.contains(e.target)) closeTfMenu();
+});
+
 function toggleChartType(){
   chartType=chartType==='candlestick'?'heikinashi':'candlestick';
   document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
@@ -2516,6 +2595,11 @@ function handleMsg(msg){
       chartType=msg.chartType||'candlestick';
       volumeInMain=msg.volumeInMain!==false;
       candleCountLimit=msg.candleCountLimit||null;
+      sourceTimeframe=msg.sourceTimeframe||null;
+      displayTimeframe=msg.displayTimeframe||null;
+      timeframeList=msg.timeframes||[];
+      tfPending=null;          // this init IS the answer to the pending switch
+      renderTfSelector();
       document.getElementById('chart-title').textContent=msg.title||'Chart';
       document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
 
@@ -2537,6 +2621,13 @@ function handleMsg(msg){
     case 'update_drawing':
       if(drawings[msg.drawing.id]) Object.assign(drawings[msg.drawing.id],msg.drawing);
       redrawAll(); break;
+    case 'timeframe_error':
+      // The server refused the switch (bad multiple, no source TF). Put the
+      // button back the way it was and say why.
+      tfPending=null; renderTfSelector();
+      console.warn('timeframe:', msg.message);
+      alert(msg.message);
+      break;
     case 'set_candle_limit':
       // Rolling window (v1.0.0): arm/disarm and apply immediately
       candleCountLimit=msg.limit||null;
