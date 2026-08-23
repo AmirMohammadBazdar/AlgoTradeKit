@@ -26,6 +26,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_HTML = ROOT / "src" / "AlgoTradeKit" / "report" / "static" / "report.html"
 CHART_HTML  = ROOT / "src" / "AlgoTradeKit" / "visual" / "static" / "index.html"
+PAGE_HTML   = ROOT / "src" / "AlgoTradeKit" / "visual" / "static" / "page.html"
 
 
 # ---------------------------------------------------------------------------
@@ -41,11 +42,13 @@ const html = fs.readFileSync(PAGE, 'utf8');
 const blocks = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
 const src = blocks[blocks.length - 1];      // the app script (CDN ones have src=)
 
+const allElements = [];
+
 function mkEl(id) {
   const cls = new Set();
-  let className = '', text = '';
+  let className = '', text = '', inner = '';
   const el = {
-    id, innerHTML: '', value: '',
+    id, value: '', tagName: String(id || '').toUpperCase(),
     style: new Proxy({}, {get: (t, k) => t[k] ?? '', set: (t, k, v) => (t[k] = v, true)}),
     classList: {
       add: c => cls.add(c), remove: c => cls.delete(c),
@@ -79,7 +82,29 @@ function mkEl(id) {
     get: () => text + el.children.map(c => c.textContent).join(''),
     set(v) { text = String(v); el.children.length = 0; },
   });
+  // Assigning innerHTML replaces the children, which is how pages clear a list
+  Object.defineProperty(el, 'innerHTML', {
+    get: () => inner,
+    set(v) { inner = String(v); el.children.length = 0; },
+  });
+  if (el.tagName === 'IFRAME') {
+    el.contentWindow = {
+      _posted: [],
+      postMessage(m) { this._posted.push(m); },
+    };
+  }
+  allElements.push(el);
   return el;
+}
+
+// Walk everything ever created plus the tree under `page`, so a selector can
+// find elements the page built after load.
+function matches(el, sel) {
+  if (sel.startsWith('.')) return el._cls.has(sel.slice(1));
+  return el.tagName === sel.toUpperCase();
+}
+function queryAll(sel) {
+  return allElements.filter(el => matches(el, sel));
 }
 
 // Any property access returns a callable stub, so a charting library's whole
@@ -105,19 +130,27 @@ function autoStub(name, overrides = {}) {
 const els = {}, docListeners = {};
 const document = {
   getElementById(id) { return els[id] ??= mkEl(id); },
-  querySelectorAll: () => [], querySelector: () => null,
+  querySelectorAll: sel => queryAll(sel),
+  querySelector: sel => queryAll(sel)[0] || null,
   addEventListener(type, fn) { (docListeners[type] ??= []).push(fn); },
   body: mkEl('body'), documentElement: mkEl('html'), createElement: mkEl,
+  title: '',
 };
 
 const ctx = {
   document, console, JSON, Math, Date, Intl, Object, Array, String, Number, Boolean,
   window: {
-    addEventListener() {}, open: u => { ctx.__opened = u; },
+    // Same registry as document: a window listener really does see events
+    // that bubble up from the document, and tests fire one kind of event.
+    addEventListener(type, fn) { (docListeners[type] ??= []).push(fn); },
+    removeEventListener() {},
+    open: u => { ctx.__opened = u; },
     innerWidth: 1200, innerHeight: 900,
     matchMedia: () => ({matches: false, addEventListener() {}}),
   },
-  location: {host: 'vps.example:9100', hostname: 'vps.example', protocol: 'http:'},
+  location: {host: 'vps.example:9100', hostname: 'vps.example', protocol: 'http:',
+             search: '', href: 'http://vps.example:9100/'},
+  URLSearchParams, URL, TextEncoder, TextDecoder,
   WebSocket: function () { return {readyState: 0, send() {}, close() {}}; },
   Chart: Object.assign(
     function () {
@@ -125,8 +158,8 @@ const ctx = {
     },
     {register: () => {}, defaults: {font: {}, plugins: {}}, Tooltip: {positioners: {}}},
   ),
-  setTimeout: () => 0, clearTimeout: () => {}, setInterval: () => 0,
-  requestAnimationFrame: () => 0, navigator: {}, alert: () => {},
+  setTimeout, clearTimeout, setInterval, clearInterval, Promise,
+  requestAnimationFrame: cb => setTimeout(cb, 0), navigator: {}, alert: () => {},
 };
 ctx.window.location = ctx.location;
 ctx.globalThis = ctx;
@@ -155,9 +188,14 @@ def _run(page: Path, body: str, extra_globals: str = "") -> dict:
     script = (
         _HARNESS.replace("PAGE", json.dumps(str(page)))
         .replace("EXTRA_GLOBALS", extra_globals)
-        + body
+        # An async wrapper lets a body await the page's own promises (the
+        # shell fetches its layout); a synchronous body is unaffected.
+        # process.exit: the page schedules real timers (its WebSocket retry),
+        # and node will not exit on its own while any of them is pending.
+        + "(async () => {\n" + body
+        + "\nconsole.log(JSON.stringify(out));\nprocess.exit(0);\n})();\n"
     )
-    script += "\nconsole.log(JSON.stringify(out));\n"
+    script = script + "\n"
     proc = subprocess.run(
         [NODE, "-e", script], capture_output=True, text=True, timeout=120
     )
@@ -354,3 +392,206 @@ out.wrapShown = document.getElementById('tf-wrap').style.display;
 """)
     assert result["topLevelError"] is None
     assert result["wrapShown"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# page.html — the ChartPage shell (v1.1.0)
+# ---------------------------------------------------------------------------
+
+_LAYOUT = """
+ctx.fetch = () => Promise.resolve({json: () => Promise.resolve({
+  title: 'BTC desk', theme: 'dark',
+  sync: {time: true, crosshair: true},
+  rows: [['v1'], ['v2', 'v3']],
+  views: [{id: 'v1', title: 'BTC 3m'}, {id: 'v2', title: 'BTC 5m'},
+          {id: 'v3', title: 'ETH 5m'}],
+})});
+"""
+
+_SETTLE = """
+await new Promise(r => setTimeout(r, 20));      // let loadLayout() finish
+const iframes = queryAll('iframe');
+iframes.forEach(f => f.onload && f.onload());   // frames announce themselves
+const win = id => iframes.find(f => f.src.includes('view=' + id)).contentWindow;
+const fromFrame = (id, msg) => (docListeners.message || [])
+  .forEach(fn => fn({source: win(id), data: Object.assign({view: id}, msg)}));
+"""
+
+
+@pytest.fixture(scope="module")
+def shell_result() -> dict:
+    return _run(PAGE_HTML, _SETTLE + """
+out.rowCount    = queryAll('.row').length;
+out.cellCount   = queryAll('.cell').length;
+out.frameCount  = iframes.length;
+out.frameSrc    = iframes.map(f => f.src);
+out.rowDividers = queryAll('.rdiv').length;
+out.colDividers = queryAll('.cdiv').length;
+out.title       = document.getElementById('page-title').textContent;
+
+// the first chart starts active
+out.activeCells = queryAll('.cell').filter(c => c._cls.has('active')).map(c => c.id);
+
+// clicking a chart makes it the active one
+fromFrame('v3', {t: 'focus'});
+out.activeAfterFocus = queryAll('.cell').filter(c => c._cls.has('active')).map(c => c.id);
+
+// a range from one chart reaches the others and does not come back
+fromFrame('v1', {t: 'range', from: 100, to: 200});
+out.v1Posted = win('v1').contentWindowPosted || win('v1')._posted.slice();
+out.v2Posted = win('v2')._posted.slice();
+out.v3Posted = win('v3')._posted.slice();
+
+// crosshair relays the same way
+win('v2')._posted.length = 0;
+fromFrame('v1', {t: 'crosshair', time: 1700000000, price: 42});
+out.v2Crosshair = win('v2')._posted.slice();
+
+// turning a sync off stops the relay
+ev('toggleSync("time")');
+win('v2')._posted.length = 0;
+fromFrame('v1', {t: 'range', from: 1, to: 2});
+out.v2AfterTimeOff = win('v2')._posted.slice();
+out.timeBtnOff = !document.getElementById('sync-time')._cls.has('on');
+
+// a message whose source is not the frame it claims to be is ignored
+ev('toggleSync("time")');
+win('v2')._posted.length = 0;
+(docListeners.message || []).forEach(fn =>
+  fn({source: {}, data: {view: 'v1', t: 'range', from: 9, to: 9}}));
+out.v2AfterForged = win('v2')._posted.slice();
+""", extra_globals=_LAYOUT)
+
+
+class TestChartPageShell:
+    def test_shell_script_runs_clean(self, shell_result):
+        assert shell_result["topLevelError"] is None
+
+    def test_rows_and_cells_match_the_layout(self, shell_result):
+        assert shell_result["rowCount"]  == 2       # [[v1], [v2, v3]]
+        assert shell_result["cellCount"] == 3
+        assert shell_result["frameCount"] == 3
+        assert shell_result["title"] == "BTC desk"
+
+    def test_each_frame_loads_its_own_view(self, shell_result):
+        srcs = shell_result["frameSrc"]
+        assert all(s.startswith("view?view=") for s in srcs)
+        assert [s.split("view=")[1].split("&")[0] for s in srcs] == ["v1", "v2", "v3"]
+        assert all("chrome=compact" in s for s in srcs)
+
+    def test_dividers_exist_on_both_axes(self, shell_result):
+        assert shell_result["rowDividers"] == 1     # between the two rows
+        assert shell_result["colDividers"] == 1     # between v2 and v3
+
+    def test_first_chart_starts_active(self, shell_result):
+        assert shell_result["activeCells"] == ["cell-v1"]
+
+    def test_focus_follows_the_clicked_chart(self, shell_result):
+        assert shell_result["activeAfterFocus"] == ["cell-v3"]
+
+    def test_a_range_reaches_the_others_but_not_the_sender(self, shell_result):
+        assert shell_result["v1Posted"] == []       # never echoed back
+        assert shell_result["v2Posted"] == [{"t": "range", "from": 100, "to": 200}]
+        assert shell_result["v3Posted"] == [{"t": "range", "from": 100, "to": 200}]
+
+    def test_crosshair_relays_time_and_price(self, shell_result):
+        assert shell_result["v2Crosshair"] == [
+            {"t": "crosshair", "time": 1700000000, "price": 42}
+        ]
+
+    def test_turning_a_sync_off_stops_the_relay(self, shell_result):
+        assert shell_result["v2AfterTimeOff"] == []
+        assert shell_result["timeBtnOff"] is True
+
+    def test_a_forged_message_is_ignored(self, shell_result):
+        """The view id must belong to the window that sent it — otherwise any
+        page embedding this one could drive the charts."""
+        assert shell_result["v2AfterForged"] == []
+
+
+# ---------------------------------------------------------------------------
+# index.html — the frame side of the page bridge (v1.1.0)
+# ---------------------------------------------------------------------------
+
+_EMBED = """
+ctx.location.search = '?view=v2&chrome=compact&title=BTC%205m';
+ctx.__toParent = [];
+ctx.window.parent = {postMessage: m => ctx.__toParent.push(m)};
+"""
+
+_EMBED_BODY = """
+ev('ws = {readyState: 1, send: m => globalThis.__sent.push(JSON.parse(m))}');
+ctx.__init = {type: 'init', title: 'BTC 5m', bars: [
+    {time: 1700000000, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1}],
+  indicators: [], drawings: [], sourceTimeframe: '1m', displayTimeframe: '5m',
+  timeframes: ['1m', '5m']};
+ev('handleMsg(globalThis.__init)');
+
+out.embedded  = ev('embedded');
+out.viewId    = ev('viewId');
+out.compact   = document.body._cls.has('compact');
+out.wsUrl     = ev('String(ws && ws.url || "")');
+
+// a click anywhere tells the shell this chart is the active one
+(docListeners.mousedown || []).forEach(fn => fn({target: document.body}));
+out.focusSent = ctx.__toParent.filter(m => m.t === 'focus');
+
+// the shell can steer our range and crosshair
+ctx.__toParent.length = 0;
+(docListeners.message || []).forEach(fn =>
+  fn({source: ctx.window.parent, data: {t: 'range', from: 10, to: 20}}));
+out.echoedRange = ctx.__toParent.filter(m => m.t === 'range');
+
+// a message from anywhere else is ignored
+out.appliedForeign = null;
+(docListeners.message || []).forEach(fn =>
+  fn({source: {}, data: {t: 'range', from: 1, to: 2}}));
+out.afterForeign = ctx.__toParent.filter(m => m.t === 'range');
+
+// a layout change from the server is passed up to the shell
+ev("handleMsg({type: 'layout_changed'})");
+out.layoutRelayed = ctx.__toParent.filter(m => m.t === 'layout-changed').length;
+"""
+
+
+@pytest.fixture(scope="module")
+def embed_result() -> dict:
+    return _run(CHART_HTML, _EMBED_BODY, extra_globals=_EMBED)
+
+
+class TestChartFrameBridge:
+    def test_frame_script_runs_clean(self, embed_result):
+        assert embed_result["topLevelError"] is None
+
+    def test_it_knows_it_is_embedded(self, embed_result):
+        assert embed_result["embedded"] is True
+        assert embed_result["viewId"] == "v2"
+
+    def test_compact_chrome_is_applied(self, embed_result):
+        assert embed_result["compact"] is True
+
+    def test_click_reports_focus_to_the_shell(self, embed_result):
+        assert embed_result["focusSent"] == [{"view": "v2", "t": "focus"}]
+
+    def test_a_relayed_range_is_not_echoed_back(self, embed_result):
+        """Without the applyingSync guard the frames would ping-pong for ever."""
+        assert embed_result["echoedRange"] == []
+
+    def test_only_the_shell_may_steer_the_chart(self, embed_result):
+        assert embed_result["afterForeign"] == []
+
+    def test_layout_changes_are_passed_up(self, embed_result):
+        assert embed_result["layoutRelayed"] == 1
+
+
+def test_a_standalone_chart_is_not_embedded():
+    """With no ?view= the page must behave exactly as it always has."""
+    result = _run(CHART_HTML, """
+out.embedded = ev('embedded');
+out.viewId   = ev('viewId');
+out.compact  = document.body._cls.has('compact');
+""")
+    assert result["topLevelError"] is None
+    assert result["embedded"] is False
+    assert result["viewId"] is None
+    assert result["compact"] is False
