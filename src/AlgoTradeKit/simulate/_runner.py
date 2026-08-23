@@ -176,7 +176,7 @@ def run_multi(
         eth_cfg  = SimulateConfig(symbol="ethusdt", risk_per_trade=0.5)
 
         report = run_multi([
-            (ichimoku_strategy, btc_data, btc_cfg),
+            (trend_strategy, btc_data, btc_cfg),
             (macd_strategy,     eth_data, eth_cfg),
         ])
         print(f"Portfolio PnL: {report.total_pnl:.2f}")
