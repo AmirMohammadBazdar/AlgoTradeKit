@@ -72,6 +72,7 @@ packages = ["src/AlgoTradeKit"]
 only-include = [
     "src/AlgoTradeKit",
     "tests",
+    "examples",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
