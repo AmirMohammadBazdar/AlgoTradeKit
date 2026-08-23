@@ -173,7 +173,29 @@ const ctx = {
 };
 ctx.window.location = ctx.location;
 ctx.globalThis = ctx;
-ctx.LightweightCharts = autoStub('LightweightCharts');
+// A chart stub that records its subscriptions, so a test can fire a range or
+// crosshair notification the way the real library does: on a later frame,
+// after the call that caused it has returned.
+const chartStubs = [];
+function makeChartStub() {
+  const cbs = {range: [], logical: [], cross: []};
+  const state = {range: null};
+  const timeScale = autoStub('timeScale', {
+    subscribeVisibleTimeRangeChange: cb => cbs.range.push(cb),
+    subscribeVisibleLogicalRangeChange: cb => cbs.logical.push(cb),
+    setVisibleRange: r => { state.range = r; },
+    getVisibleRange: () => state.range,
+  });
+  const chart = autoStub('chart', {
+    timeScale: () => timeScale,
+    subscribeCrosshairMove: cb => cbs.cross.push(cb),
+    _cbs: cbs,
+    _state: state,
+  });
+  chartStubs.push(chart);
+  return chart;
+}
+ctx.LightweightCharts = autoStub('LightweightCharts', {createChart: () => makeChartStub()});
 ctx.ResizeObserver = function () { return {observe() {}, disconnect() {}}; };
 ctx.devicePixelRatio = 1;
 ctx.__sent = [];
@@ -962,3 +984,76 @@ out.total     = ev('allBars.length');
     assert result["updatesDuring"] == 0          # nothing drawn ahead of the cursor
     assert result["recorded"] == 2               # but both were kept
     assert result["afterExit"] == result["total"]
+
+
+# ---------------------------------------------------------------------------
+# The sync echo — charts must not relay a range back and forth for ever
+# ---------------------------------------------------------------------------
+
+_EMBED_SYNC = """
+ctx.location.search = '?view=v2&chrome=compact';
+ctx.__toParent = [];
+ctx.window.parent = {postMessage: m => ctx.__toParent.push(m)};
+"""
+
+
+def test_a_relayed_range_is_not_reported_back_when_the_chart_notices_it():
+    """The chart library reports a range change on a *later* frame, so a flag
+    set and cleared around the call that caused it is already off by then. That
+    is what made two heavy charts wedge a tab: each kept relaying the other's
+    range straight back."""
+    result = _run(CHART_HTML, """
+ev('handleMsg({type: "init", title: "x", bars: [{time: 1700000000, open: 1,'
+   + ' high: 2, low: 0.5, close: 1.5, volume: 1}], indicators: [], drawings: []})');
+const chart = chartStubs[0];
+const fireRange = r => chart._cbs.range.forEach(cb => cb(r));
+const fireCross = p => chart._cbs.cross.forEach(cb => cb(p));
+
+// the shell tells us where to look
+ev('applyPageRange(100, 200)');
+ctx.__toParent.length = 0;
+fireRange({from: 100, to: 200});            // ← the library notices, later
+out.echoed = ctx.__toParent.filter(m => m.t === 'range');
+
+// a real scroll by this user still reports
+fireRange({from: 300, to: 400});
+out.realMove = ctx.__toParent.filter(m => m.t === 'range');
+
+// same rule for the crosshair
+ctx.__toParent.length = 0;
+ev('applyPageCrosshair(1700000000, 42)');
+fireCross({time: 1700000000, seriesData: new Map()});
+out.crossEchoed = ctx.__toParent.filter(m => m.t === 'crosshair');
+fireCross({time: 1700000600, seriesData: new Map()});
+out.crossReal = ctx.__toParent.filter(m => m.t === 'crosshair');
+""", extra_globals=_EMBED_SYNC)
+    assert result["topLevelError"] is None
+    assert result["echoed"] == []                       # the loop is broken
+    assert len(result["realMove"]) == 1
+    assert result["realMove"][0]["from"] == 300
+    assert result["crossEchoed"] == []
+    assert len(result["crossReal"]) == 1
+
+
+def test_the_shell_drops_a_range_it_just_relayed():
+    """Second line of defence: even if a frame does echo, the shell must not
+    pass the same range round again."""
+    result = _run(PAGE_HTML, _SETTLE + """
+const posted = id => win(id)._posted.slice();
+fromFrame('v1', {t: 'range', from: 100, to: 200});
+out.firstRelay = posted('v2');
+
+// v2 reacts to being moved and reports the very same range back
+win('v2')._posted.length = 0;
+fromFrame('v2', {t: 'range', from: 100, to: 200});
+out.echoRelay = posted('v1');
+
+// a genuinely different range still goes round
+win('v1')._posted.length = 0;
+fromFrame('v2', {t: 'range', from: 500, to: 600});
+out.newRelay = posted('v1');
+""", extra_globals=_LAYOUT)
+    assert result["topLevelError"] is None
+    assert result["firstRelay"] == [{"t": "range", "from": 100, "to": 200}]
+    assert result["echoRelay"] == []                    # not passed round again
+    assert result["newRelay"] == [{"t": "range", "from": 500, "to": 600}]
