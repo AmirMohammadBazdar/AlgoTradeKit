@@ -60,6 +60,22 @@ def _find_free_port(start: int = 8700, host: str = "127.0.0.1") -> int:
     )
 
 
+def _dispatch(loop, coro_fn, *args) -> None:
+    """Run *coro_fn(\*args)* on *loop* from another thread, or drop it.
+
+    The coroutine is only created once the loop is known to be usable: build
+    it first and a send after ``stop()`` leaves an un-awaited coroutine behind,
+    which surfaces as a RuntimeWarning from wherever the garbage collector
+    happens to be running.
+    """
+    if loop is None or loop.is_closed():
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(coro_fn(*args), loop)
+    except RuntimeError:        # loop stopped between the check and the call
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Connection manager
 # ---------------------------------------------------------------------------
@@ -136,6 +152,7 @@ class ChartServer:
         self._manager = ConnectionManager()
         self._loop:   asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._uvicorn: uvicorn.Server | None = None
         self._app    = self._build_app()
 
         # Set by Chart to receive browser → Python messages.
@@ -202,6 +219,7 @@ class ChartServer:
                 log_level="warning",
             )
             server = uvicorn.Server(config)
+            self._uvicorn = server
 
             # Patch startup so we can signal readiness
             _orig = server.startup
@@ -211,7 +229,15 @@ class ChartServer:
                 ready.set()
 
             server.startup = _patched_startup
-            self._loop.run_until_complete(server.serve())
+            try:
+                self._loop.run_until_complete(server.serve())
+            finally:
+                # Let pending callbacks finish before the loop goes away,
+                # otherwise uvicorn's lifespan task is destroyed mid-flight.
+                try:
+                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                finally:
+                    self._loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -224,9 +250,21 @@ class ChartServer:
         log.info("ChartServer started → %s (bound to %s)", self.url, self.host)
 
     def stop(self) -> None:
+        """Shut the server down cleanly.
+
+        Asking uvicorn to exit lets ``serve()`` return on its own, so the
+        thread unwinds normally.  Stopping the loop underneath it instead --
+        which is what this used to do -- raised "Event loop stopped before
+        Future completed" out of every server thread.
+        """
         _reserved_ports.discard(self.port)
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._uvicorn is not None:
+            self._uvicorn.should_exit = True
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3)
+        self._loop = None
+        self._uvicorn = None
 
     def __del__(self) -> None:
         # A server that is created and never started still holds its port
@@ -272,11 +310,7 @@ class ChartServer:
         elif msg_type == "navigate_to_candle":
             self._last_navigate = message
 
-        if self._loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(
-            self._manager.broadcast(message), self._loop
-        )
+        _dispatch(self._loop, self._manager.broadcast, message)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +354,7 @@ class PageServer:
 
         self._loop:   asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._uvicorn: uvicorn.Server | None = None
         self._lock    = threading.Lock()
 
         # ws → the view id it subscribed to
@@ -396,6 +431,7 @@ class PageServer:
                 loop="asyncio", log_level="warning",
             )
             server = uvicorn.Server(config)
+            self._uvicorn = server
             _orig = server.startup
 
             async def _patched_startup(sockets=None):
@@ -403,7 +439,15 @@ class PageServer:
                 ready.set()
 
             server.startup = _patched_startup
-            self._loop.run_until_complete(server.serve())
+            try:
+                self._loop.run_until_complete(server.serve())
+            finally:
+                # Let pending callbacks finish before the loop goes away,
+                # otherwise uvicorn's lifespan task is destroyed mid-flight.
+                try:
+                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                finally:
+                    self._loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -416,9 +460,15 @@ class PageServer:
         log.info("PageServer started → %s (bound to %s)", self.url, self.host)
 
     def stop(self) -> None:
+        """Shut the server down cleanly — see :meth:`ChartServer.stop`."""
         _reserved_ports.discard(self.port)
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._uvicorn is not None:
+            self._uvicorn.should_exit = True
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3)
+        self._loop = None
+        self._uvicorn = None
 
     def __del__(self) -> None:
         try:
@@ -448,9 +498,7 @@ class PageServer:
         elif msg_type == "navigate_to_candle":
             self._last_navigate[view_id] = message
 
-        if self._loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(self._broadcast(view_id, message), self._loop)
+        _dispatch(self._loop, self._broadcast, view_id, message)
 
     async def _broadcast(self, view_id: str, message: dict) -> None:
         text = json.dumps(message)
