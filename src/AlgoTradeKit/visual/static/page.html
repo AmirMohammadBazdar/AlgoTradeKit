@@ -101,9 +101,12 @@ body{background:var(--bg);color:var(--text);
 let layout = null;
 let sync   = {time: true, crosshair: true};
 let activeView = null;
-// Set while a relayed message is being applied, so a frame reacting to it
-// cannot bounce the same range straight back at everyone else.
-let relaying = false;
+// The last range and crosshair relayed. A frame reports a range change on a
+// later animation frame, so a flag set and cleared around the broadcast is
+// already off when the echo arrives — the charts would then relay the same
+// range to each other for ever. Dropping a repeat by value ends it.
+let lastRange = null, lastCrosshair = null;
+const SAME_TIME = (a, b) => a != null && b != null && Math.abs(a - b) < 1;
 const frames = {};                     // view id → window
 
 async function loadLayout(){
@@ -346,16 +349,17 @@ window.addEventListener('message', ev => {
     case 'range':
       // Sync by TIME, never by candle index: a 3m and a 5m chart have
       // completely different logical indices for the same instant.
-      if(!sync.time || relaying) break;
-      relaying = true;
+      if(!sync.time) break;
+      if(lastRange && SAME_TIME(lastRange.from, msg.from)
+                   && SAME_TIME(lastRange.to, msg.to)) break;   // an echo
+      lastRange = {from: msg.from, to: msg.to};
       broadcast(id, {t: 'range', from: msg.from, to: msg.to});
-      relaying = false;
       break;
     case 'crosshair':
-      if(!sync.crosshair || relaying) break;
-      relaying = true;
+      if(!sync.crosshair) break;
+      if(SAME_TIME(lastCrosshair, msg.time)) break;             // an echo
+      lastCrosshair = msg.time;
       broadcast(id, {t: 'crosshair', time: msg.time, price: msg.price});
-      relaying = false;
       break;
     case 'crosshair-clear':
       if(!sync.crosshair) break;

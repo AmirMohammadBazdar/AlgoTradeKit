@@ -658,12 +658,17 @@ let sourceTimeframe=null, displayTimeframe=null, timeframeList=[], tfPending=nul
 
 // ChartPage embedding (v1.1.0). viewId names this chart inside the page and
 // selects our slice of the WebSocket traffic; `embedded` says whether there is
-// a shell to talk to. applyingSync stops a relayed range/crosshair from being
-// echoed straight back at the page.
+// a shell to talk to.
 const _q = new URLSearchParams(location.search);
 const viewId   = _q.get('view');
 const embedded = viewId !== null && window.parent !== window;
-let applyingSync = false;
+// The last range the page told us to show. A flag alone cannot guard this:
+// lightweight-charts reports a range change on a later frame, by which time a
+// synchronous flag is long cleared -- so the charts would relay the same range
+// back and forth for ever. Comparing values ends it deterministically.
+let appliedRange = null;
+const SAME_TIME = (a, b) => a != null && b != null && Math.abs(a - b) < 1;
+let appliedCrosshair = null;
 
 const panes={};
 let mainChart=null, mainSeries=null, volumeSeries=null;
@@ -788,7 +793,11 @@ function createPane(id,flex=3,label=''){
   // index: charts on different timeframes share instants, not candle numbers.
   if(id==='main'){
     chart.timeScale().subscribeVisibleTimeRangeChange(range=>{
-      if(!range || applyingSync) return;
+      if(!range) return;
+      // Do not report back the range we were just given
+      if(appliedRange && SAME_TIME(range.from, appliedRange.from)
+                      && SAME_TIME(range.to, appliedRange.to)) return;
+      appliedRange = null;                  // a genuine move by this user
       postToPage({t:'range', from:range.from, to:range.to});
     });
   }
@@ -821,7 +830,8 @@ function postToPage(msg){
 function postCrosshair(param){
   if(!embedded) return;
   if(!param || !param.time){ postToPage({t:'crosshair-clear'}); return; }
-  if(applyingSync) return;
+  if(SAME_TIME(param.time, appliedCrosshair)) return;   // our own echo
+  appliedCrosshair = null;
   let price = null;
   if(param.seriesData && mainSeries){
     const bar = param.seriesData.get(mainSeries);
@@ -832,26 +842,25 @@ function postCrosshair(param){
 
 function applyPageRange(from, to){
   if(!mainChart) return;
-  applyingSync = true;
+  const current = mainChart.timeScale().getVisibleRange();
+  if(current && SAME_TIME(current.from, from) && SAME_TIME(current.to, to)) return;
+  appliedRange = {from, to};    // remember it so the echo can be recognised
   try{ mainChart.timeScale().setVisibleRange({from, to}); }
   catch{}                       // range outside this chart's data — ignore
-  finally{ applyingSync = false; }
   redrawAll();
 }
 
 function applyPageCrosshair(time, price){
   if(!mainChart || !mainSeries) return;
-  applyingSync = true;
+  appliedCrosshair = time;
   try{ mainChart.setCrosshairPosition(price == null ? 0 : price, time, mainSeries); }
   catch{}
-  finally{ applyingSync = false; }
 }
 
 function clearPageCrosshair(){
   if(!mainChart) return;
-  applyingSync = true;
+  appliedCrosshair = null;
   try{ mainChart.clearCrosshairPosition(); }catch{}
-  applyingSync = false;
 }
 
 if(embedded){
