@@ -38,6 +38,14 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .tb svg{flex-shrink:0}
 #ml{margin-left:auto}
 
+/* ── Embedded in a ChartPage (v1.1.0) ────────────────────────── */
+/* One page-level header is enough; the frame keeps a slim bar so each
+   chart still shows its own title and OHLCV readout. */
+body.compact #hdr{height:24px;padding:0 8px;gap:8px}
+body.compact #logo{display:none}
+body.compact #chart-title{font-size:11px;font-weight:600;color:var(--text)}
+body.compact #ohlcv{font-size:10px}
+
 /* ── Timeframe selector (v1.1.0) ─────────────────────────────── */
 #tf-wrap{position:relative;flex-shrink:0}
 #tf-btn{font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em}
@@ -616,6 +624,15 @@ let candleCountLimit=null;
 // shows what the server offers, asks for one, and redraws on the new init.
 let sourceTimeframe=null, displayTimeframe=null, timeframeList=[], tfPending=null;
 
+// ChartPage embedding (v1.1.0). viewId names this chart inside the page and
+// selects our slice of the WebSocket traffic; `embedded` says whether there is
+// a shell to talk to. applyingSync stops a relayed range/crosshair from being
+// echoed straight back at the page.
+const _q = new URLSearchParams(location.search);
+const viewId   = _q.get('view');
+const embedded = viewId !== null && window.parent !== window;
+let applyingSync = false;
+
 const panes={};
 let mainChart=null, mainSeries=null, volumeSeries=null;
 
@@ -728,10 +745,20 @@ function createPane(id,flex=3,label=''){
       _updateLastVals(param.seriesData);
       updateIndLegendValues(param);
       updateCursorAxisLabel(param);
+      postCrosshair(param);
     }
     syncCrosshair(id,param);
     redrawAll();
   });
+
+  // Tell the page when this chart is scrolled or zoomed. Time, not logical
+  // index: charts on different timeframes share instants, not candle numbers.
+  if(id==='main'){
+    chart.timeScale().subscribeVisibleTimeRangeChange(range=>{
+      if(!range || applyingSync) return;
+      postToPage({t:'range', from:range.from, to:range.to});
+    });
+  }
 
   new ResizeObserver(()=>{
     chart.applyOptions({width:inner.clientWidth,height:wrap.clientHeight});
@@ -745,6 +772,73 @@ function syncCrosshair(srcId,param){
   Object.entries(panes).forEach(([id,p])=>{
     if(id===srcId) return;
     try{p.chart.setCrosshairPosition(param.point?.y||0,param.time,p.seriesList[0]);}catch{}
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CHART PAGE BRIDGE (v1.1.0)
+//  Only active when this chart is a frame inside a ChartPage. The
+//  shell relays between frames; we never talk to a sibling directly.
+// ═══════════════════════════════════════════════════════════════
+function postToPage(msg){
+  if(!embedded) return;
+  try{ window.parent.postMessage(Object.assign({view:viewId}, msg), '*'); }catch{}
+}
+
+function postCrosshair(param){
+  if(!embedded) return;
+  if(!param || !param.time){ postToPage({t:'crosshair-clear'}); return; }
+  if(applyingSync) return;
+  let price = null;
+  if(param.seriesData && mainSeries){
+    const bar = param.seriesData.get(mainSeries);
+    if(bar) price = bar.close != null ? bar.close : bar.value;
+  }
+  postToPage({t:'crosshair', time:param.time, price:price});
+}
+
+function applyPageRange(from, to){
+  if(!mainChart) return;
+  applyingSync = true;
+  try{ mainChart.timeScale().setVisibleRange({from, to}); }
+  catch{}                       // range outside this chart's data — ignore
+  finally{ applyingSync = false; }
+  redrawAll();
+}
+
+function applyPageCrosshair(time, price){
+  if(!mainChart || !mainSeries) return;
+  applyingSync = true;
+  try{ mainChart.setCrosshairPosition(price == null ? 0 : price, time, mainSeries); }
+  catch{}
+  finally{ applyingSync = false; }
+}
+
+function clearPageCrosshair(){
+  if(!mainChart) return;
+  applyingSync = true;
+  try{ mainChart.clearCrosshairPosition(); }catch{}
+  applyingSync = false;
+}
+
+if(embedded){
+  document.body.classList.toggle('compact', _q.get('chrome') === 'compact');
+  const startTitle = _q.get('title');
+  if(startTitle) document.getElementById('chart-title').textContent = startTitle;
+
+  // Clicking anywhere in this chart makes it the page's active one
+  window.addEventListener('mousedown', () => postToPage({t:'focus'}), true);
+  window.addEventListener('focus',     () => postToPage({t:'focus'}));
+
+  window.addEventListener('message', ev => {
+    if(ev.source !== window.parent) return;      // only the shell may steer us
+    const msg = ev.data;
+    if(!msg || typeof msg !== 'object') return;
+    switch(msg.t){
+      case 'range':           applyPageRange(msg.from, msg.to);        break;
+      case 'crosshair':       applyPageCrosshair(msg.time, msg.price); break;
+      case 'crosshair-clear': clearPageCrosshair();                    break;
+    }
   });
 }
 
@@ -2562,7 +2656,7 @@ let ws=null, retryTimer=null;
 function wsConnect(){
   const dot=document.getElementById('wsdot'), lbl=document.getElementById('wslbl');
   dot.className='conn'; lbl.textContent='Connecting…';
-  ws=new WebSocket(`ws://${location.host}/ws`);
+  ws=new WebSocket(`ws://${location.host}/ws${viewId ? '?view='+encodeURIComponent(viewId) : ''}`);
   ws.onopen=()=>{ dot.className='live'; lbl.textContent='Live'; };
   ws.onclose=()=>{ dot.className=''; lbl.textContent='Disconnected';
     clearTimeout(retryTimer); retryTimer=setTimeout(wsConnect,2000); };
@@ -2621,6 +2715,10 @@ function handleMsg(msg){
     case 'update_drawing':
       if(drawings[msg.drawing.id]) Object.assign(drawings[msg.drawing.id],msg.drawing);
       redrawAll(); break;
+    case 'layout_changed':
+      // A chart was added to the page after it opened; the shell re-reads it.
+      postToPage({t:'layout-changed'});
+      break;
     case 'timeframe_error':
       // The server refused the switch (bad multiple, no source TF). Put the
       // button back the way it was and say why.
