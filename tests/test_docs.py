@@ -232,3 +232,32 @@ class TestExamplesShip:
         assert scripts, "examples/ has no demos"
         for name in scripts:
             assert name in readme, f"{name} is not mentioned in README.md"
+
+    def test_examples_import_nothing_but_the_library(self):
+        """A demo shows the library off, so it may only reach for the library,
+        its declared dependencies, the standard library and its own helper.
+
+        An allow-list on purpose: the opposite test would have to write down
+        what to keep out, and anything worth keeping out is the last thing that
+        should be named in a file that ships."""
+        import ast
+
+        allowed = {
+            "AlgoTradeKit", "pandas", "numpy",
+            "_sample_data",
+            "sys", "os", "math", "random", "time", "json", "pathlib",
+            "datetime", "argparse", "typing", "__future__",
+        }
+        for path in sorted((ROOT / "examples").glob("*.py")):
+            for node in ast.walk(ast.parse(_read(path))):
+                if isinstance(node, ast.Import):
+                    roots = [alias.name.split(".")[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    roots = [(node.module or "").split(".")[0]]
+                else:
+                    continue
+                for root in roots:
+                    assert root in allowed, (
+                        f"{path.name} imports {root!r}, which is not the "
+                        f"library, a dependency or the standard library"
+                    )
