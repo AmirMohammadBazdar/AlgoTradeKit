@@ -195,6 +195,9 @@ ctx.globalThis = ctx;
 // crosshair notification the way the real library does: on a later frame,
 // after the call that caused it has returned.
 const chartStubs = [];
+// The page builds a chart at load and another when init arrives; the live one
+// is always the most recent.
+const mainChartStub = () => chartStubs[chartStubs.length - 1];
 function makeChartStub() {
   const cbs = {range: [], logical: [], cross: []};
   const state = {range: null};
@@ -203,6 +206,8 @@ function makeChartStub() {
     subscribeVisibleLogicalRangeChange: cb => cbs.logical.push(cb),
     setVisibleRange: r => { state.range = r; },
     getVisibleRange: () => state.range,
+    setVisibleLogicalRange: r => { state.logical = r; },
+    getVisibleLogicalRange: () => state.logical,
   });
   const chart = autoStub('chart', {
     timeScale: () => timeScale,
@@ -465,6 +470,7 @@ iframes.forEach(f => f.onload && f.onload());   // frames announce themselves
 const win = id => iframes.find(f => f.src.includes('view=' + id)).contentWindow;
 const fromFrame = (id, msg) => (docListeners.message || [])
   .forEach(fn => fn({source: win(id), data: Object.assign({view: id}, msg)}));
+const clearAll = () => iframes.forEach(f => f.contentWindow._posted.length = 0);
 """
 
 
@@ -482,13 +488,26 @@ out.title       = document.getElementById('page-title').textContent;
 // the first chart starts active
 out.activeCells = queryAll('.cell').filter(c => c._cls.has('active')).map(c => c.id);
 
-// clicking a chart makes it the active one
+// pointing at a chart makes it the active one
 fromFrame('v3', {t: 'focus'});
 out.activeAfterFocus = queryAll('.cell').filter(c => c._cls.has('active')).map(c => c.id);
 
-// a range from one chart reaches the others and does not come back
-fromFrame('v1', {t: 'range', from: 100, to: 200});
-out.v1Posted = win('v1').contentWindowPosted || win('v1')._posted.slice();
+// a range from the active chart reaches the others and does not come back
+clearAll();
+fromFrame('v3', {t: 'range', from: 100, to: 200});
+out.v1FromActive = win('v1')._posted.slice();
+out.v2FromActive = win('v2')._posted.slice();
+out.v3FromActive = win('v3')._posted.slice();
+
+// ...and one from a chart nobody is pointing at is ignored, however far its
+// value has drifted: that is the rounding chase that made the charts shake
+clearAll();
+fromFrame('v1', {t: 'range', from: 137, to: 242});
+out.v2FromIdle = win('v2')._posted.slice();
+
+fromFrame('v1', {t: 'focus'});
+fromFrame('v1', {t: 'range', from: 900, to: 1000});
+out.v1Posted = win('v1')._posted.slice();
 out.v2Posted = win('v2')._posted.slice();
 out.v3Posted = win('v3')._posted.slice();
 
@@ -540,9 +559,18 @@ class TestChartPageShell:
         assert shell_result["activeAfterFocus"] == ["cell-v3"]
 
     def test_a_range_reaches_the_others_but_not_the_sender(self, shell_result):
-        assert shell_result["v1Posted"] == []       # never echoed back
-        assert shell_result["v2Posted"] == [{"t": "range", "from": 100, "to": 200}]
-        assert shell_result["v3Posted"] == [{"t": "range", "from": 100, "to": 200}]
+        relayed = {"t": "range", "from": 100, "to": 200}
+        assert shell_result["v3FromActive"] == []          # never echoed back
+        assert shell_result["v1FromActive"] == [relayed]
+        assert shell_result["v2FromActive"] == [relayed]
+        # and the same once the pointer moves to another chart
+        assert shell_result["v1Posted"] == []
+        assert shell_result["v2Posted"] == [{"t": "range", "from": 900, "to": 1000}]
+
+    def test_only_the_chart_being_used_moves_the_others(self, shell_result):
+        """Each chart snaps a range to its own bars, so if every chart could
+        answer back they would chase each other's rounding and shake."""
+        assert shell_result["v2FromIdle"] == []
 
     def test_crosshair_relays_time_and_price(self, shell_result):
         assert shell_result["v2Crosshair"] == [
@@ -1023,19 +1051,36 @@ def test_a_relayed_range_is_not_reported_back_when_the_chart_notices_it():
     result = _run(CHART_HTML, """
 ev('handleMsg({type: "init", title: "x", bars: [{time: 1700000000, open: 1,'
    + ' high: 2, low: 0.5, close: 1.5, volume: 1}], indicators: [], drawings: []})');
-const chart = chartStubs[0];
+const chart = mainChartStub();
 const fireRange = r => chart._cbs.range.forEach(cb => cb(r));
 const fireCross = p => chart._cbs.cross.forEach(cb => cb(p));
 
-// the shell tells us where to look
+// nobody is pointing at this chart, so it never drives the others
+ctx.__toParent.length = 0;
+fireRange({from: 10, to: 20});
+out.idleMove = ctx.__toParent.filter(m => m.t === 'range');
+
+// the pointer arrives — now this chart is the one being used
+(docListeners.mouseover || []).forEach(fn => fn({}));
+out.focusSent = ctx.__toParent.filter(m => m.t === 'focus').length;
+
+// the shell tells us where to look; the chart snaps that to its own bars and
+// reports something slightly different a frame later. That must stay quiet.
 ev('applyPageRange(100, 200)');
 ctx.__toParent.length = 0;
-fireRange({from: 100, to: 200});            // ← the library notices, later
+fireRange({from: 100.4, to: 200.6});        // ← snapped, and late
 out.echoed = ctx.__toParent.filter(m => m.t === 'range');
 
 // a real scroll by this user still reports
+ev('syncMuteUntil = 0');
 fireRange({from: 300, to: 400});
 out.realMove = ctx.__toParent.filter(m => m.t === 'range');
+
+// and it goes quiet again once the pointer leaves
+(docListeners.mouseout || []).forEach(fn => fn({relatedTarget: null}));
+ctx.__toParent.length = 0;
+fireRange({from: 700, to: 800});
+out.afterPointerLeft = ctx.__toParent.filter(m => m.t === 'range');
 
 // same rule for the crosshair
 ctx.__toParent.length = 0;
@@ -1046,9 +1091,12 @@ fireCross({time: 1700000600, seriesData: new Map()});
 out.crossReal = ctx.__toParent.filter(m => m.t === 'crosshair');
 """, extra_globals=_EMBED_SYNC)
     assert result["topLevelError"] is None
+    assert result["idleMove"] == []                     # not the chart in use
+    assert result["focusSent"] >= 1
     assert result["echoed"] == []                       # the loop is broken
     assert len(result["realMove"]) == 1
     assert result["realMove"][0]["from"] == 300
+    assert result["afterPointerLeft"] == []
     assert result["crossEchoed"] == []
     assert len(result["crossReal"]) == 1
 
@@ -1058,20 +1106,80 @@ def test_the_shell_drops_a_range_it_just_relayed():
     pass the same range round again."""
     result = _run(PAGE_HTML, _SETTLE + """
 const posted = id => win(id)._posted.slice();
+fromFrame('v1', {t: 'focus'});
 fromFrame('v1', {t: 'range', from: 100, to: 200});
 out.firstRelay = posted('v2');
 
-// v2 reacts to being moved and reports the very same range back
+// v1 is still the chart in use, and sends the identical range again
 win('v2')._posted.length = 0;
-fromFrame('v2', {t: 'range', from: 100, to: 200});
-out.echoRelay = posted('v1');
+fromFrame('v1', {t: 'range', from: 100, to: 200});
+out.repeatRelay = posted('v2');
 
 // a genuinely different range still goes round
-win('v1')._posted.length = 0;
-fromFrame('v2', {t: 'range', from: 500, to: 600});
-out.newRelay = posted('v1');
+win('v2')._posted.length = 0;
+fromFrame('v1', {t: 'range', from: 500, to: 600});
+out.newRelay = posted('v2');
 """, extra_globals=_LAYOUT)
     assert result["topLevelError"] is None
     assert result["firstRelay"] == [{"t": "range", "from": 100, "to": 200}]
-    assert result["echoRelay"] == []                    # not passed round again
+    assert result["repeatRelay"] == []                  # not passed round again
     assert result["newRelay"] == [{"t": "range", "from": 500, "to": 600}]
+
+
+# ---------------------------------------------------------------------------
+# "Open on Candle Chart" — the whole page goes to the trade, and stays there
+# ---------------------------------------------------------------------------
+
+def test_navigating_to_a_trade_takes_the_page_with_it():
+    """The report links one chart. On a page the others should follow, and
+    nothing should drag the view back afterwards."""
+    result = _run(CHART_HTML, """
+const bars = [];
+for (let i = 0; i < 400; i++) {
+  bars.push({time: 1700000000 + i * 300, open: 1, high: 2, low: 0.5,
+             close: 1.5, volume: 1});
+}
+ctx.__bars = bars;
+ev('handleMsg({type: "init", title: "x", bars: globalThis.__bars,'
+   + ' indicators: [], drawings: []})');
+const chart = mainChartStub();
+
+// the server replays the navigate the report asked for
+ctx.__toParent.length = 0;
+ev('handleMsg({type: "navigate_to_candle", timestamp: ' + bars[100].time + '})');
+out.announced = ctx.__toParent.filter(m => m.t === 'navigate');
+out.jumped = chart._state.logical || null;
+
+// a jump must not be mistaken for a user scroll and broadcast as a range
+(docListeners.mouseover || []).forEach(fn => fn({}));
+ctx.__toParent.length = 0;
+ev('scrollToTime(' + bars[200].time + ')');
+chart._cbs.range.forEach(cb => cb({from: 1, to: 2}));   // the snap, a frame later
+out.rangeAfterJump = ctx.__toParent.filter(m => m.t === 'range');
+
+// and the other charts are told, without answering back
+ctx.__toParent.length = 0;
+(docListeners.message || []).forEach(fn => fn({source: ctx.window.parent,
+  data: {t: 'navigate', time: bars[300].time}}));
+out.relayedBack = ctx.__toParent.filter(m => m.t === 'navigate');
+""", extra_globals=_EMBED_SYNC)
+    assert result["topLevelError"] is None
+    assert len(result["announced"]) == 1              # the page is told
+    # candle 100 centred: 50 either side
+    assert result["jumped"] == {"from": 50, "to": 150}
+    assert result["rangeAfterJump"] == []             # not read as a user scroll
+    assert result["relayedBack"] == []                # a relayed jump is silent
+
+
+def test_the_shell_passes_a_trade_jump_to_every_other_chart():
+    result = _run(PAGE_HTML, _SETTLE + """
+clearAll();
+fromFrame('v1', {t: 'navigate', time: 1700001234});
+out.v2 = win('v2')._posted.slice();
+out.v3 = win('v3')._posted.slice();
+out.v1 = win('v1')._posted.slice();
+""", extra_globals=_LAYOUT)
+    assert result["topLevelError"] is None
+    assert result["v2"] == [{"t": "navigate", "time": 1700001234}]
+    assert result["v3"] == [{"t": "navigate", "time": 1700001234}]
+    assert result["v1"] == []
