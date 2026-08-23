@@ -46,6 +46,17 @@ body{background:var(--bg);color:var(--text);
 .rdiv:hover,.cdiv:hover,.rdiv.dragging,.cdiv.dragging{opacity:1;background:var(--accent)}
 
 #empty{margin:auto;color:var(--text3);font-size:12px}
+
+/* ── Replay bar (v1.1.0) ─────────────────────────────────────── */
+#rp{display:flex;align-items:center;gap:2px;margin-left:14px}
+#rp-controls{display:none;align-items:center;gap:2px}
+#rp-controls.open{display:flex}
+#rp-clock{font-family:'Courier New',monospace;font-size:10px;color:var(--text2);
+          padding:0 6px;white-space:nowrap}
+#rp-speed{height:22px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);
+          border-radius:4px;font-size:10px;font-family:'Courier New',monospace;cursor:pointer}
+#rp-note{font-size:10px;color:var(--accent);padding-left:8px;display:none}
+#rp-note.show{display:inline}
 </style>
 </head>
 <body>
@@ -53,6 +64,24 @@ body{background:var(--bg);color:var(--text);
 <div id="hdr">
   <span id="logo">⬡ AlgoTradeKit</span>
   <span id="page-title">Chart Page</span>
+  <div id="rp">
+    <button class="sync-btn" id="rp-btn" onclick="replayToggle()"
+            title="Bar replay — every chart on this page steps together">⏵⏵ REPLAY</button>
+    <div id="rp-controls">
+      <button class="sync-btn" onclick="replayToStart()" title="Back to the start bar">⏮</button>
+      <button class="sync-btn" onclick="replayStep(-1)" title="One step back (Shift+←)">◀</button>
+      <button class="sync-btn" id="rp-play" onclick="replayPlayPause()" title="Play / pause (Space)">▶</button>
+      <button class="sync-btn" onclick="replayStep(1)" title="One step forward (Shift+→)">▶|</button>
+      <select id="rp-speed" onchange="replaySetSpeed(this.value)">
+        <option value="0.25">0.25x</option><option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option><option value="2">2x</option>
+        <option value="5">5x</option><option value="10">10x</option>
+      </select>
+      <span id="rp-clock"></span>
+      <button class="sync-btn" onclick="replayExit()" title="Leave replay (Esc)">✕</button>
+    </div>
+    <span id="rp-note">click a candle on any chart to start</span>
+  </div>
   <div id="sync-box">
     <button class="sync-btn" id="sync-time"  onclick="toggleSync('time')"  title="Scroll and zoom every chart together">TIME</button>
     <button class="sync-btn" id="sync-cross" onclick="toggleSync('crosshair')" title="Mirror the crosshair onto every chart">CROSSHAIR</button>
@@ -197,6 +226,111 @@ function broadcast(fromId, msg){
   });
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  PAGE-WIDE BAR REPLAY (v1.1.0)
+//  One cursor for the whole page. The frames render it; the shell
+//  owns it. Stepping by the finest source timeframe on the page is
+//  what keeps a 3m and a 5m chart on the same instant instead of
+//  each counting its own candles.
+// ═══════════════════════════════════════════════════════════════
+let replay = {active:false, picking:false, cursor:null, start:null,
+              playing:false, timer:null, speed:1,
+              step:60, first:null, last:null};
+
+function replayToggle(){
+  if(replay.active || replay.picking) replayExit();
+  else replayBegin();
+}
+
+function replayBegin(){
+  replay.picking = true;
+  document.getElementById('rp-btn').classList.add('on');
+  document.getElementById('rp-note').classList.add('show');
+  broadcast(null, {t:'replay-arm'});
+  broadcast(null, {t:'replay-info'});      // frames answer with their extents
+  replay.first = replay.last = null;
+  replay.step  = null;
+}
+
+function noteReplayInfo(msg){
+  // The page can only step as finely as its finest chart, and can only cover
+  // the span every chart has data for.
+  replay.step  = replay.step  == null ? msg.step  : Math.min(replay.step,  msg.step);
+  replay.first = replay.first == null ? msg.first : Math.max(replay.first, msg.first);
+  replay.last  = replay.last  == null ? msg.last  : Math.min(replay.last,  msg.last);
+}
+
+function replayPickedAt(time){
+  if(!replay.picking) return;
+  replay.picking = false;
+  document.getElementById('rp-note').classList.remove('show');
+  document.getElementById('rp-controls').classList.add('open');
+  replay.active = true;
+  replay.start  = time;
+  replaySeek(time);
+}
+
+function replaySeek(t){
+  if(!replay.active) return;
+  if(replay.first != null) t = Math.max(replay.first, t);
+  if(replay.last  != null) t = Math.min(replay.last,  t);
+  replay.cursor = t;
+  broadcast(null, {t:'replay-cursor', time:t});
+  const clock = document.getElementById('rp-clock');
+  clock.textContent = new Date(t * 1000).toISOString().slice(0,16).replace('T',' ') + ' UTC';
+}
+
+function replayStep(dir){
+  if(!replay.active) return;
+  const before = replay.cursor;
+  replaySeek(replay.cursor + dir * (replay.step || 60));
+  if(dir > 0 && replay.cursor === before) replayPause();   // ran out of data
+}
+
+function replayToStart(){ if(replay.active) replaySeek(replay.start); }
+function replayPlayPause(){ replay.playing ? replayPause() : replayPlay(); }
+
+function replayPlay(){
+  if(!replay.active || replay.playing) return;
+  replay.playing = true;
+  document.getElementById('rp-play').textContent = '⏸';
+  const tick = () => {
+    if(!replay.playing) return;
+    replayStep(1);
+    if(replay.playing) replay.timer = setTimeout(tick, 500 / replay.speed);
+  };
+  replay.timer = setTimeout(tick, 500 / replay.speed);
+}
+
+function replayPause(){
+  replay.playing = false;
+  clearTimeout(replay.timer);
+  replay.timer = null;
+  document.getElementById('rp-play').textContent = '▶';
+}
+
+function replaySetSpeed(v){ replay.speed = parseFloat(v) || 1; }
+
+function replayExit(){
+  replayPause();
+  replay.active = replay.picking = false;
+  replay.cursor = null;
+  document.getElementById('rp-btn').classList.remove('on');
+  document.getElementById('rp-note').classList.remove('show');
+  document.getElementById('rp-controls').classList.remove('open');
+  document.getElementById('rp-clock').textContent = '';
+  broadcast(null, {t:'replay-exit'});
+}
+
+document.addEventListener('keydown', e => {
+  if(!replay.active) return;
+  if(e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '')) return;
+  if(e.key === 'Escape'){ replayExit(); e.preventDefault(); }
+  else if(e.code === 'Space'){ replayPlayPause(); e.preventDefault(); }
+  else if(e.shiftKey && e.key === 'ArrowRight'){ replayStep(1);  e.preventDefault(); }
+  else if(e.shiftKey && e.key === 'ArrowLeft'){  replayStep(-1); e.preventDefault(); }
+});
+
 window.addEventListener('message', ev => {
   const msg = ev.data;
   if(!msg || typeof msg !== 'object' || !msg.t) return;
@@ -226,6 +360,12 @@ window.addEventListener('message', ev => {
     case 'crosshair-clear':
       if(!sync.crosshair) break;
       broadcast(id, {t: 'crosshair-clear'});
+      break;
+    case 'replay-info':
+      noteReplayInfo(msg);
+      break;
+    case 'replay-pick':
+      replayPickedAt(msg.time);
       break;
     case 'layout-changed':
       loadLayout();
