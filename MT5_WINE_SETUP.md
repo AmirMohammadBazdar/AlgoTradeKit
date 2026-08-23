@@ -514,9 +514,19 @@ With `display_open_browser=False` the session prints the addresses to open:
 > way** — keep `chart_host="127.0.0.1"` and forward the ports instead. The
 > socat trick (Option 2) still works as a fallback.
 
-`ichimoku_strategy.py` ships this as **mode 2** (`RUN_MODE = 2`) — set the
-`LIVE_*` block, run it, and watch the chart + report + event log update on
-every closed candle. No orders are placed in `run_live`.
+`run_live` places no orders: positions are filled by the simulation engine on
+live prices, and the chart, report and event log update on every closed candle.
+
+```python
+from AlgoTradeKit.broker import Broker
+from AlgoTradeKit.trader import TraderConfig, run_live
+
+run_live(
+    strategy=MyStrategy(),
+    broker=Broker("metatrader", host="127.0.0.1", port=18812),
+    config=TraderConfig(symbol="EURUSD", display=True),
+)
+```
 
 ---
 
