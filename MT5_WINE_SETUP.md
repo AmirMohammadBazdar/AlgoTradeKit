@@ -99,6 +99,7 @@ back or auto-starts anything. Each message names the Part that fixes it:
 | `Bridge is not running — see MT5_WINE_SETUP.md Part G` | Wine and the prefix are fine, nothing answered on `host:port` | **Part G** (start it in tmux) |
 | `Could not reach the MetaTrader bridge at HOST:PORT` (remote host) | A non-local `host` was given; local checks are skipped | **Part G** on that machine + open the port / SSH tunnel |
 | `MetaTrader bridge closed the connection.` | The bridge died mid-call (terminal crash, `wineserver -k`) | Re-attach tmux, restart the bridge (**Part G**) |
+| `… accepted the connection but sent no reply within Ns` | Something *is* listening on that port, but it is not answering: a stale SSH tunnel, a port forwarded to another service, a captive middlebox that accepts every TCP connection, or a bridge whose terminal is still starting | Confirm `bridge_server.py` owns that port (**Part G**), re-make the tunnel, then Troubleshooting |
 | `mt5.initialize failed: (-10005, 'IPC timeout')` (printed **by the bridge**) | Stale Wine processes, or `--path` was passed | `wineserver -k`, retry **without** `--path` (**Part G**, Troubleshooting) |
 
 ---
