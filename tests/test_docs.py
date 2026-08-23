@@ -97,6 +97,7 @@ class TestGuideMatchesDiagnostics:
         assert "MT5 Wine prefix not found" in guide
         assert "Bridge is not running" in guide
         assert "Could not reach the MetaTrader bridge" in guide
+        assert "accepted the connection but sent no reply" in guide
 
     def test_native_transport_hints_are_documented(self, guide):
         assert "The 'MetaTrader5' package is not installed in this Python" in guide
