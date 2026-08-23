@@ -94,6 +94,19 @@ class Chart:
         range left the window, are dropped on both the Python side and the
         browser side as new candles stream in.  ``None`` = unbounded.
         Can also be changed later via :meth:`set_candle_limit`.
+    source_timeframe : str | None
+        Timeframe of the data you pass to :meth:`set_data` (v1.1.0).
+        ``None`` auto-detects it from the timestamps.  Give it explicitly for
+        very short or gappy data, where detection cannot see a regular step.
+    display_timeframe : str | None
+        Timeframe to *show* (v1.1.0).  ``None`` shows the source unchanged.
+        Anything higher is resampled **in Python** — feed 1m candles, display
+        5m, and let the viewer switch from the toolbar.  Only whole multiples
+        of the source are possible (5m from 1m yes, 6h from 4h no).
+    timeframes : list[str] | None
+        Which timeframes the browser's selector offers.  ``None`` offers every
+        valid multiple of the source.  Pass a list to narrow it; an entry that
+        cannot be produced from the source is rejected.
     """
 
     def __init__(
@@ -105,6 +118,9 @@ class Chart:
         volume_in_main: bool = True,
         host:           str  = "127.0.0.1",
         candle_count_limit: int | None = None,
+        source_timeframe:   str | None = None,
+        display_timeframe:  str | None = None,
+        timeframes:         list[str] | None = None,
     ) -> None:
         self.title          = title
         self.chart_type     = chart_type
@@ -115,6 +131,21 @@ class Chart:
         self._indicators: list[IndicatorSeries] = []
         self._drawings:   list                = []
         self.df:          pd.DataFrame        = pd.DataFrame()  # raw OHLCV kept for indicator use
+
+        # ── Timeframe state (v1.1.0) ──────────────────────────────────────
+        # _raw_df   : exactly what set_data() was given (what self.df is at
+        #             the source timeframe — kept so switching back is exact)
+        # _source_df: the same data canonicalised to a 'timestamp' ms column,
+        #             which is what the resampler consumes
+        self._raw_df:    pd.DataFrame = pd.DataFrame()
+        self._source_df: pd.DataFrame = pd.DataFrame()
+        self._source_tf:  str | None = None
+        self._display_tf: str | None = None
+        self._tf_hint          = source_timeframe
+        self._pending_display  = display_timeframe
+        self._tf_requested     = timeframes
+        self._timeframes: list[str] = []
+        self._candle_range: dict | None = None
 
         self._server = ChartServer(title=title, port=port, host=host)
         self._server.on_message = self._handle_browser_message
@@ -142,6 +173,9 @@ class Chart:
         port:          int  = 0,
         volume_in_main: bool = True,
         candle_range:  dict | None = None,
+        source_timeframe:  str | None = None,
+        display_timeframe: str | None = None,
+        timeframes:        list[str] | None = None,
     ) -> Chart:
         """
         Create a Chart pre-loaded with data from an AlgoTradeKit CSV file.
@@ -167,6 +201,10 @@ class Chart:
             ``start`` / ``end`` values accept the same formats as
             ``Collector.starttime``: ``"YYYY/MM/DD"``, ``"YYYY-MM-DD"``,
             ``datetime``, Unix-seconds ``int``, or Unix-milliseconds ``int``.
+        source_timeframe, display_timeframe, timeframes
+            Timeframe switching (v1.1.0) — see :class:`Chart`.  Load a 1m CSV
+            with ``display_timeframe="5m"`` and the viewer can switch from the
+            toolbar.
 
         Example
         -------
@@ -192,6 +230,9 @@ class Chart:
         chart = cls(
             title=title, chart_type=chart_type,
             theme=theme, port=port, volume_in_main=volume_in_main,
+            source_timeframe=source_timeframe,
+            display_timeframe=display_timeframe,
+            timeframes=timeframes,
         )
         chart.set_data(df, candle_range=candle_range)
         return chart
@@ -242,8 +283,49 @@ class Chart:
         # Keep the original (pre-mutation) DataFrame available for the
         # indicator module.  Store before any renaming/conversion so that
         # column names match what the user expects (e.g. 'timestamp' intact).
-        self.df = df.copy()
+        self.df      = df.copy()
+        self._raw_df = df.copy()
 
+        if chart_type is not None:
+            self.chart_type = chart_type
+        self._candle_range = candle_range
+
+        # ── Timeframe support (v1.1.0) ────────────────────────────────────
+        # Canonicalise to a 'timestamp' (ms) frame for the resampler, work out
+        # the source timeframe, and decide which timeframes may be offered.
+        self._source_df = self._canonical_ms_frame(df)
+        self._detect_source_timeframe()
+        self._resolve_timeframes()
+
+        target = self._pending_display if self._display_tf is None else self._display_tf
+        if target is not None and self._source_tf is not None:
+            target = self._normalize_tf(target)
+        if target is not None and target != self._source_tf:
+            # Renders through the same pipeline, then sends init if shown.
+            self._pending_display = None
+            self._rebuild_for_timeframe(target)
+            return self
+        self._pending_display = None
+        self._display_tf = None
+
+        self._bars = self._frame_to_bars(df)
+
+        # Rolling window (v1.0.0): a freshly loaded frame obeys the limit too
+        self._enforce_candle_limit()
+
+        if self._shown:
+            self._send_init()
+
+        return self
+
+    def _frame_to_bars(self, df: pd.DataFrame) -> list[dict]:
+        """
+        Turn a (lower-cased) OHLCV frame into the browser's bar list.
+
+        Shared by :meth:`set_data` and the timeframe rebuild so both produce
+        byte-identical bars.  Accepts ``time`` (seconds or ms) or ``timestamp``
+        (ms), applies Heikin-Ashi and the candle-range filter.
+        """
         # ── AlgoTradeKit compatibility ─────────────────────────────────────
         # Collector CSVs use 'timestamp' (ms). Rename it so the rest of
         # the method (which works with 'time') handles it uniformly.
@@ -276,9 +358,6 @@ class Chart:
                 else:
                     df["time"] = ts_vals.astype(int)
 
-        if chart_type is not None:
-            self.chart_type = chart_type
-
         if self.chart_type == "heikinashi":
             df = self._to_heikinashi(df)
 
@@ -290,11 +369,11 @@ class Chart:
         # ── Candle range filter (v0.7.2) ──────────────────────────────────
         # Applied *after* time is in Unix seconds so start/end comparisons
         # work uniformly regardless of the original timestamp format.
-        if candle_range is not None:
-            df = self._apply_candle_range(df, candle_range)
+        if self._candle_range is not None:
+            df = self._apply_candle_range(df, self._candle_range)
         # ─────────────────────────────────────────────────────────────────
 
-        self._bars = [
+        return [
             {
                 "time":   int(row["time"]),
                 "open":   float(row["open"]),
@@ -305,14 +384,6 @@ class Chart:
             }
             for _, row in df.iterrows()
         ]
-
-        # Rolling window (v1.0.0): a freshly loaded frame obeys the limit too
-        self._enforce_candle_limit()
-
-        if self._shown:
-            self._send_init()
-
-        return self
 
     # -----------------------------------------------------------------------
     # Candle range filter (v0.7.2)
@@ -427,6 +498,348 @@ class Chart:
         return ha
 
     # -----------------------------------------------------------------------
+    # Timeframe switching (v1.1.0)
+    # -----------------------------------------------------------------------
+    # The chart holds the data at its **source** timeframe and resamples to
+    # whatever is being displayed.  All of it happens here in Python: the
+    # browser only ever asks for a timeframe and receives finished candles.
+
+    @staticmethod
+    def _normalize_tf(tf: str) -> str:
+        from ..data.converter import normalize_timeframe
+
+        return normalize_timeframe(tf)
+
+    @staticmethod
+    def _canonical_ms_frame(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Return *df* with a ``timestamp`` column in UTC **milliseconds**.
+
+        The resampler needs one canonical shape; users hand us seconds, ms,
+        datetimes or a DatetimeIndex.  Everything else in the frame is kept,
+        so extra Collector columns still aggregate.
+        """
+        out = df.copy()
+
+        col = None
+        if "timestamp" in out.columns:
+            col = out["timestamp"]
+        elif "time" in out.columns:
+            col = out["time"]
+        elif isinstance(out.index, pd.DatetimeIndex):
+            out["timestamp"] = out.index.astype("int64") // 1_000_000
+            return out.reset_index(drop=True)
+        else:
+            return pd.DataFrame()
+
+        if pd.api.types.is_datetime64_any_dtype(col):
+            ms = col.astype("int64") // 1_000_000
+        elif col.dtype == object:
+            ms = pd.to_datetime(col).astype("int64") // 1_000_000
+        else:
+            vals = pd.to_numeric(col, errors="coerce")
+            # Seconds vs milliseconds, same rule set_data uses
+            ms = vals.astype("int64") if vals.max() > 1e10 else (vals * 1000).astype("int64")
+
+        out["timestamp"] = ms.astype("int64")
+        if "time" in out.columns and "timestamp" != "time":
+            out = out.drop(columns=["time"])
+        return out.sort_values("timestamp").reset_index(drop=True)
+
+    def _detect_source_timeframe(self) -> None:
+        """Work out the source timeframe, or leave it ``None`` (switching off)."""
+        self._source_tf = None
+        if self._source_df.empty or "timestamp" not in self._source_df.columns:
+            return
+
+        from ..data.converter import detect_timeframe
+
+        if self._tf_hint:
+            hint = self._normalize_tf(self._tf_hint)
+            try:
+                found = detect_timeframe(self._source_df)
+            except ValueError:
+                # Too short / too gappy to detect — trust the caller.
+                self._source_tf = hint
+                return
+            if found != hint:
+                raise ValueError(
+                    f"source_timeframe='{self._tf_hint}' does not match the data, "
+                    f"whose candles are {found} apart. Drop the argument to let it "
+                    f"be detected, or correct it."
+                )
+            self._source_tf = hint
+            return
+
+        try:
+            self._source_tf = detect_timeframe(self._source_df)
+        except ValueError:
+            # Irregular data (gappy sessions, a handful of rows): the chart
+            # still works, it just cannot offer other timeframes.
+            self._source_tf = None
+
+    def _resolve_timeframes(self) -> None:
+        """Build the list of timeframes the selector may offer."""
+        self._timeframes = []
+        if self._source_tf is None:
+            if self._tf_requested:
+                raise ValueError(
+                    "timeframes= was given but the source timeframe could not be "
+                    "detected. Pass source_timeframe= as well."
+                )
+            return
+
+        from ..data._utils import TIMEFRAME_MS
+        from ..data.converter import can_convert
+
+        if self._tf_requested is None:
+            # "1M" is deliberately absent: months are not a fixed number of
+            # milliseconds, and every bucket calculation here is arithmetic.
+            offered = [tf for tf in TIMEFRAME_MS if can_convert(self._source_tf, tf)]
+        else:
+            offered = []
+            for raw in self._tf_requested:
+                tf = self._normalize_tf(raw)
+                if tf == "1M":
+                    raise ValueError(
+                        "'1M' cannot be a chart timeframe: months have no fixed "
+                        "length, and the chart's bucket maths is arithmetic."
+                    )
+                if tf == self._source_tf or can_convert(self._source_tf, tf):
+                    offered.append(tf)
+                else:
+                    raise ValueError(
+                        f"timeframe '{raw}' cannot be produced from {self._source_tf} "
+                        f"data — it must be a whole multiple of it."
+                    )
+        # The source itself is always selectable, and always sorts first.
+        self._timeframes = [self._source_tf] + [tf for tf in offered if tf != self._source_tf]
+
+    @property
+    def source_timeframe(self) -> str | None:
+        """Timeframe of the data that was loaded (``None`` = undetectable)."""
+        return self._source_tf
+
+    @property
+    def display_timeframe(self) -> str | None:
+        """Timeframe currently shown.  ``None`` means the source timeframe."""
+        return self._display_tf
+
+    @property
+    def timeframes(self) -> list[str]:
+        """Timeframes the browser's selector offers (source first)."""
+        return list(self._timeframes)
+
+    def set_timeframe(self, timeframe: str | None) -> Chart:
+        """
+        Switch the displayed timeframe (v1.1.0).
+
+        ``None`` (or the source timeframe) shows the data as loaded; anything
+        higher is resampled from the source.  Candles, spec-built indicators
+        and the browser are all updated; drawings are absolute-time and are
+        left alone.
+
+        The same path serves the browser's timeframe selector, so a
+        programmatic switch and a click behave identically.
+        """
+        if timeframe is not None:
+            timeframe = self._normalize_tf(timeframe)
+        if self._source_df.empty:
+            # No data yet — remember it and apply on the next set_data().
+            self._pending_display = timeframe
+            return self
+        if self._source_tf is None:
+            raise ValueError(
+                "This chart cannot change timeframe: the source timeframe could "
+                "not be detected from the data. Pass source_timeframe= to Chart()."
+            )
+        if timeframe is not None and timeframe not in self._timeframes:
+            raise ValueError(
+                f"'{timeframe}' is not one of this chart's timeframes: {self._timeframes}"
+            )
+        return self._rebuild_for_timeframe(timeframe)
+
+    def _rebuild_for_timeframe(self, timeframe: str | None) -> Chart:
+        """Re-render candles and indicators at *timeframe* and push to the browser."""
+        back_to_source = timeframe is None or timeframe == self._source_tf
+
+        if back_to_source:
+            frame     = self._raw_df.copy()
+            self.df   = self._raw_df.copy()
+            self._display_tf = None
+        else:
+            from ..data.converter import resample_ohlcv
+
+            # drop_incomplete=False: a chart shows the candle that is still
+            # forming, exactly as TradingView does.  Converter (a data
+            # pipeline) keeps dropping it.
+            frame = resample_ohlcv(
+                self._source_df, timeframe,
+                source_timeframe=self._source_tf, drop_incomplete=False,
+            )
+            frame = self._drop_partial_first_candle(frame)
+            self.df = frame.copy()
+            self._display_tf = timeframe
+
+        self._bars = self._frame_to_bars(frame)
+        self._enforce_candle_limit()
+        self._recompute_indicators()
+
+        if self._shown:
+            self._send_init()
+        return self
+
+    # ------------------------------------------------------------------
+    # Indicators across a timeframe change
+    # ------------------------------------------------------------------
+
+    def _recompute_indicators(self) -> None:
+        """
+        Rebuild every indicator for the current display timeframe.
+
+        Two kinds exist and they cannot be treated alike:
+
+        * **spec-built** — added through :meth:`add_indicator_spec` (the
+          browser toolbar, ``SimulateConfig.chart_indicators``).  The recipe
+          is known, so the maths is simply re-run on the new candles and the
+          values are exact.
+        * **raw** — a caller handed us finished points
+          (:meth:`add_indicator_from_atk`, ``add_rsi`` / ``add_macd`` /
+          ``add_ichimoku``, a strategy's own columns).  There is no recipe to
+          re-run, so the points are downsampled last-value-per-bucket and
+          tagged ``approx`` so the legend can say so.
+        """
+        old = list(self._indicators)
+        if not old:
+            return
+
+        self._indicators = []
+        # id(spec) → did the recompute succeed?  One spec can have produced
+        # several series (MACD makes three, Ichimoku more) that all share the
+        # very same dict, so it must run once — but when it *fails* every one
+        # of those series still has to be carried over individually.
+        handled: dict[int, bool] = {}
+
+        for ind in old:
+            payload = getattr(ind, "payload", None)
+            spec    = payload.get("spec") if isinstance(payload, dict) else None
+
+            if spec is not None:
+                sid = id(spec)
+                if sid not in handled:
+                    start = len(self._indicators)
+                    try:
+                        ok = self._compute_indicator_series(spec) is not None
+                    except (ValueError, KeyError, IndexError):
+                        # A higher timeframe leaves fewer candles, and an
+                        # indicator can need more than remain (MACD wants 34).
+                        # Losing the series would be worse than thinning it.
+                        ok = False
+                    handled[sid] = ok
+                    if ok:
+                        for fresh in self._indicators[start:]:
+                            if hasattr(fresh, "payload"):
+                                fresh.payload["spec"] = spec
+                        continue
+                    del self._indicators[start:]
+                elif handled[sid]:
+                    continue        # the recompute already produced this one
+
+            self._indicators.append(self._downsample_indicator(ind))
+
+    def _downsample_indicator(self, ind):
+        """
+        Retime a precomputed indicator to the display timeframe, in place.
+
+        The points as first supplied are kept on the object (``_full_data``)
+        and every thinning starts from them — otherwise switching 1m → 15m →
+        1m would leave the series permanently at 15m resolution.  At the
+        source timeframe the pristine points are simply restored.
+        """
+        full = getattr(ind, "_full_data", None)
+        if full is None:
+            full = self._indicator_points(ind)
+            if full is None:
+                return ind
+            ind._full_data = full
+
+        tf_ms  = self._display_tf_ms()
+        approx = tf_ms is not None
+        data   = self._downsample_points(full, tf_ms) if approx else list(full)
+
+        # A thinned series can gain one bucket in front of the first candle
+        # (see _drop_partial_first_candle).  Trim the front only — Ichimoku's
+        # spans are *meant* to run past the last candle.
+        if approx and self._bars:
+            first = self._bars[0]["time"]
+            data  = [p for p in data if p.get("time", first) >= first]
+
+        payload = getattr(ind, "payload", None)
+        if isinstance(payload, dict):
+            payload["data"]   = data
+            payload["approx"] = approx
+        else:
+            ind.data   = data
+            ind.approx = approx
+        return ind
+
+    @staticmethod
+    def _indicator_points(ind) -> list | None:
+        """The point list of either indicator flavour, or ``None``."""
+        payload = getattr(ind, "payload", None)
+        if isinstance(payload, dict):
+            data = payload.get("data")
+        else:
+            data = getattr(ind, "data", None)
+        return list(data) if isinstance(data, list) else None
+
+    def _drop_partial_first_candle(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """
+        Drop a leading bucket the data only partly covers.
+
+        Buckets are aligned to the epoch, so 1m data starting at 09:55 puts its
+        first ten minutes into the 09:45 fifteen-minute bucket — a candle that
+        would claim a low and an open it never had.  The **trailing** partial
+        candle is different and is kept: that one is genuinely still forming,
+        which is what a chart should show.
+        """
+        if frame.empty or len(frame) < 2 or self._source_df.empty:
+            return frame
+        first_src = int(self._source_df["timestamp"].iloc[0])
+        if int(frame["timestamp"].iloc[0]) < first_src:
+            return frame.iloc[1:].reset_index(drop=True)
+        return frame
+
+    def _display_tf_ms(self) -> int | None:
+        """Length of one displayed candle in ms, or ``None`` at the source."""
+        if self._display_tf is None:
+            return None
+        from ..data._utils import TIMEFRAME_MS
+
+        return TIMEFRAME_MS.get(self._display_tf)
+
+    @staticmethod
+    def _downsample_points(points: list[dict], tf_ms: int) -> list[dict]:
+        """
+        Keep the last point of every display bucket, re-timed to the bucket's
+        open, so the series lines up with the candles it is drawn over.
+
+        Times here are Unix **seconds** (chart convention), *tf_ms* is in
+        milliseconds.
+        """
+        step = max(1, tf_ms // 1000)
+        out: dict[int, dict] = {}
+        for p in points:
+            t = p.get("time")
+            if t is None:
+                continue
+            bucket = (int(t) // step) * step
+            point  = dict(p)
+            point["time"] = bucket
+            out[bucket] = point          # later points win → last in bucket
+        return [out[k] for k in sorted(out)]
+
+    # -----------------------------------------------------------------------
     # Indicators
     # -----------------------------------------------------------------------
 
@@ -482,6 +895,11 @@ class Chart:
             line_width=line_width, series_type=series_type,
             group=group or name,
         )
+        # A series handed to us at the source resolution has to be thinned if
+        # the chart is currently showing a higher timeframe (v1.1.0).
+        if self._display_tf is not None:
+            self._downsample_indicator(ind)
+
         self._indicators.append(ind)
 
         if self._shown:
@@ -877,6 +1295,12 @@ class Chart:
         bar = {k.lower(): v for k, v in bar.items()}
         bar.setdefault("volume", 0.0)
 
+        # Timeframe conversion (v1.1.0): a streamed bar is a *source* bar.
+        # Fold it into the source frame and hand the browser the display
+        # candle it belongs to — which is usually still forming.
+        if self._display_tf is not None:
+            bar = self._fold_source_bar(bar)
+
         if self.chart_type == "heikinashi" and self._bars:
             prev     = self._bars[-1]
             ha_close = (bar["open"] + bar["high"] + bar["low"] + bar["close"]) / 4
@@ -930,6 +1354,51 @@ class Chart:
         if "timestamp" in candle and "time" not in candle:
             candle["time"] = int(candle.pop("timestamp")) // 1000
         return self.stream(candle)
+
+    def _fold_source_bar(self, bar: dict) -> dict:
+        """
+        Add a source-timeframe *bar* to the source frame and return the display
+        candle that now covers it (v1.1.0).
+
+        The returned bar carries the bucket's open time, so the browser's
+        ``series.update()`` grows the forming candle and only starts a new one
+        on a real boundary.
+        """
+        tf_ms = self._display_tf_ms()
+        if tf_ms is None:
+            return bar
+
+        ts_ms = int(bar["time"]) * 1000
+        row = {
+            "timestamp": ts_ms,
+            "open":   float(bar["open"]),
+            "high":   float(bar["high"]),
+            "low":    float(bar["low"]),
+            "close":  float(bar["close"]),
+            "volume": float(bar.get("volume", 0.0) or 0.0),
+        }
+
+        src = self._source_df
+        if not src.empty and int(src.iloc[-1]["timestamp"]) == ts_ms:
+            for key, val in row.items():                 # same candle, revised
+                src.iloc[-1, src.columns.get_loc(key)] = val
+        else:
+            self._source_df = pd.concat(
+                [src, pd.DataFrame([row])], ignore_index=True
+            ) if not src.empty else pd.DataFrame([row])
+            src = self._source_df
+
+        # Aggregate every source row inside this display bucket
+        bucket_ms = (ts_ms // tf_ms) * tf_ms
+        window    = src[src["timestamp"] >= bucket_ms]
+        return {
+            "time":   bucket_ms // 1000,
+            "open":   float(window.iloc[0]["open"]),
+            "high":   float(window["high"].max()),
+            "low":    float(window["low"].min()),
+            "close":  float(window.iloc[-1]["close"]),
+            "volume": float(window["volume"].sum()) if "volume" in window else 0.0,
+        }
 
     def stream_indicator(self, name: str, time: int, value: float) -> Chart:
         """
@@ -1081,6 +1550,14 @@ class Chart:
         elif msg_type == "compute_indicator":
             params = msg.get("params", {})
             self.add_indicator_spec(params)
+
+        elif msg_type == "set_timeframe":
+            # v1.1.0 — the toolbar selector. Resampling happens here, never in
+            # the browser; a bad value is reported instead of crashing the loop.
+            try:
+                self.set_timeframe(msg.get("tf"))
+            except ValueError as exc:
+                self._server.send({"type": "timeframe_error", "message": str(exc)})
 
     # -----------------------------------------------------------------------
     # On-demand indicator computation (v0.7.4)
@@ -1463,6 +1940,9 @@ class Chart:
             "theme":            self.theme,
             "volumeInMain":     self.volume_in_main,
             "candleCountLimit": self._candle_count_limit,
+            "sourceTimeframe":  self._source_tf,
+            "displayTimeframe": self._display_tf,
+            "timeframes":       list(self._timeframes),
             "bars":             self._bars,
             "indicators":       [i.to_dict() for i in self._indicators],
             "drawings":         [d.to_dict() for d in self._drawings],
