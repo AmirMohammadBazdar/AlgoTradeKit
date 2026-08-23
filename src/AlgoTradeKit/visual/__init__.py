@@ -67,6 +67,19 @@ Strategy drawings (v0.7.0)
     add_strategy_drawings(chart, result)
     chart.show()
 
+Several charts on one page (v1.1.0)
+------------------------------------
+    from AlgoTradeKit.visual import Chart, ChartPage
+
+    page = ChartPage(title="BTC")
+    page.add(fast_chart)                 # row 0
+    page.add(slow_chart)                 # row 1 -- stacked
+    page.add(eth_chart, row=1)           # beside slow_chart
+    page.show(block=True)
+
+    # Everything is served on one port, and the charts scroll and crosshair
+    # together (by time, so different timeframes stay aligned).
+
 Live trade push + rolling window (v1.0.0)
 ------------------------------------------
     chart = Chart(host="0.0.0.0")   # non-local viewing — SECURITY WARNING in docstring
@@ -79,6 +92,7 @@ Live trade push + rolling window (v1.0.0)
     chart.update_drawing(drawing_id, price=...)         # generic live edit
 """
 
+from ._page import ChartPage
 from .chart import Chart
 from .indicator_renderer import (
     add_ichimoku,
@@ -104,6 +118,7 @@ from .models import (
 __all__ = [
     # Chart
     "Chart",
+    "ChartPage",
     # Models
     "Bar",
     "Box",
