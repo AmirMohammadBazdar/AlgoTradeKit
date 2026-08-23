@@ -38,6 +38,21 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(
 .tb svg{flex-shrink:0}
 #ml{margin-left:auto}
 
+/* ── Bar replay (v1.1.0) ─────────────────────────────────────── */
+#rp-bar{display:none;align-items:center;gap:2px}
+#rp-bar.open{display:flex}
+#rp-btn.on{background:var(--accent)22;color:var(--accent);border:1px solid var(--accent)44}
+#rp-clock{font-family:'Courier New',monospace;font-size:10px;color:var(--text2);
+          padding:0 6px;white-space:nowrap}
+#rp-speed{height:22px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);
+          border-radius:4px;font-size:10px;font-family:'Courier New',monospace;cursor:pointer}
+/* While a start bar is being picked the chart takes a crosshair and says so */
+body.rp-picking #panes{cursor:crosshair}
+#rp-hint{display:none;position:absolute;top:10px;left:50%;transform:translateX(-50%);
+         z-index:250;background:var(--accent);color:#fff;font-size:11px;
+         padding:5px 12px;border-radius:5px;box-shadow:0 4px 14px #0006}
+body.rp-picking #rp-hint{display:block}
+
 /* ── Embedded in a ChartPage (v1.1.0) ────────────────────────── */
 /* One page-level header is enough; the frame keeps a slim bar so each
    chart still shows its own title and OHLCV readout. */
@@ -300,6 +315,22 @@ body.compact #ohlcv{font-size:10px}
     <div id="tf-menu"></div>
   </div>
   <div class="tsep" id="tf-sep" style="display:none"></div>
+  <button class="tb" id="rp-btn" onclick="replayToggle()" title="Bar replay — step through history"
+          style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em">⏵⏵ REPLAY</button>
+  <div id="rp-bar">
+    <button class="tb" onclick="replayToStart()" title="Back to the start bar">⏮</button>
+    <button class="tb" onclick="replayStep(-1)" title="One step back (Shift+←)">◀</button>
+    <button class="tb" id="rp-play" onclick="replayPlayPause()" title="Play / pause (Space)">▶</button>
+    <button class="tb" onclick="replayStep(1)" title="One step forward (Shift+→)">▶|</button>
+    <select id="rp-speed" onchange="replaySetSpeed(this.value)" title="Playback speed">
+      <option value="0.25">0.25x</option><option value="0.5">0.5x</option>
+      <option value="1" selected>1x</option><option value="2">2x</option>
+      <option value="5">5x</option><option value="10">10x</option>
+    </select>
+    <span id="rp-clock"></span>
+    <button class="tb" onclick="replayExit()" title="Leave replay (Esc)">✕</button>
+  </div>
+  <div class="tsep"></div>
   <button class="tb on" id="ct-btn" onclick="toggleChartType()"
           style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em">CANDLE</button>
   <div class="tsep"></div>
@@ -576,6 +607,7 @@ body.compact #ohlcv{font-size:10px}
   </div>
 </div>
 
+<div id="rp-hint">Click a candle to start the replay there</div>
 <div id="panes">
   <canvas id="draw-cv"></canvas>
   <canvas id="ghost-cv"></canvas>
@@ -741,6 +773,7 @@ function createPane(id,flex=3,label=''){
 
   chart.subscribeCrosshairMove(param=>{
     if(id==='main'){
+      _lastCrossTime = param && param.time ? param.time : null;
       updateOHLCV(param);
       _updateLastVals(param.seriesData);
       updateIndLegendValues(param);
@@ -823,6 +856,10 @@ function clearPageCrosshair(){
 
 if(embedded){
   document.body.classList.toggle('compact', _q.get('chrome') === 'compact');
+  // The page has one replay bar for every chart; a per-frame one would let
+  // the charts drift apart.
+  document.getElementById('rp-btn').style.display = 'none';
+  document.getElementById('rp-sep').style.display = 'none';
   const startTitle = _q.get('title');
   if(startTitle) document.getElementById('chart-title').textContent = startTitle;
 
@@ -838,9 +875,32 @@ if(embedded){
       case 'range':           applyPageRange(msg.from, msg.to);        break;
       case 'crosshair':       applyPageCrosshair(msg.time, msg.price); break;
       case 'crosshair-clear': clearPageCrosshair();                    break;
+      case 'replay-arm':      replayPageArm();                         break;
+      case 'replay-cursor':   replayPageCursor(msg.time);              break;
+      case 'replay-exit':     replayExit();                            break;
+      case 'replay-info':     postToPage(replayInfo());                break;
     }
   });
 }
+
+// A click while picking chooses the start bar; the crosshair already tracks
+// which candle is under the pointer.
+document.getElementById('panes').addEventListener('click', () => {
+  if(!replay.picking) return;
+  if(_lastCrossTime == null) return;
+  if(embedded) postToPage({t:'replay-pick', time:_lastCrossTime});
+  else         replayPick(_lastCrossTime);
+}, true);
+
+document.addEventListener('keydown', e => {
+  if(!replay.active && !replay.picking) return;
+  if(e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '')) return;
+  if(embedded) return;                     // the page owns the keys in a layout
+  if(e.key === 'Escape'){ replayExit(); e.preventDefault(); }
+  else if(e.code === 'Space'){ replayPlayPause(); e.preventDefault(); }
+  else if(e.shiftKey && e.key === 'ArrowRight'){ replayStep(1);  e.preventDefault(); }
+  else if(e.shiftKey && e.key === 'ArrowLeft'){  replayStep(-1); e.preventDefault(); }
+});
 
 function setupResize(rh){
   rh.addEventListener('mousedown',e=>{
@@ -1071,6 +1131,8 @@ function addIndicator(ind){
     series,color:ind.color,overlay:ind.overlay,pane:ind.pane,
     hidden:false,seriesType:ind.seriesType,paneId,
     group: ind.group || ind.name,
+    // Replay re-cuts the series at the cursor, so keep the whole thing.
+    full: ind.data || [],
     lastVal: (() => {
       if(!ind.data || !ind.data.length) return null;
       const last = ind.data[ind.data.length-1];
@@ -1695,7 +1757,7 @@ function redrawAll(){
   }
 
   drawIchimokuCloud(dCtx,W,H);          // ← cloud fill BEHIND user drawings
-  Object.values(drawings).forEach(d=>renderOne(d,dCtx,W,H));
+  replayVisibleDrawings().forEach(d=>renderOne(d,dCtx,W,H));
 
   dCtx.restore();
 }
@@ -2587,6 +2649,296 @@ function fmtVol(v){
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  BAR REPLAY (v1.1.0)
+//  One time cursor. Candles that closed at or before it are shown
+//  whole; the one it sits inside is built from the source candles,
+//  so a 3m and a 5m chart replayed together stay on the same
+//  instant instead of each counting its own bars.
+//  Everything below the arming request is client-side -- stepping
+//  must not cost a round trip when the browser is on a tunnel.
+// ═══════════════════════════════════════════════════════════════
+const TF_SEC = {'1m':60,'3m':180,'5m':300,'15m':900,'30m':1800,'1h':3600,'2h':7200,
+                '4h':14400,'6h':21600,'8h':28800,'12h':43200,'1d':86400,
+                '3d':259200,'1w':604800};
+
+let _lastCrossTime = null;
+let replay = {
+  active:false, picking:false, cursor:null, start:null,
+  playing:false, timer:null, speed:1,
+  srcBars:[], stepSec:0, shownBars:-1, armed:false, pendingStart:false,
+};
+
+function displayTfSec(){
+  const tf = displayTimeframe || sourceTimeframe;
+  if(tf && TF_SEC[tf]) return TF_SEC[tf];
+  // No timeframe from the server: fall back to the commonest bar spacing.
+  if(allBars.length > 2){
+    const gaps = {};
+    for(let i=1;i<Math.min(allBars.length,25);i++){
+      const g = allBars[i].time - allBars[i-1].time;
+      gaps[g] = (gaps[g]||0) + 1;
+    }
+    const best = Object.keys(gaps).sort((a,b)=>gaps[b]-gaps[a])[0];
+    if(best) return +best;
+  }
+  return 60;
+}
+
+function replayStepSec(){ return replay.stepSec || displayTfSec(); }
+
+// ── Arming ─────────────────────────────────────────────────────
+function replayToggle(){
+  if(replay.active || replay.picking) replayExit();
+  else replayBegin();
+}
+
+function replayBegin(){
+  // Source candles are only needed when the display is coarser than the data
+  if(displayTimeframe && !replay.armed){ replay.pendingStart = true; sendMsg({type:'replay_arm'}); }
+  replay.picking = true;
+  document.body.classList.add('rp-picking');
+  document.getElementById('rp-btn').classList.add('on');
+}
+
+function replayPick(time){
+  if(!replay.picking || time == null) return;
+  replay.picking = false;
+  document.body.classList.remove('rp-picking');
+  const tf = displayTfSec();
+  // Start with the clicked candle complete and the next one forming
+  replay.start  = time + tf;
+  replay.active = true;
+  document.getElementById('rp-bar').classList.add('open');
+  replaySeek(replay.start, {full:true});
+  postToPage({t:'replay-pick', time});
+}
+
+// ── Cursor ─────────────────────────────────────────────────────
+function replaySeek(t, opts){
+  if(!replay.active) return;
+  const bounds = replayBounds();
+  const T = Math.max(bounds.first, Math.min(bounds.last, t));
+  replay.cursor = T;
+  replayRender(!!(opts && opts.full));
+  updateReplayUI();
+}
+
+function replayBounds(){
+  const tf = displayTfSec();
+  if(!allBars.length) return {first:0, last:0};
+  return {first: allBars[0].time + tf, last: allBars[allBars.length-1].time + tf};
+}
+
+function replayStep(dir){
+  if(!replay.active) return;
+  replaySeek(replay.cursor + dir * replayStepSec());
+  if(dir > 0 && replay.cursor >= replayBounds().last) replayPause();
+}
+
+function replayToStart(){ if(replay.active) replaySeek(replay.start, {full:true}); }
+
+function replayPlayPause(){ replay.playing ? replayPause() : replayPlay(); }
+
+function replayPlay(){
+  if(!replay.active || replay.playing) return;
+  replay.playing = true;
+  document.getElementById('rp-play').textContent = '⏸';
+  const tick = () => {
+    if(!replay.playing) return;
+    replayStep(1);
+    if(replay.playing) replay.timer = setTimeout(tick, 500 / replay.speed);
+  };
+  replay.timer = setTimeout(tick, 500 / replay.speed);
+}
+
+function replayPause(){
+  replay.playing = false;
+  clearTimeout(replay.timer);
+  replay.timer = null;
+  const b = document.getElementById('rp-play');
+  if(b) b.textContent = '▶';
+}
+
+function replaySetSpeed(v){ replay.speed = parseFloat(v) || 1; }
+
+function replayExit(){
+  replayPause();
+  replay.active = replay.picking = false;
+  replay.cursor = null;
+  replay.shownBars = -1;
+  document.body.classList.remove('rp-picking');
+  document.getElementById('rp-bar').classList.remove('open');
+  document.getElementById('rp-btn').classList.remove('on');
+  // Put the full data back exactly as it was
+  if(mainSeries) mainSeries.setData(allBars);
+  if(volumeSeries) volumeSeries.setData(allBars.map(volPoint));
+  Object.values(indMeta).forEach(m=>{ try{ m.series.setData(m.full); }catch{} });
+  if(ichimokuCloud && ichimokuCloud._fullA){
+    ichimokuCloud.spanA = ichimokuCloud._fullA;
+    ichimokuCloud.spanB = ichimokuCloud._fullB;
+  }
+  updateReplayUI();
+  redrawAll();
+}
+
+// ── Rendering ──────────────────────────────────────────────────
+function volPoint(b){
+  return {time:b.time, value:b.volume||0,
+          color:b.close>=b.open?'#3fb95055':'#f8514955'};
+}
+
+function countClosed(T, tf){
+  // number of display candles whose close is at or before the cursor
+  let lo = 0, hi = allBars.length;
+  while(lo < hi){
+    const mid = (lo + hi) >> 1;
+    if(allBars[mid].time + tf <= T) lo = mid + 1; else hi = mid;
+  }
+  return lo;
+}
+
+function buildForming(k, T, tf){
+  // The candle the cursor sits inside, assembled from the source candles
+  if(k >= allBars.length) return null;
+  const open = allBars[k].time;
+  if(T <= open) return null;
+  if(!replay.srcBars.length) return null;         // display IS the source
+  let o=null,h=-Infinity,l=Infinity,c=null,v=0;
+  for(const b of replay.srcBars){
+    if(b.time < open) continue;
+    if(b.time >= T) break;
+    if(o === null) o = b.open;
+    if(b.high > h) h = b.high;
+    if(b.low  < l) l = b.low;
+    c = b.close; v += b.volume || 0;
+  }
+  if(o === null) return null;
+  let bar = {time:open, open:o, high:h, low:l, close:c, volume:v};
+  if(chartType === 'heikinashi' && k > 0){
+    // Same recurrence the Python side uses, so the forming candle matches
+    const prev = allBars[k-1];
+    const haC = (bar.open + bar.high + bar.low + bar.close) / 4;
+    const haO = (prev.open + prev.close) / 2;
+    bar = {time:open, open:haO, close:haC,
+           high:Math.max(bar.high,haO,haC), low:Math.min(bar.low,haO,haC),
+           volume:bar.volume};
+  }
+  return bar;
+}
+
+function replayRender(force){
+  if(!mainSeries) return;
+  const tf = displayTfSec(), T = replay.cursor;
+  const k  = countClosed(T, tf);
+  const forming = buildForming(k, T, tf);
+
+  if(!force && k === replay.shownBars){
+    // Only the forming candle moved — the common case while playing
+    if(forming){
+      mainSeries.update(forming);
+      if(volumeSeries) volumeSeries.update(volPoint(forming));
+    }
+    redrawAll();
+    return;
+  }
+  replay.shownBars = k;
+
+  const closed = allBars.slice(0, k);
+  const shown  = forming ? closed.concat([forming]) : closed;
+  mainSeries.setData(shown);
+  if(volumeSeries) volumeSeries.setData(shown.map(volPoint));
+
+  // Indicators are cut at the last CLOSED candle: a value for a candle that
+  // has not finished would be a value nobody could have had at the time.
+  // A series that legitimately runs past the data (Ichimoku projects its
+  // spans forward) keeps that same overhang ahead of the cursor.
+  const lastClosed = k > 0 ? allBars[k-1].time : -Infinity;
+  const dataEnd    = allBars.length ? allBars[allBars.length-1].time : 0;
+  Object.values(indMeta).forEach(m=>{
+    const full = m.full || [];
+    const ahead = full.length ? Math.max(0, full[full.length-1].time - dataEnd) : 0;
+    const cut = lastClosed + ahead;
+    try{ m.series.setData(full.filter(p=>p.time <= cut)); }catch{}
+  });
+  if(ichimokuCloud){
+    if(!ichimokuCloud._fullA){
+      ichimokuCloud._fullA = ichimokuCloud.spanA;
+      ichimokuCloud._fullB = ichimokuCloud.spanB;
+    }
+    const fa = ichimokuCloud._fullA, fb = ichimokuCloud._fullB;
+    const ahead = fa.length ? Math.max(0, fa[fa.length-1].time - dataEnd) : 0;
+    const cut = lastClosed + ahead;
+    ichimokuCloud.spanA = fa.filter(p=>p.time <= cut);
+    ichimokuCloud.spanB = fb.filter(p=>p.time <= cut);
+  }
+  redrawAll();
+}
+
+// ── Drawings under a cursor ────────────────────────────────────
+function drawingStartTime(d){
+  if(d.open_time != null) return d.open_time;
+  if(d.time1 != null || d.time2 != null)
+    return Math.min(d.time1 ?? Infinity, d.time2 ?? Infinity);
+  if(d.time != null) return d.time;
+  return null;                                    // timeless (hlines)
+}
+
+function replayVisibleDrawings(){
+  const all = Object.values(drawings);
+  if(!replay.active || replay.cursor == null) return all;
+  const T = replay.cursor;
+  const out = [];
+  for(const d of all){
+    const start = drawingStartTime(d);
+    if(start != null && start > T) continue;      // has not happened yet
+    if(d.close_time != null && d.close_time > T){
+      // A trade still open at the cursor: stop the box there and drop the
+      // label, which would otherwise announce how the trade ends.
+      out.push(Object.assign({}, d, {close_time: T, label: ''}));
+    } else {
+      out.push(d);
+    }
+  }
+  return out;
+}
+
+// ── UI ─────────────────────────────────────────────────────────
+function updateReplayUI(){
+  const clock = document.getElementById('rp-clock');
+  if(!clock) return;
+  if(!replay.active || replay.cursor == null){ clock.textContent = ''; return; }
+  const d = new Date(replay.cursor * 1000);
+  clock.textContent = d.toISOString().slice(0,16).replace('T',' ') + ' UTC';
+}
+
+// ── Driven by a ChartPage ──────────────────────────────────────
+// The shell owns the cursor when this chart is one of several, so the
+// frame's own controls stay hidden and it just renders what it is told.
+function replayPageArm(){
+  if(displayTimeframe && !replay.armed){ sendMsg({type:'replay_arm'}); }
+  replay.picking = true;
+  document.body.classList.add('rp-picking');
+}
+
+function replayPageCursor(t){
+  replay.picking = false;
+  document.body.classList.remove('rp-picking');
+  if(!replay.active){
+    replay.active = true;
+    replay.start  = t;
+    replaySeek(t, {full:true});
+  } else {
+    replaySeek(t);
+  }
+}
+
+function replayInfo(){
+  const b = replayBounds();
+  return {t:'replay-info', first:b.first, last:b.last,
+          step:replayStepSec(), tf:displayTfSec()};
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  TIMEFRAME SELECTOR (v1.1.0)
 //  All resampling is done in Python. Clicking an entry sends
 //  {type:'set_timeframe'} and the server answers with a fresh init.
@@ -2704,6 +3056,12 @@ function handleMsg(msg){
       enforceCandleLimit();   // server already trims; belt-and-braces
       redrawAll(); fitAll();
       setCanvasInteractive(false);
+      // A timeframe switch mid-replay arrives as a fresh init: re-cut the new
+      // candles at the cursor instead of quietly showing the whole history.
+      if(replay.active && replay.cursor != null){
+        replay.shownBars = -1;
+        replaySeek(replay.cursor, {full:true});
+      }
       break;
     }
     case 'stream':           streamBar(msg.bar); redrawAll(); break;
@@ -2715,6 +3073,12 @@ function handleMsg(msg){
     case 'update_drawing':
       if(drawings[msg.drawing.id]) Object.assign(drawings[msg.drawing.id],msg.drawing);
       redrawAll(); break;
+    case 'replay_data':
+      // The source candles behind the displayed ones; arrives once per arming
+      replay.srcBars = msg.sourceBars || [];
+      replay.stepSec = msg.stepSeconds || 0;
+      replay.armed   = true;
+      break;
     case 'layout_changed':
       // A chart was added to the page after it opened; the shell re-reads it.
       postToPage({t:'layout-changed'});
