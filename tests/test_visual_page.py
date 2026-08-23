@@ -252,3 +252,31 @@ class TestServedPage:
         layout = json.loads(self._get(page, "/layout"))
         assert layout["rows"][0] == ["v1", "v4"]
         assert added._shown is True
+
+
+class TestOversizedInitWarning:
+    """A chart carrying months of one-minute candles ships megabytes to every
+    viewer, and a page pays that once per chart in one tab. It should say so."""
+
+    def test_a_huge_chart_warns_once(self, recwarn):
+        chart = Chart(title="huge")
+        chart.set_data(_frame(60_000))
+        chart._shown = True
+        chart._server.send = lambda msg: None
+
+        chart._send_init()
+        messages = [str(w.message) for w in recwarn.list]
+        assert any("MB to the browser" in m for m in messages), messages
+        assert any("candle_count_limit" in m for m in messages)
+
+        recwarn.clear()
+        chart._send_init()
+        assert not recwarn.list, "it must not nag on every init"
+
+    def test_an_ordinary_chart_is_silent(self, recwarn):
+        chart = Chart(title="small")
+        chart.set_data(_frame(500))
+        chart._shown = True
+        chart._server.send = lambda msg: None
+        chart._send_init()
+        assert not [w for w in recwarn.list if "MB to the browser" in str(w.message)]

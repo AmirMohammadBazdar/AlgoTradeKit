@@ -183,3 +183,28 @@ class TestFrontendWiring:
     def test_chart_accepts_the_page_cursor(self, chart_html):
         assert "case 'replay-cursor'" in chart_html
         assert "function replayPageCursor" in chart_html
+
+
+class TestSourceBarsRespectTheWindow:
+    """A chart trimmed to a rolling window must not ship its whole history the
+    moment someone arms replay — replay cannot reach behind the first candle
+    that is on the chart anyway."""
+
+    def test_a_candle_limit_bounds_the_source_bars(self):
+        c = Chart(display_timeframe="5m", candle_count_limit=10)
+        c.set_data(_one_minute_frame(300))
+
+        assert len(c._bars) == 10                 # 10 five-minute candles
+        src = c.source_bars()
+        assert len(src) == 50                     # the minutes behind them
+        assert src[0]["time"] == c._bars[0]["time"]
+
+    def test_arming_sends_only_that_window(self):
+        c = Chart(display_timeframe="5m", candle_count_limit=10)
+        c.set_data(_one_minute_frame(300))
+        assert len(_armed(c)["sourceBars"]) == 50
+
+    def test_no_limit_still_sends_everything(self):
+        c = Chart(display_timeframe="5m")
+        c.set_data(_one_minute_frame(300))
+        assert len(c.source_bars()) == 300

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -1583,6 +1584,14 @@ class Chart:
         """
         if self._display_tf is None or self._source_df.empty:
             return []
+        frame = self._source_df
+        if self._bars:
+            # Replay can never reach behind the first candle on the chart, so a
+            # rolling window bounds this too. Without it a chart trimmed to a
+            # few thousand candles would still ship every source candle it was
+            # ever seeded with the moment someone pressed replay.
+            first_ms = self._bars[0]["time"] * 1000
+            frame = frame[frame["timestamp"] >= first_ms]
         return [
             {
                 "time":   int(row.timestamp) // 1000,
@@ -1592,7 +1601,7 @@ class Chart:
                 "close":  float(row.close),
                 "volume": float(getattr(row, "volume", 0.0) or 0.0),
             }
-            for row in self._source_df.itertuples(index=False)
+            for row in frame.itertuples(index=False)
         ]
 
     def _send_replay_data(self) -> None:
@@ -1996,8 +2005,41 @@ class Chart:
             "drawings":         [d.to_dict() for d in self._drawings],
         }
 
+    #: Rough size above which an init is worth warning about, in bytes.  Two
+    #: charts of this size in one :class:`ChartPage` will make a browser crawl.
+    _INIT_WARN_BYTES = 4_000_000
+
     def _send_init(self) -> None:
-        self._server.send(self._build_init_payload())
+        payload = self._build_init_payload()
+        self._warn_if_huge(payload)
+        self._server.send(payload)
+
+    def _warn_if_huge(self, payload: dict) -> None:
+        """Say something when a chart is about to ship a very large init.
+
+        A chart seeded with months of one-minute candles serialises to several
+        megabytes, and every browser that connects downloads and renders all of
+        it.  On a :class:`ChartPage` that cost is paid once per view, in one
+        tab.  Estimated from counts rather than by serialising twice.
+        """
+        if getattr(self, "_init_size_warned", False):
+            return
+        points = sum(
+            len(getattr(ind, "data", None) or getattr(ind, "payload", {}).get("data") or ())
+            for ind in self._indicators
+        )
+        estimate = len(self._bars) * 80 + points * 40 + len(self._drawings) * 300
+        if estimate < self._INIT_WARN_BYTES:
+            return
+        self._init_size_warned = True
+        warnings.warn(
+            f"Chart {self.title!r} is sending about {estimate / 1e6:.0f} MB to the "
+            f"browser ({len(self._bars):,} candles, {len(self._drawings):,} drawings). "
+            f"Every viewer downloads and draws all of it, and a ChartPage pays that "
+            f"once per chart in a single tab. Pass candle_count_limit= to keep a "
+            f"rolling window, or load fewer candles.",
+            stacklevel=2,
+        )
 
     def _refresh_init_cache(self) -> None:
         """Keep the server's replay cache current so a browser refresh still
