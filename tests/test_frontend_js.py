@@ -934,8 +934,8 @@ out.totalBars   = ev('allBars.length');
 
 
 def test_live_candles_do_not_draw_past_the_replay_cursor():
-    """A chart can be replaying and still be fed by a live feed — the CBC page
-    does exactly that. Those candles belong ahead of the cursor."""
+    """A chart can be replaying and still be fed by a live feed. Those candles
+    belong to a time ahead of the cursor, so they must not be drawn."""
     result = _run(CHART_HTML, _REPLAY_SETUP + """
 ev('replayToggle()');
 ev('handleMsg({type: "replay_data", stepSeconds: 60, sourceBars: globalThis.__src})');
