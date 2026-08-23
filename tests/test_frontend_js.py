@@ -25,6 +25,7 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORT_HTML = ROOT / "src" / "AlgoTradeKit" / "report" / "static" / "report.html"
+CHART_HTML  = ROOT / "src" / "AlgoTradeKit" / "visual" / "static" / "index.html"
 
 
 # ---------------------------------------------------------------------------
@@ -42,20 +43,63 @@ const src = blocks[blocks.length - 1];      // the app script (CDN ones have src
 
 function mkEl(id) {
   const cls = new Set();
-  return {
-    id, textContent: '', innerHTML: '', value: '',
+  let className = '', text = '';
+  const el = {
+    id, innerHTML: '', value: '',
     style: new Proxy({}, {get: (t, k) => t[k] ?? '', set: (t, k, v) => (t[k] = v, true)}),
     classList: {
       add: c => cls.add(c), remove: c => cls.delete(c),
       contains: c => cls.has(c), toggle: (c, on) => on ? cls.add(c) : cls.delete(c),
     },
     _cls: cls,
-    contains(node) { return node === this; },
-    addEventListener() {}, removeEventListener() {}, appendChild() {},
-    querySelectorAll: () => [],
+    contains(node) { return node === this || this.children.includes(node); },
+    addEventListener() {}, removeEventListener() {},
+    appendChild(c) { this.children.push(c); return c; },
+    insertBefore(c) { this.children.push(c); return c; },
+    removeChild(c) { return c; },
+    remove() {},
+    children: [],
+    previousElementSibling: null, nextElementSibling: null,
+    querySelectorAll: () => [], querySelector: () => null,
     getBoundingClientRect: () => ({left: 0, top: 0, width: 800, height: 400}),
-    getContext: () => ({}),
+    getContext: () => autoStub('ctx2d'),
+    clientWidth: 800, clientHeight: 400,
   };
+  // className must stay in step with classList — the page sets both ways
+  Object.defineProperty(el, 'className', {
+    get: () => className,
+    set(v) {
+      className = String(v);
+      cls.clear();
+      className.split(/\s+/).filter(Boolean).forEach(c => cls.add(c));
+    },
+  });
+  // textContent reads through to appended children, as a real node does
+  Object.defineProperty(el, 'textContent', {
+    get: () => text + el.children.map(c => c.textContent).join(''),
+    set(v) { text = String(v); el.children.length = 0; },
+  });
+  return el;
+}
+
+// Any property access returns a callable stub, so a charting library's whole
+// surface can be exercised without modelling it.
+function autoStub(name, overrides = {}) {
+  const cache = new Map();
+  const base = function () { return autoStub(name + '()'); };
+  return new Proxy(base, {
+    get(t, k) {
+      if (k in overrides) return overrides[k];
+      if (k === 'toString' || k === Symbol.toPrimitive) return () => name;
+      if (typeof k === 'symbol') return undefined;
+      if (['clientWidth','clientHeight','width','height'].includes(k)) return 800;
+      if (!cache.has(k)) cache.set(k, autoStub(name + '.' + String(k)));
+      return cache.get(k);
+    },
+    set(t, k, v) { overrides[k] = v; return true; },
+    apply() { return autoStub(name + '()'); },
+    has() { return true; },
+  });
 }
 
 const els = {}, docListeners = {};
@@ -86,6 +130,11 @@ const ctx = {
 };
 ctx.window.location = ctx.location;
 ctx.globalThis = ctx;
+ctx.LightweightCharts = autoStub('LightweightCharts');
+ctx.ResizeObserver = function () { return {observe() {}, disconnect() {}}; };
+ctx.devicePixelRatio = 1;
+ctx.__sent = [];
+EXTRA_GLOBALS
 vm.createContext(ctx);
 
 let topLevelError = null;
@@ -101,9 +150,13 @@ const out = {topLevelError};
 """
 
 
-def _run(page: Path, body: str) -> dict:
+def _run(page: Path, body: str, extra_globals: str = "") -> dict:
     """Execute *body* after loading *page*'s script; return its ``out`` object."""
-    script = _HARNESS.replace("PAGE", json.dumps(str(page))) + body
+    script = (
+        _HARNESS.replace("PAGE", json.dumps(str(page)))
+        .replace("EXTRA_GLOBALS", extra_globals)
+        + body
+    )
     script += "\nconsole.log(JSON.stringify(out));\n"
     proc = subprocess.run(
         [NODE, "-e", script], capture_output=True, text=True, timeout=120
@@ -201,3 +254,103 @@ class TestTradePopupBehaviour:
     def test_unpinned_hover_preview_is_unchanged(self, popup_result):
         assert popup_result["previewShown"] == "block"
         assert popup_result["previewHidden"] == "none"
+
+
+# ---------------------------------------------------------------------------
+# index.html — the timeframe selector (v1.1.0)
+# ---------------------------------------------------------------------------
+
+_INIT_5M = """
+const init = {
+  type: 'init', title: 'BTC', theme: 'dark', chartType: 'candlestick',
+  volumeInMain: true, candleCountLimit: null,
+  sourceTimeframe: '1m', displayTimeframe: '5m',
+  timeframes: ['1m', '3m', '5m', '15m', '1h'],
+  bars: [{time: 1700000000, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10}],
+  indicators: [], drawings: [],
+};
+ctx.__init = init;
+ev('ws = {readyState: 1, send: m => globalThis.__sent.push(JSON.parse(m))}');
+ev('handleMsg(globalThis.__init)');
+const menu = document.getElementById('tf-menu');
+const btn  = document.getElementById('tf-btn');
+"""
+
+
+@pytest.fixture(scope="module")
+def timeframe_result() -> dict:
+    return _run(CHART_HTML, _INIT_5M + """
+out.wrapShown   = document.getElementById('tf-wrap').style.display;
+out.buttonLabel = btn.textContent;
+out.optionCount = menu.children.length;
+out.optionText  = menu.children.map(c => c.textContent);
+out.activeOne   = menu.children.filter(c => c._cls.has('on')).map(c => c.textContent);
+
+// picking a higher timeframe asks the server for it
+menu.children.find(c => c.textContent.startsWith('15m')).onclick();
+out.sent        = ctx.__sent.slice();
+out.menuClosed  = !menu._cls.has('open');
+out.busyWhilePending = btn._cls.has('busy');
+
+// the server answers with a fresh init at the new timeframe
+ctx.__init2 = Object.assign({}, ctx.__init, {displayTimeframe: '15m'});
+ev('handleMsg(globalThis.__init2)');
+out.labelAfter  = document.getElementById('tf-btn').textContent;
+out.busyAfter   = document.getElementById('tf-btn')._cls.has('busy');
+
+// picking the source sends null, which is how "show it unchanged" is spelled
+ctx.__sent.length = 0;
+document.getElementById('tf-menu').children.find(c => c.textContent.startsWith('1m')).onclick();
+out.sentForSource = ctx.__sent.slice();
+
+// a refusal from the server clears the pending state instead of sticking
+ev("handleMsg({type: 'timeframe_error', message: 'nope'})");
+out.busyAfterError = document.getElementById('tf-btn')._cls.has('busy');
+""")
+
+
+class TestTimeframeSelector:
+    def test_page_script_runs_clean(self, timeframe_result):
+        assert timeframe_result["topLevelError"] is None
+
+    def test_selector_is_populated_from_the_server(self, timeframe_result):
+        assert timeframe_result["wrapShown"] != "none"
+        assert timeframe_result["optionCount"] == 5
+        assert [t.split("source")[0] for t in timeframe_result["optionText"]] == [
+            "1m", "3m", "5m", "15m", "1h"
+        ]
+
+    def test_current_timeframe_is_marked_and_labelled(self, timeframe_result):
+        assert timeframe_result["buttonLabel"] == "5m"
+        assert timeframe_result["activeOne"] == ["5m"]
+
+    def test_source_timeframe_is_tagged(self, timeframe_result):
+        assert "source" in timeframe_result["optionText"][0]
+
+    def test_choosing_one_asks_the_server(self, timeframe_result):
+        assert timeframe_result["sent"] == [{"type": "set_timeframe", "tf": "15m"}]
+        assert timeframe_result["menuClosed"] is True
+        assert timeframe_result["busyWhilePending"] is True
+
+    def test_new_init_settles_the_button(self, timeframe_result):
+        assert timeframe_result["labelAfter"] == "15m"
+        assert timeframe_result["busyAfter"] is False
+
+    def test_selecting_the_source_sends_null(self, timeframe_result):
+        assert timeframe_result["sentForSource"] == [{"type": "set_timeframe", "tf": None}]
+
+    def test_a_refused_switch_is_not_left_pending(self, timeframe_result):
+        assert timeframe_result["busyAfterError"] is False
+
+
+def test_selector_is_hidden_when_there_is_nothing_to_switch_to():
+    """A chart whose timeframe could not be detected must not show the button."""
+    result = _run(CHART_HTML, """
+ev('ws = {readyState: 1, send: m => globalThis.__sent.push(JSON.parse(m))}');
+ctx.__init = {type: 'init', title: 'x', bars: [], indicators: [], drawings: [],
+              sourceTimeframe: null, displayTimeframe: null, timeframes: []};
+ev('handleMsg(globalThis.__init)');
+out.wrapShown = document.getElementById('tf-wrap').style.display;
+""")
+    assert result["topLevelError"] is None
+    assert result["wrapShown"] == "none"
