@@ -126,10 +126,10 @@ const tip = document.getElementById('trade-tooltip');
 """
 
 
-class TestTradePopupBehaviour:
-    @pytest.fixture(scope="class")
-    def result(self) -> dict:
-        return _run(REPORT_HTML, _TRADE + """
+@pytest.fixture(scope="module")
+def popup_result() -> dict:
+    """Drive the whole popup lifecycle once; each test asserts one rule."""
+    return _run(REPORT_HTML, _TRADE + """
 ev('pinTooltip(__t, {clientX: 100, clientY: 100})');
 out.pinnedId       = ev('pinnedTradeId');
 out.displayOnPin   = tip.style.display;
@@ -171,31 +171,33 @@ fire('mousemove', document.getElementById('elsewhere'));
 out.previewHidden = tip.style.display;
 """)
 
-    def test_page_script_runs_clean(self, result):
-        assert result["topLevelError"] is None
 
-    def test_click_pins_the_box(self, result):
-        assert result["pinnedId"] == 11
-        assert result["displayOnPin"] == "block"
-        assert result["hasPinnedClass"] is True
+class TestTradePopupBehaviour:
+    def test_page_script_runs_clean(self, popup_result):
+        assert popup_result["topLevelError"] is None
 
-    def test_hover_events_cannot_close_a_pinned_box(self, result):
+    def test_click_pins_the_box(self, popup_result):
+        assert popup_result["pinnedId"] == 11
+        assert popup_result["displayOnPin"] == "block"
+        assert popup_result["hasPinnedClass"] is True
+
+    def test_hover_events_cannot_close_a_pinned_box(self, popup_result):
         # the actual v1.0.2 bug: the box died before the pointer reached it
-        assert result["displayAfterHide"] == "block"
-        assert result["displayAfterHoverOut"] == "block"
-        assert result["displayAfterMouseMove"] == "block"
+        assert popup_result["displayAfterHide"] == "block"
+        assert popup_result["displayAfterHoverOut"] == "block"
+        assert popup_result["displayAfterMouseMove"] == "block"
 
-    def test_open_chart_button_reaches_the_right_chart(self, result):
-        assert result["openedUrl"] == "http://vps.example:8712/"
-        assert result["pinnedAfterOpen"] is None
+    def test_open_chart_button_reaches_the_right_chart(self, popup_result):
+        assert popup_result["openedUrl"] == "http://vps.example:8712/"
+        assert popup_result["pinnedAfterOpen"] is None
 
-    def test_only_an_outside_click_or_escape_closes_it(self, result):
-        assert result["pinnedAfterInsideClick"] == 11
-        assert result["pinnedAfterOutsideClick"] is None
-        assert result["displayAfterOutsideClick"] == "none"
-        assert result["classAfterOutsideClick"] is False
-        assert result["pinnedAfterEscape"] is None
+    def test_only_an_outside_click_or_escape_closes_it(self, popup_result):
+        assert popup_result["pinnedAfterInsideClick"] == 11
+        assert popup_result["pinnedAfterOutsideClick"] is None
+        assert popup_result["displayAfterOutsideClick"] == "none"
+        assert popup_result["classAfterOutsideClick"] is False
+        assert popup_result["pinnedAfterEscape"] is None
 
-    def test_unpinned_hover_preview_is_unchanged(self, result):
-        assert result["previewShown"] == "block"
-        assert result["previewHidden"] == "none"
+    def test_unpinned_hover_preview_is_unchanged(self, popup_result):
+        assert popup_result["previewShown"] == "block"
+        assert popup_result["previewHidden"] == "none"
