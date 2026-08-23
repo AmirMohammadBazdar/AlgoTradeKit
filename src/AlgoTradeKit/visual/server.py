@@ -61,7 +61,7 @@ def _find_free_port(start: int = 8700, host: str = "127.0.0.1") -> int:
 
 
 def _dispatch(loop, coro_fn, *args) -> None:
-    """Run *coro_fn(\*args)* on *loop* from another thread, or drop it.
+    r"""Run *coro_fn(\*args)* on *loop* from another thread, or drop it.
 
     The coroutine is only created once the loop is known to be usable: build
     it first and a send after ``stop()`` leaves an un-awaited coroutine behind,
