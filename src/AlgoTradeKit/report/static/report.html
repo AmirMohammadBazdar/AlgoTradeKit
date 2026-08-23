@@ -68,7 +68,20 @@ a{color:var(--accent);text-decoration:none}
 #trade-tooltip{position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;
                padding:10px 14px;pointer-events:none;z-index:200;display:none;
                font-size:11px;min-width:200px;box-shadow:0 8px 24px #000a}
-#trade-tooltip h4{font-size:12px;margin-bottom:6px;color:var(--text)}
+/* Pinned by a click: the box stays put and becomes clickable, so the
+   "Open on Candle Chart" button can actually be reached.  While it is only a
+   hover preview it must stay pointer-events:none or it steals the mouse from
+   the canvas underneath and the chart stops seeing hovers. */
+#trade-tooltip.pinned{pointer-events:auto;border-color:var(--accent)88;
+                      box-shadow:0 8px 28px #000c,0 0 0 1px var(--accent)33}
+#trade-tooltip h4{font-size:12px;margin-bottom:6px;color:var(--text);
+                  padding-right:16px}
+#tt-close{position:absolute;top:6px;right:8px;display:none;border:0;background:transparent;
+          color:var(--text3);cursor:pointer;font-size:13px;line-height:1;padding:2px 4px}
+#tt-close:hover{color:var(--text)}
+#trade-tooltip.pinned #tt-close{display:block}
+#tt-hint{margin-top:6px;font-size:9px;color:var(--text3);display:none}
+#trade-tooltip.pinned #tt-hint{display:block}
 #trade-tooltip table{border-collapse:collapse;width:100%}
 #trade-tooltip td{padding:2px 4px;color:var(--text2)}
 #trade-tooltip td:last-child{text-align:right;color:var(--text);font-family:'Courier New',monospace}
@@ -291,8 +304,9 @@ table.data-tbl td.dd-max{background:#f8514912;color:var(--red)}
   </div><!-- /report-content -->
 </div><!-- /main -->
 
-<!-- Trade tooltip (appears on hover over equity chart) -->
+<!-- Trade tooltip — hover previews it, a click pins it (see pinTooltip) -->
 <div id="trade-tooltip">
+  <button id="tt-close" onclick="closePinnedTooltip()" title="Close">✕</button>
   <h4 id="tt-title">Trade #0</h4>
   <table>
     <tr id="tt-pair-row" style="display:none"><td>Pair</td><td id="tt-pair">—</td></tr>
@@ -308,6 +322,7 @@ table.data-tbl td.dd-max{background:#f8514912;color:var(--red)}
     <tr><td>Close</td><td id="tt-close">—</td></tr>
   </table>
   <button id="open-chart-btn" onclick="openChart()">📈 Open on Candle Chart</button>
+  <div id="tt-hint">Click anywhere outside, or press Esc, to close.</div>
 </div>
 
 <script>
@@ -316,6 +331,10 @@ table.data-tbl td.dd-max{background:#f8514912;color:var(--red)}
 // ═══════════════════════════════════════════════════════════════
 let ws = null, reportData = null, equityChart = null;
 let hoveredTradeId = null;
+// Set when the user CLICKS a trade dot. A pinned box ignores every hover event
+// and only closes on an outside click, Esc, or its own ✕ — without this the box
+// vanished the moment the pointer left the dot, so its button was unreachable.
+let pinnedTradeId = null;
 let seriesVisible = {equity:true, wallet:true, trades:true, maxdd:true, sigdd:true};
 const FMT = new Intl.NumberFormat('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 const DATE_FMT = (ms) => {
@@ -569,6 +588,10 @@ function buildEquityChart(d) {
   const hist = d.balance_history || [];
   if (!hist.length) return;
 
+  // A live push_update rebuilds the chart under the box; the pinned trade's
+  // element index is then stale, so drop the pin rather than show stale rows.
+  closePinnedTooltip();
+
   // Live push (push_update) rebuilds the chart — preserve the user's
   // active zoom/pan window across re-renders.  scales.x.min/max in
   // *options* are only set by the pan/zoom handlers (undefined at the
@@ -705,8 +728,7 @@ function buildEquityChart(d) {
         const tradeEl = elements.find(e => e.datasetIndex === 2);
         if (tradeEl) {
           const trade = equityChart.data.datasets[2].data[tradeEl.index].trade;
-          hoveredTradeId = trade.uid ?? trade.trade_id;
-          showTooltipForTrade(trade, evt.native);
+          pinTooltip(trade, evt.native);
         }
       },
     }
@@ -793,6 +815,9 @@ Chart.register({
 
 // ── External tooltip for scatter trade markers ─────────────────
 function externalTooltip(context) {
+  // A pinned box owns the tooltip: hovering elsewhere must neither move it
+  // nor hide it.
+  if (pinnedTradeId != null) return;
   const {chart, tooltip} = context;
   if (tooltip.opacity === 0) { hideTooltip(); return; }
   if (tooltip.dataPoints.length === 0) return;
@@ -848,10 +873,40 @@ function showTooltipForTrade(trade, mouseEvt) {
 }
 
 function hideTooltip() {
+  if (pinnedTradeId != null) return;      // only closePinnedTooltip() may close a pin
   document.getElementById('trade-tooltip').style.display = 'none';
 }
 
+// ── Pin / unpin (click to keep the box open) ───────────────────
+function pinTooltip(trade, mouseEvt) {
+  pinnedTradeId = trade.uid ?? trade.trade_id;
+  showTooltipForTrade(trade, mouseEvt);
+  document.getElementById('trade-tooltip').classList.add('pinned');
+}
+
+function closePinnedTooltip() {
+  pinnedTradeId = null;
+  const el = document.getElementById('trade-tooltip');
+  el.classList.remove('pinned');
+  el.style.display = 'none';
+}
+
+// Outside click closes the pin.  mousedown (not click) so it also fires when
+// the press starts a pan drag on the canvas.  Clicking a different dot closes
+// this box first, then Chart.js's onClick pins the new one.
+document.addEventListener('mousedown', e => {
+  if (pinnedTradeId == null) return;
+  if (document.getElementById('trade-tooltip').contains(e.target)) return;
+  closePinnedTooltip();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && pinnedTradeId != null) closePinnedTooltip();
+});
+
+// Hover preview only: follow the pointer away from the chart and disappear.
 document.addEventListener('mousemove', e => {
+  if (pinnedTradeId != null) return;
   const el = document.getElementById('trade-tooltip');
   if (el.style.display !== 'none' && !el.contains(e.target) &&
       !document.getElementById('equity-chart').contains(e.target)) {
@@ -861,17 +916,20 @@ document.addEventListener('mousemove', e => {
 
 // ── Open candle chart ──────────────────────────────────────────
 function openChart() {
-  if (hoveredTradeId == null || !reportData?.has_chart) return;
+  const wantedId = pinnedTradeId ?? hoveredTradeId;
+  if (wantedId == null || !reportData?.has_chart) return;
   const trade = (reportData?.trade_markers || [])
-    .find(t => (t.uid ?? t.trade_id) === hoveredTradeId);
+    .find(t => (t.uid ?? t.trade_id) === wantedId);
   if (!trade) return;
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({type: 'open_chart', trade_id: trade.trade_id}));
   }
   if (reportData.chart_port) {
-    window.open(`http://127.0.0.1:${reportData.chart_port}/`, '_blank');
+    // Same host the report itself came from — hardcoding 127.0.0.1 pointed at
+    // the viewer's own machine whenever the report was served from a VPS.
+    window.open(`http://${location.hostname}:${reportData.chart_port}/`, '_blank');
   }
-  hideTooltip();
+  closePinnedTooltip();
 }
 
 // ── Manual pan & wheel-zoom for equity chart ──────────────────
