@@ -45,6 +45,12 @@ dev = [
     "twine",
 ]
 
+# Native MetaTrader 5 transport (Windows only).  The MetaTrader5 wheel exists
+# for Windows alone, so the marker keeps `pip install AlgoTradeKit[mt5]` a
+# no-op everywhere else instead of an install error.  On Linux the terminal
+# runs under Wine and is reached through the bridge — see MT5_WINE_SETUP.md.
+mt5 = ['MetaTrader5; platform_system == "Windows"']
+
 [project.urls]
 Homepage   = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
 Repository = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
