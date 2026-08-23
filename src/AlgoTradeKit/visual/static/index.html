@@ -1007,16 +1007,22 @@ function setData(bars){
 
 function streamBar(bar){
   if(!mainSeries) return;
-  mainSeries.update(bar);
-  if(volumeSeries) volumeSeries.update({time:bar.time,value:bar.volume||0,
-    color:bar.close>=bar.open?'#3fb95055':'#f8514955'});
+  // While replaying, a live candle must not be drawn: it belongs to a time
+  // ahead of the cursor. It is still recorded, so leaving replay shows every
+  // candle that arrived meanwhile. The rolling window waits too, because
+  // trimming allBars underneath the cursor would invalidate what is on screen.
+  if(!replay.active){
+    mainSeries.update(bar);
+    if(volumeSeries) volumeSeries.update({time:bar.time,value:bar.volume||0,
+      color:bar.close>=bar.open?'#3fb95055':'#f8514955'});
+  }
   if(allBars.length&&allBars[allBars.length-1].time===bar.time) allBars[allBars.length-1]=bar;
   else allBars.push(bar);
-  enforceCandleLimit();   // rolling window (v1.0.0) — no-op when unlimited
+  if(!replay.active) enforceCandleLimit();   // rolling window (v1.0.0)
   document.getElementById('barcnt').textContent=allBars.length+' bars';
   document.getElementById('lupd').textContent='⟳ '+new Date().toLocaleTimeString();
   // Keep last-close axis label current
-  updateCursorAxisLabel(null);
+  if(!replay.active) updateCursorAxisLabel(null);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2769,7 +2775,8 @@ function replayExit(){
   document.body.classList.remove('rp-picking');
   document.getElementById('rp-bar').classList.remove('open');
   document.getElementById('rp-btn').classList.remove('on');
-  // Put the full data back exactly as it was
+  // Put the full data back — including anything that streamed in meanwhile
+  enforceCandleLimit();
   if(mainSeries) mainSeries.setData(allBars);
   if(volumeSeries) volumeSeries.setData(allBars.map(volPoint));
   Object.values(indMeta).forEach(m=>{ try{ m.series.setData(m.full); }catch{} });

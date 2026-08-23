@@ -931,3 +931,34 @@ out.totalBars   = ev('allBars.length');
     assert result["stillActive"] is True
     assert result["cursorKept"] is True
     assert result["shownCount"] < result["totalBars"]      # still cut at the cursor
+
+
+def test_live_candles_do_not_draw_past_the_replay_cursor():
+    """A chart can be replaying and still be fed by a live feed — the CBC page
+    does exactly that. Those candles belong ahead of the cursor."""
+    result = _run(CHART_HTML, _REPLAY_SETUP + """
+ev('replayToggle()');
+ev('handleMsg({type: "replay_data", stepSeconds: 60, sourceBars: globalThis.__src})');
+ev('replayPick(globalThis.__bars[3].time)');
+const drawnAtPick = ev('(mainSeries.setData._last || []).length');
+const barsAtPick  = ev('allBars.length');
+
+// two live candles arrive mid-replay
+const next = ctx.__bars[ctx.__bars.length - 1].time;
+ev(`streamBar({time: ${next + 300}, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1})`);
+ev(`streamBar({time: ${next + 600}, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1})`);
+
+out.drawnUnchanged = ev('(mainSeries.setData._last || []).length') === drawnAtPick;
+out.updatesDuring  = ev('mainSeries.update._calls.length');
+out.recorded       = ev('allBars.length') - barsAtPick;
+
+// leaving replay shows everything, including what arrived meanwhile
+ev('replayExit()');
+out.afterExit = ev('(mainSeries.setData._last || []).length');
+out.total     = ev('allBars.length');
+""")
+    assert result["topLevelError"] is None
+    assert result["drawnUnchanged"] is True      # the view did not move
+    assert result["updatesDuring"] == 0          # nothing drawn ahead of the cursor
+    assert result["recorded"] == 2               # but both were kept
+    assert result["afterExit"] == result["total"]
