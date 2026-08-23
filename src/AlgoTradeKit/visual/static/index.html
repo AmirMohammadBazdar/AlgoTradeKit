@@ -662,11 +662,16 @@ let sourceTimeframe=null, displayTimeframe=null, timeframeList=[], tfPending=nul
 const _q = new URLSearchParams(location.search);
 const viewId   = _q.get('view');
 const embedded = viewId !== null && window.parent !== window;
-// The last range the page told us to show. A flag alone cannot guard this:
-// lightweight-charts reports a range change on a later frame, by which time a
-// synchronous flag is long cleared -- so the charts would relay the same range
-// back and forth for ever. Comparing values ends it deterministically.
-let appliedRange = null;
+// Only the chart the pointer is over may drive the others.
+//
+// Comparing values is not enough to stop an echo: each chart snaps a range to
+// its own bars, so a 3m chart handed a 5m chart's range reports back something
+// slightly different, which is relayed, snapped again, and so on -- the charts
+// visibly shake. One writer at a time ends that by construction, and it is
+// also how it reads to a user: you scroll the chart you are pointing at.
+let hasPointer = false;
+let syncMuteUntil = 0;          // ignore our own range events until this time
+const muteSync = (ms) => { syncMuteUntil = Date.now() + ms; };
 const SAME_TIME = (a, b) => a != null && b != null && Math.abs(a - b) < 1;
 let appliedCrosshair = null;
 
@@ -793,11 +798,9 @@ function createPane(id,flex=3,label=''){
   // index: charts on different timeframes share instants, not candle numbers.
   if(id==='main'){
     chart.timeScale().subscribeVisibleTimeRangeChange(range=>{
-      if(!range) return;
-      // Do not report back the range we were just given
-      if(appliedRange && SAME_TIME(range.from, appliedRange.from)
-                      && SAME_TIME(range.to, appliedRange.to)) return;
-      appliedRange = null;                  // a genuine move by this user
+      if(!range || !embedded) return;
+      if(!hasPointer) return;               // someone else is driving
+      if(Date.now() < syncMuteUntil) return;   // still settling after a relay
       postToPage({t:'range', from:range.from, to:range.to});
     });
   }
@@ -822,6 +825,22 @@ function syncCrosshair(srcId,param){
 //  Only active when this chart is a frame inside a ChartPage. The
 //  shell relays between frames; we never talk to a sibling directly.
 // ═══════════════════════════════════════════════════════════════
+function scrollToTime(ts, opts){
+  // Centre the candle nearest *ts*, in candles rather than seconds so the view
+  // is the same width whatever timeframe this chart is on.
+  if(!mainChart || !allBars.length) return;
+  let bestIdx=0, bestDiff=Infinity;
+  for(let i=0;i<allBars.length;i++){
+    const diff=Math.abs(allBars[i].time - ts);
+    if(diff < bestDiff){ bestDiff=diff; bestIdx=i; }
+  }
+  const half=50, from=Math.max(0,bestIdx-half), to=Math.min(allBars.length-1,bestIdx+half);
+  muteSync(400);                       // this is a jump, not a user scroll
+  try{ mainChart.timeScale().setVisibleLogicalRange({from,to}); }catch{}
+  redrawAll();
+  if(opts && opts.announce) postToPage({t:'navigate', time: ts});
+}
+
 function postToPage(msg){
   if(!embedded) return;
   try{ window.parent.postMessage(Object.assign({view:viewId}, msg), '*'); }catch{}
@@ -844,7 +863,9 @@ function applyPageRange(from, to){
   if(!mainChart) return;
   const current = mainChart.timeScale().getVisibleRange();
   if(current && SAME_TIME(current.from, from) && SAME_TIME(current.to, to)) return;
-  appliedRange = {from, to};    // remember it so the echo can be recognised
+  // Snapping this to our own bars fires a range event a frame or two later;
+  // stay quiet until it has passed so it is not mistaken for a user move.
+  muteSync(400);
   try{ mainChart.timeScale().setVisibleRange({from, to}); }
   catch{}                       // range outside this chart's data — ignore
   redrawAll();
@@ -872,9 +893,19 @@ if(embedded){
   const startTitle = _q.get('title');
   if(startTitle) document.getElementById('chart-title').textContent = startTitle;
 
-  // Clicking anywhere in this chart makes it the page's active one
-  window.addEventListener('mousedown', () => postToPage({t:'focus'}), true);
-  window.addEventListener('focus',     () => postToPage({t:'focus'}));
+  // Whichever chart the pointer is over is the one that drives the others
+  const takeOver = () => {
+    if(hasPointer) return;
+    hasPointer = true;
+    postToPage({t:'focus'});
+  };
+  window.addEventListener('mouseover', takeOver);
+  window.addEventListener('mousedown', takeOver, true);
+  window.addEventListener('focus',     takeOver);
+  window.addEventListener('mouseout', e => {
+    if(!e.relatedTarget) hasPointer = false;      // the pointer left this chart
+  });
+  window.addEventListener('blur', () => { hasPointer = false; });
 
   window.addEventListener('message', ev => {
     if(ev.source !== window.parent) return;      // only the shell may steer us
@@ -888,6 +919,7 @@ if(embedded){
       case 'replay-cursor':   replayPageCursor(msg.time);              break;
       case 'replay-exit':     replayExit();                            break;
       case 'replay-info':     postToPage(replayInfo());                break;
+      case 'navigate':        scrollToTime(msg.time);                  break;
     }
   });
 }
@@ -3111,22 +3143,11 @@ function handleMsg(msg){
       candleCountLimit=msg.limit||null;
       enforceCandleLimit();
       break;
-    case 'navigate_to_candle':{
-      // Smoothly scroll+zoom to show the target candle
-      if(!mainChart || !allBars.length) break;
-      const ts = msg.timestamp;
-      // Find the bar index closest to ts
-      let bestIdx=0, bestDiff=Infinity;
-      for(let i=0;i<allBars.length;i++){
-        const diff=Math.abs(allBars[i].time - ts);
-        if(diff < bestDiff){ bestDiff=diff; bestIdx=i; }
-      }
-      // Set visible range: 50 candles either side
-      const half=50, from=Math.max(0,bestIdx-half), to=Math.min(allBars.length-1,bestIdx+half);
-      mainChart.timeScale().setVisibleLogicalRange({from,to});
-      redrawAll();
+    case 'navigate_to_candle':
+      // The report asked for a trade. Take the whole page there, not just the
+      // chart the report happens to be linked to.
+      scrollToTime(msg.timestamp, {announce: true});
       break;
-    }
   }
 }
 

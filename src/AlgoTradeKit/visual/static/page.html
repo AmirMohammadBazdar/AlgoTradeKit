@@ -350,10 +350,18 @@ window.addEventListener('message', ev => {
       // Sync by TIME, never by candle index: a 3m and a 5m chart have
       // completely different logical indices for the same instant.
       if(!sync.time) break;
+      // Only the chart being used may move the others. Each chart snaps a
+      // range to its own bars, so letting every chart answer back makes them
+      // chase each other's rounding and shake.
+      if(id !== activeView) break;
       if(lastRange && SAME_TIME(lastRange.from, msg.from)
-                   && SAME_TIME(lastRange.to, msg.to)) break;   // an echo
+                   && SAME_TIME(lastRange.to, msg.to)) break;
       lastRange = {from: msg.from, to: msg.to};
       broadcast(id, {t: 'range', from: msg.from, to: msg.to});
+      break;
+    case 'navigate':
+      // The report sent one chart to a trade; the rest of the page follows.
+      broadcast(id, {t: 'navigate', time: msg.time});
       break;
     case 'crosshair':
       if(!sync.crosshair) break;
