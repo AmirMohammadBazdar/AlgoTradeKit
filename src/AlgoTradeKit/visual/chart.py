@@ -1551,6 +1551,13 @@ class Chart:
             params = msg.get("params", {})
             self.add_indicator_spec(params)
 
+        elif msg_type == "replay_arm":
+            # v1.1.0 — bar replay wants the *source* candles so it can build a
+            # forming candle inside the displayed one.  Sent once, on arming:
+            # every step after that is client-side, which matters when the
+            # browser is on the other end of an SSH tunnel.
+            self._send_replay_data()
+
         elif msg_type == "set_timeframe":
             # v1.1.0 — the toolbar selector. Resampling happens here, never in
             # the browser; a bad value is reported instead of crashing the loop.
@@ -1558,6 +1565,47 @@ class Chart:
                 self.set_timeframe(msg.get("tf"))
             except ValueError as exc:
                 self._server.send({"type": "timeframe_error", "message": str(exc)})
+
+    # -----------------------------------------------------------------------
+    # Bar replay support (v1.1.0)
+    # -----------------------------------------------------------------------
+
+    def source_bars(self) -> list[dict]:
+        """
+        The data at its **source** timeframe, in the browser's bar shape
+        (``time`` in Unix seconds).
+
+        Bar replay uses these to build the candle that is still forming inside
+        the displayed timeframe: with 1m data shown at 5m, a cursor three
+        minutes into a bucket shows a 5m candle made of those three minutes.
+        Returns ``[]`` when the display is already the source timeframe --
+        there is nothing finer to show.
+        """
+        if self._display_tf is None or self._source_df.empty:
+            return []
+        return [
+            {
+                "time":   int(row.timestamp) // 1000,
+                "open":   float(row.open),
+                "high":   float(row.high),
+                "low":    float(row.low),
+                "close":  float(row.close),
+                "volume": float(getattr(row, "volume", 0.0) or 0.0),
+            }
+            for row in self._source_df.itertuples(index=False)
+        ]
+
+    def _send_replay_data(self) -> None:
+        """Answer a browser's ``replay_arm`` with the source candles."""
+        from ..data._utils import TIMEFRAME_MS
+
+        step_ms = TIMEFRAME_MS.get(self._source_tf or "") or 0
+        self._server.send({
+            "type":            "replay_data",
+            "sourceTimeframe": self._source_tf,
+            "stepSeconds":     step_ms // 1000,
+            "sourceBars":      self.source_bars(),
+        })
 
     # -----------------------------------------------------------------------
     # On-demand indicator computation (v0.7.4)
