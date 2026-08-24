@@ -280,3 +280,46 @@ class TestOversizedInitWarning:
         chart._server.send = lambda msg: None
         chart._send_init()
         assert not [w for w in recwarn.list if "MB to the browser" in str(w.message)]
+
+
+class TestShutdownRace:
+    """stop() clears the loop reference as soon as its join gives up waiting,
+    and a shutdown held open by a still-connected browser outlasts that join.
+    The server thread must not be reading that attribute while it unwinds."""
+
+    def test_the_thread_survives_the_loop_reference_being_cleared(self):
+        import threading
+        import time
+
+        from AlgoTradeKit.visual.server import ChartServer
+
+        failures: list[str] = []
+        previous = threading.excepthook
+        threading.excepthook = lambda args: failures.append(
+            f"{args.exc_type.__name__}: {args.exc_value}"
+        )
+        server = ChartServer(title="race")
+        try:
+            server.start(open_browser=False)
+            time.sleep(0.3)
+
+            # exactly what stop() does when its join expires mid-shutdown
+            server._uvicorn.should_exit = True
+            server._loop = None
+            server._thread.join(timeout=5)
+
+            assert not server._thread.is_alive()
+            assert failures == [], failures
+        finally:
+            threading.excepthook = previous
+            server.stop()
+
+    def test_shutdown_is_bounded(self):
+        """A browser left on the port must not hold it for ever."""
+        from AlgoTradeKit.visual.server import _SHUTDOWN_GRACE, ChartServer
+
+        assert 0 < _SHUTDOWN_GRACE <= 5
+        server = ChartServer(title="bounded")
+        server.start(open_browser=False)
+        assert server._uvicorn.config.timeout_graceful_shutdown == _SHUTDOWN_GRACE
+        server.stop()

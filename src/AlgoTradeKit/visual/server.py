@@ -26,6 +26,9 @@ log = logging.getLogger("algotradekit.visual.server")
 # Path is relative to THIS file — always resolves correctly regardless of cwd
 STATIC_DIR = Path(__file__).parent / "static"
 
+#: Seconds uvicorn may spend closing live connections before it stops anyway.
+_SHUTDOWN_GRACE = 2
+
 # Ports assigned to a ChartServer that hasn't started its thread yet.
 # Prevents two Chart() calls from getting the same port number.
 _reserved_ports: set[int] = set()
@@ -208,8 +211,9 @@ class ChartServer:
         ready = threading.Event()
 
         def _run():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
 
             config = uvicorn.Config(
                 self._app,
@@ -217,6 +221,10 @@ class ChartServer:
                 port=self.port,
                 loop="asyncio",
                 log_level="warning",
+                # Without a bound, shutdown waits for open WebSockets: a
+                # browser tab left on this port keeps it busy long after
+                # stop() has given up waiting.
+                timeout_graceful_shutdown=_SHUTDOWN_GRACE,
             )
             server = uvicorn.Server(config)
             self._uvicorn = server
@@ -230,14 +238,17 @@ class ChartServer:
 
             server.startup = _patched_startup
             try:
-                self._loop.run_until_complete(server.serve())
+                loop.run_until_complete(server.serve())
             finally:
-                # Let pending callbacks finish before the loop goes away,
-                # otherwise uvicorn's lifespan task is destroyed mid-flight.
+                # Clean up through the local, never self._loop: stop() clears
+                # that as soon as its join times out, and a shutdown waiting on
+                # a browser that is still connected outlasts the join. Reading
+                # the attribute here raised AttributeError on None out of the
+                # server thread.
                 try:
-                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                    loop.run_until_complete(loop.shutdown_asyncgens())
                 finally:
-                    self._loop.close()
+                    loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -424,11 +435,13 @@ class PageServer:
         ready = threading.Event()
 
         def _run():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
             config = uvicorn.Config(
                 self._app, host=self.host, port=self.port,
                 loop="asyncio", log_level="warning",
+                timeout_graceful_shutdown=_SHUTDOWN_GRACE,
             )
             server = uvicorn.Server(config)
             self._uvicorn = server
@@ -440,14 +453,17 @@ class PageServer:
 
             server.startup = _patched_startup
             try:
-                self._loop.run_until_complete(server.serve())
+                loop.run_until_complete(server.serve())
             finally:
-                # Let pending callbacks finish before the loop goes away,
-                # otherwise uvicorn's lifespan task is destroyed mid-flight.
+                # Clean up through the local, never self._loop: stop() clears
+                # that as soon as its join times out, and a shutdown waiting on
+                # a browser that is still connected outlasts the join. Reading
+                # the attribute here raised AttributeError on None out of the
+                # server thread.
                 try:
-                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                    loop.run_until_complete(loop.shutdown_asyncgens())
                 finally:
-                    self._loop.close()
+                    loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
