@@ -7,6 +7,77 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.0] — 2026-08-24
+
+Charting. One set of candles in, any timeframe out, several charts at once, and
+history you can step through.
+
+### Added
+
+- **Timeframe switching on the chart** — `Chart(display_timeframe=…)`,
+  `set_timeframe()`, `source_timeframe` / `timeframes`, and a selector in the
+  toolbar. Feed 1m candles and display any whole multiple of them; resampling
+  and indicator maths run in Python, never in the browser. Only valid multiples
+  are offered, so `4h` data never offers `6h`.
+  Indicators added by spec (`chart_indicators`, the toolbar) are **recomputed**
+  on the new candles; precomputed ones are **thinned** last-value-per-bucket and
+  flagged approximate, and their original points are restored when you switch
+  back. Streaming works through the conversion: 1m candles fed to a 5m display
+  grow the forming 5m candle and close it on its boundary.
+- **`ChartPage`** — several charts on one page, on **one port**. `page.add(chart)`
+  stacks rows; `page.add(chart, row=n)` puts a chart beside the ones already
+  there, with dividers draggable on both axes. Charts scroll and crosshair
+  together **by time**, so different timeframes stay aligned. Attaching a chart
+  changes nothing about how you drive it — indicators, drawings, live positions,
+  streaming and `set_timeframe` all work unchanged.
+- **Bar replay** — pick a candle and step history forward or back, play at
+  0.25×–10×, with `Space` / `Shift+←` / `Shift+→` / `Esc`. A step is one
+  *source* candle, so a 5m chart built from 1m data is watched being built.
+  Indicators stop at the last closed candle, while series that legitimately run
+  ahead of the data (Ichimoku's projected spans) keep that overhang. Backtest
+  positions never leak the future: a trade that has not opened is not drawn, and
+  one still open at the cursor stops there with no result label. On a
+  `ChartPage` one cursor drives every chart.
+- **`resample_ohlcv()`, `detect_timeframe()`, `validate_conversion()`,
+  `can_convert()`** in `AlgoTradeKit.data` — the resampling maths as pure
+  functions, no files and no printing. `Converter` now delegates to them, so
+  there is one implementation. `drop_incomplete=False` keeps the candle that is
+  still forming.
+- **Runnable examples** in `examples/`, shipped with the package: a backtest with
+  its report, timeframe switching with bar replay, and a synchronised
+  multi-chart page. They fetch a little public Binance data with no API key and
+  fall back to synthetic candles offline.
+- A chart **warns when its init payload runs to several megabytes**, naming the
+  candle and drawing counts. Every viewer downloads and draws all of it, and a
+  `ChartPage` pays that once per chart in a single tab. Note that
+  `candle_count_limit` on a live session bounds the **simulation window** — the
+  report is recomputed over it — so use it deliberately.
+- **`[mt5]` extra** in `pyproject.toml`. `pip install AlgoTradeKit[mt5]` has been
+  documented since v1.0.0 but never existed, so on Windows the native
+  MetaTrader path failed with an error telling you to install something pip
+  refused to install.
+
+### Fixed
+
+- **Report: the trade popup could not be used.** Clicking a trade dot on the
+  balance chart opened a box with an "Open on Candle Chart" button that was
+  unreachable — hover handlers hid the box before the pointer arrived, and it
+  carried `pointer-events: none` besides. A click now pins it; it closes on an
+  outside click, `Esc`, or its own ✕. The chart link also opened
+  `127.0.0.1`, which is the viewer's own machine when the report comes from a
+  VPS; it now uses the host the report was served from.
+- **MetaTrader: a bridge that accepts the connection but never answers** raised
+  a bare `TimeoutError` instead of the guided error every other bridge failure
+  gives. It now names the likely causes and the guide section.
+- **`MT5_WINE_SETUP.md` was an earlier, shorter draft** (Parts A–G). The Part
+  letters the connector's error messages point at were therefore wrong, and the
+  guide told you to install a Python version that does not work under Wine 9.
+- **Chart servers leaked port reservations.** Every `Chart` created but never
+  shown held one for the life of the process, so building charts in a loop
+  eventually exhausted the port range.
+- **Chart and report servers now shut down cleanly** instead of stopping the
+  event loop under a running server, which raised out of the server thread.
+
 ## [1.0.2] — 2026-07-24
 
 Packaging fixes (no feature changes) — supersedes the withdrawn 1.0.0 and 1.0.1:

@@ -11,24 +11,45 @@ pip install AlgoTradeKit
 
 > Requires Python 3.10+
 
-> ### 🚀 New in v1.0.0 — live trading
+**Runnable examples** live in [`examples/`](examples). Each one downloads a
+little public Binance data (or falls back to synthetic candles offline) and
+needs no API key:
+
+```bash
+python examples/01_backtest_report.py          # backtest → chart + report
+python examples/02_chart_timeframes_replay.py  # timeframe switching + bar replay
+python examples/03_multi_chart_page.py         # three synced charts on one page
+```
+
+> ### 🚀 New in v1.1.0 — the chart grew up
 >
-> The same strategy you backtested can now trade a real account, or paper-trade
-> live market data with the simulation engine:
+> Give the chart your finest candles once and look at them any way you like:
 >
 > ```python
-> from AlgoTradeKit.trader import Trader, TraderConfig, run_live
+> from AlgoTradeKit.visual import Chart, ChartPage
 >
-> run_live(strategy=MyStrategy(), broker=broker, config=config)  # paper — no orders
-> Trader(broker=broker, strategy=MyStrategy(), config=config).run()   # real orders
+> fast = Chart(title="BTC 3m", display_timeframe="3m"); fast.set_data(df_1m)
+> slow = Chart(title="BTC 5m", display_timeframe="5m"); slow.set_data(df_1m)
+>
+> page = ChartPage(title="BTC desk")
+> page.add(fast)          # row 0
+> page.add(slow)          # row 1 — stacked; row=0 would put it alongside
+> page.show(block=True)
 > ```
 >
-> Position sizing, trailing stops, risk-free moves and multi-RR ladders come from
-> the **same maths module the backtest uses**, so live behaviour matches the
-> backtest by construction. See [`trader`](#trader--live-trading-v100).
+> * **Timeframe switching** — feed 1m candles, display any multiple, and change
+>   it from the toolbar. Resampling and indicator maths happen in Python.
+> * **Several charts on one page**, scrolling and crosshairing together by
+>   *time*, so different timeframes stay aligned. One port, one SSH tunnel.
+> * **Bar replay** — step history a candle at a time, watching the higher
+>   timeframe candle build out of the lower ones. Across a whole page, every
+>   chart replays from the same instant.
 >
-> Also new: **MetaTrader works on Windows and Linux automatically**, every
-> indicator gained an O(1) `update()`, and the chart + report now update live.
+> See [`visual`](#visual--interactive-chart).
+>
+> **v1.0.0** brought live trading: `Trader` for real orders, `run_live()` for
+> paper trading on live data, both sharing the backtest's own position maths.
+> See [`trader`](#trader--live-trading-v100).
 
 ---
 
@@ -234,6 +255,26 @@ path = norm.save(destination="data/")
 # One-liner: normalize + save
 df, path = Normalizer("USDJPY_1m.csv").normalize_and_save(destination="data/")
 ```
+
+---
+
+**Resampling in memory** *(v1.1.0)*
+
+`Converter` writes CSVs; when you just want the candles, the same maths is a
+plain function:
+
+```python
+from AlgoTradeKit.data import resample_ohlcv, detect_timeframe, can_convert
+
+detect_timeframe(df)                # "1m"
+resample_ohlcv(df, "5m")            # -> DataFrame, timestamp in UTC ms
+resample_ohlcv(df, "5m", drop_incomplete=False)   # keep the candle still forming
+can_convert("4h", "6h")             # False — not a whole multiple
+```
+
+No printing, no files, and the input frame is never modified. This is what the
+chart's timeframe switching runs on, so a resample you do yourself and one the
+chart does are the same numbers.
 
 ---
 
@@ -828,6 +869,82 @@ replays the **current** chart, not the state it started in.
 
 An interactive single-page web report for a `SimulateReport`.
 
+### Timeframe Switching *(v1.1.0)*
+
+Give the chart its finest candles and display any whole multiple of them.
+The resampling — and the indicator maths on top of it — happens in Python; the
+browser only asks for a timeframe.
+
+```python
+chart = Chart.from_csv("data/btc_1m.csv", display_timeframe="5m")
+chart.add_indicator_spec({"kind": "ema", "period": 50})
+chart.show(block=True)          # a 1m / 3m / 5m / 15m … selector sits in the toolbar
+
+chart.set_timeframe("15m")      # or from Python; same code path as a click
+chart.set_timeframe(None)       # back to the source candles
+chart.source_timeframe          # detected from the data, or set it explicitly
+chart.timeframes                # what the selector offers
+```
+
+Only whole multiples are offered: `4h` data can become `12h` or `1d`, never
+`6h`. Restrict the list with `timeframes=["5m", "15m", "1h"]`.
+
+Indicators are handled by where they came from:
+
+| Added by | On a timeframe change |
+|---|---|
+| `add_indicator_spec` / `chart_indicators` / the toolbar | **recomputed** on the new candles — exact |
+| `add_indicator_from_atk`, `add_rsi`, `add_macd`, `add_ichimoku` | **thinned** last-value-per-bucket and flagged approximate |
+
+Drawings and position boxes are absolute-time, so they stay put.
+
+A partly-covered *first* candle is dropped — 1m data starting at 09:55 would
+otherwise show a 09:45 fifteen-minute candle claiming an open it never had. The
+partly-covered *last* candle is kept, because that one is still forming.
+
+### Several Charts on One Page *(v1.1.0)*
+
+```python
+from AlgoTradeKit.visual import Chart, ChartPage
+
+page = ChartPage(title="BTC desk")
+page.add(fast)             # row 0
+page.add(slow)             # row 1 — a new row, stacked underneath
+page.add(eth, row=1)       # beside slow — side by side
+page.show(block=True)
+```
+
+Rows stack top to bottom and the charts inside a row sit left to right, with
+dividers you can drag on both axes.
+
+Charts scroll and crosshair together **by time**, so a 3m and a 1h chart stay
+on the same instant instead of the same candle number. Both syncs toggle from
+the page header, or at construction with `sync_time=` / `sync_crosshair=`.
+
+Everything — the page, every chart and every WebSocket — is served from **one
+port**, so viewing a VPS page still needs only one SSH tunnel.
+
+Attaching a chart changes nothing about how you drive it: indicators, drawings,
+live positions, streaming and `set_timeframe` all work exactly as they do on a
+chart of its own. Charts can also be added after `show()`.
+
+### Bar Replay *(v1.1.0)*
+
+Press **⏵⏵ REPLAY**, click a candle, and the chart forgets everything after it.
+
+* `▶|` / `◀` step, `▶` plays at 0.25×–10×, `⏮` returns to the start, `✕` leaves.
+* Keyboard: `Space`, `Shift+→`, `Shift+←`, `Esc`.
+* A step is one **source** candle, so a chart showing 5m built from 1m data
+  advances a minute at a time and you watch the 5m candle being built.
+* Indicators stop at the last **closed** candle. Series that legitimately run
+  ahead of the data — Ichimoku's projected spans — keep that overhang.
+* Backtest positions do not give the future away: a trade that has not opened
+  is not drawn, and one still open at the cursor stops there with no result
+  label.
+
+On a `ChartPage` the replay bar lives in the page header and drives every chart
+from one cursor, stepping by the finest source timeframe on the page.
+
 ### Show in Browser
 
 ```python
@@ -859,8 +976,10 @@ save_report_html(report, "report.html")
 | **Monthly analysis** | Per-month: trades, win%, total PnL, avg PnL |
 | **Cost summary** | Commission, spread, avg MAE, avg MFE |
 
-Clicking a trade dot and pressing **"Open on Candle Chart"** navigates the
-linked chart to that trade's entry candle.
+Clicking a trade dot on the balance chart pins its details open *(v1.1.0 —
+before that the box followed the pointer and closed before you could reach it)*.
+It stays until you click elsewhere or press `Esc`, so **"Open on Candle Chart"**
+is clickable: it opens the linked chart at that trade's entry candle.
 
 ### Live Updates & Portfolio Reports *(v1.0.0)*
 
