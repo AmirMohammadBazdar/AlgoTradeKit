@@ -208,6 +208,12 @@ function makeChartStub() {
     getVisibleRange: () => state.range,
     setVisibleLogicalRange: r => { state.logical = r; },
     getVisibleLogicalRange: () => state.logical,
+    // As lightweight-charts does: a coordinate for a time the scale has, and
+    // null for anything between candles.
+    timeToCoordinate: t => {
+      const i = (state.barTimes || []).indexOf(t);
+      return i === -1 ? null : i * 10;
+    },
   });
   const chart = autoStub('chart', {
     timeScale: () => timeScale,
@@ -1221,3 +1227,32 @@ def test_the_active_chart_is_visibly_marked():
     page = (_srv.STATIC_DIR / "page.html").read_text(encoding="utf-8")
     assert ".cell.active::after" in page
     assert "inset 0 0 0 2px var(--accent)" in page, "a hairline is not visible enough"
+
+
+def test_a_drawing_between_candles_still_has_a_position():
+    """Switching timeframe leaves drawings on times that are no longer candle
+    starts. Without interpolation they lose their coordinate and vanish, which
+    is what made boxes look wrong after a switch."""
+    result = _run(CHART_HTML, """
+const bars = [];
+for (let i = 0; i < 10; i++) bars.push({time: 1000 + i * 300, open: 1, high: 2,
+                                        low: 0.5, close: 1.5, volume: 1});
+ctx.__bars = bars;
+ev('handleMsg({type: "init", title: "x", bars: globalThis.__bars,'
+   + ' indicators: [], drawings: []})');
+// tell the stubbed scale which times it knows, as a real chart would
+mainChartStub()._state.barTimes = bars.map(b => b.time);
+
+out.onCandle  = ev('timeToX(1300)');     // candle 1  → 10
+out.between   = ev('timeToX(1450)');     // half way between candles 1 and 2
+out.before    = ev('timeToX(850)');      // before the first candle
+out.after     = ev('timeToX(3850)');     // past the last one
+out.noBars    = ev('(() => {const keep = allBars; allBars = []; '
+                 + 'const v = timeToX(1450); allBars = keep; return v;})()');
+""")
+    assert result["topLevelError"] is None
+    assert result["onCandle"] == 10                  # straight from the scale
+    assert result["between"] == 15                   # interpolated, not lost
+    assert result["before"] == -5                    # extrapolated backwards
+    assert result["after"] == 95                     # and forwards
+    assert result["noBars"] is None                  # nothing to interpolate from

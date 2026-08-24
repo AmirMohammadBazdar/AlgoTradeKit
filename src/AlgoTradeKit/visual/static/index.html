@@ -1727,12 +1727,49 @@ function resizeOverlays(){
 // ═══════════════════════════════════════════════════════════════
 //  COORDINATE HELPERS
 // ═══════════════════════════════════════════════════════════════
+// Where a moment sits on screen, even when no candle starts exactly there.
+//
+// timeToCoordinate only answers for times the scale actually has, so a drawing
+// made on 1m data disappears the moment the chart is switched to 5m or 15m:
+// its times now fall *between* candles. Interpolating between the neighbouring
+// candles keeps every drawing exactly where it was put, on any timeframe.
+function timeToX(time){
+  if(!mainChart) return null;
+  const scale = mainChart.timeScale();
+  let x = null;
+  try{ x = scale.timeToCoordinate(time); }catch{}
+  if(x != null) return x;
+  if(allBars.length < 2) return null;
+
+  const last = allBars.length - 1;
+  let lo, hi;
+  if(time <= allBars[0].time){ lo = 0; hi = 1; }              // before the data
+  else if(time >= allBars[last].time){ lo = last - 1; hi = last; }   // after it
+  else {
+    let a = 0, b = last;
+    while(b - a > 1){
+      const mid = (a + b) >> 1;
+      if(allBars[mid].time <= time) a = mid; else b = mid;
+    }
+    lo = a; hi = b;
+  }
+  let x0 = null, x1 = null;
+  try{
+    x0 = scale.timeToCoordinate(allBars[lo].time);
+    x1 = scale.timeToCoordinate(allBars[hi].time);
+  }catch{}
+  if(x0 == null || x1 == null) return null;
+  const t0 = allBars[lo].time, t1 = allBars[hi].time;
+  if(t1 === t0) return x0;
+  return x0 + (x1 - x0) * ((time - t0) / (t1 - t0));
+}
+
 function toXY(time,price){
   if(!panes.main||!mainSeries) return null;
   try{
     const wR=panes.main.paneWrap.getBoundingClientRect();
     const pR=document.getElementById('panes').getBoundingClientRect();
-    const x=mainChart.timeScale().timeToCoordinate(time);
+    const x=timeToX(time);
     const y=mainSeries.priceToCoordinate(price);
     if(x==null||y==null) return null;
     return{x,y:(wR.top-pR.top)+y};
@@ -1844,7 +1881,7 @@ function drawIchimokuCloud(ctx, W, H){
 
   // Convert to pixel coordinates
   const coords = pts.map(p => {
-    const x  = mainChart.timeScale().timeToCoordinate(p.time);
+    const x  = timeToX(p.time);
     const ya = mainSeries.priceToCoordinate(p.a);
     const yb = mainSeries.priceToCoordinate(p.b);
     if(x==null || ya==null || yb==null) return null;
