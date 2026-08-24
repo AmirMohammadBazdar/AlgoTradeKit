@@ -65,7 +65,12 @@ body.compact #ohlcv{font-size:10px}
 #tf-wrap{position:relative;flex-shrink:0}
 #tf-btn{font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em}
 #tf-btn.busy{opacity:.5;pointer-events:none}
-#tf-menu{display:none;position:absolute;top:30px;left:0;z-index:300;min-width:78px;
+/* Fixed, not absolute: #tbar scrolls horizontally, and an overflow other than
+   visible on one axis makes the other axis clip too — an absolutely positioned
+   dropdown inside the toolbar is cut off at its 34px height, leaving a sliver
+   of one entry showing. Fixed positioning escapes that; toggleTfMenu() places
+   it under the button. */
+#tf-menu{display:none;position:fixed;z-index:300;min-width:78px;
          background:var(--bg2);border:1px solid var(--border);border-radius:6px;
          padding:4px;box-shadow:0 8px 24px #000a;max-height:60vh;overflow-y:auto}
 #tf-menu.open{display:block}
@@ -3019,7 +3024,13 @@ function renderTfSelector(){
 }
 
 function toggleTfMenu(){
-  document.getElementById('tf-menu').classList.toggle('open');
+  const menu = document.getElementById('tf-menu');
+  if(menu.classList.contains('open')){ closeTfMenu(); return; }
+  // Place it under the button by viewport coordinates, since it is fixed
+  const r = document.getElementById('tf-btn').getBoundingClientRect();
+  menu.style.left = r.left + 'px';
+  menu.style.top  = (r.bottom + 4) + 'px';
+  menu.classList.add('open');
 }
 
 function closeTfMenu(){
@@ -3040,6 +3051,8 @@ document.addEventListener('mousedown', e => {
   const wrap=document.getElementById('tf-wrap');
   if(wrap && !wrap.contains(e.target)) closeTfMenu();
 });
+// It is placed by viewport coordinates, so a resize would leave it stranded
+window.addEventListener('resize', closeTfMenu);
 
 function toggleChartType(){
   chartType=chartType==='candlestick'?'heikinashi':'candlestick';

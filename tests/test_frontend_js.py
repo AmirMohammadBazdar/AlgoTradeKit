@@ -1183,3 +1183,41 @@ out.v1 = win('v1')._posted.slice();
     assert result["v2"] == [{"t": "navigate", "time": 1700001234}]
     assert result["v3"] == [{"t": "navigate", "time": 1700001234}]
     assert result["v1"] == []
+
+
+def test_the_timeframe_menu_is_placed_clear_of_the_toolbar():
+    """#tbar scrolls horizontally, and an overflow other than visible on one
+    axis clips the other too — an absolutely positioned dropdown inside it is
+    cut off at the toolbar's height. It must be positioned against the
+    viewport instead, under the button."""
+    result = _run(CHART_HTML, """
+ev('handleMsg({type: "init", title: "x", bars: [], indicators: [], drawings: [],'
+   + ' sourceTimeframe: "1m", displayTimeframe: "5m",'
+   + ' timeframes: ["1m", "3m", "5m", "15m", "1h"]})');
+const menu = document.getElementById('tf-menu');
+const btn  = document.getElementById('tf-btn');
+btn.getBoundingClientRect = () => ({left: 120, bottom: 30, top: 4, width: 40, height: 26});
+
+ev('toggleTfMenu()');
+out.open   = menu._cls.has('open');
+out.left   = menu.style.left;
+out.top    = menu.style.top;
+out.count  = menu.children.length;
+
+ev('toggleTfMenu()');
+out.closed = !menu._cls.has('open');
+""")
+    assert result["topLevelError"] is None
+    assert result["open"] is True
+    assert result["left"] == "120px"           # under the button
+    assert result["top"] == "34px"             # clear of the toolbar
+    assert result["count"] == 5                # every timeframe, not a sliver
+    assert result["closed"] is True
+
+
+def test_the_active_chart_is_visibly_marked():
+    """The chart that drives the others has to be tellable at a glance."""
+    import AlgoTradeKit.visual.server as _srv
+    page = (_srv.STATIC_DIR / "page.html").read_text(encoding="utf-8")
+    assert ".cell.active::after" in page
+    assert "inset 0 0 0 2px var(--accent)" in page, "a hairline is not visible enough"
