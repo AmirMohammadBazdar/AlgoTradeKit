@@ -63,6 +63,334 @@ def _fmt_n(n: int) -> str:
 
 
 # ===========================================================================
+# Pure resampling API (v1.1.0)
+# ===========================================================================
+# Extracted out of ``Converter`` so other modules can resample in memory
+# without the CSV-and-print pipeline around it — the chart's timeframe switch
+# is the first caller.  ``Converter`` delegates to these, so the aggregation
+# maths exists exactly once.
+
+
+def detect_timeframe(df: pd.DataFrame) -> str:
+    """
+    Infer the timeframe of *df* by measuring the gap between its timestamps.
+
+    *df* must have a ``timestamp`` column in UTC milliseconds.
+
+    We look at the **most common** gap across the first 20 rows rather than
+    just the first two.  This makes detection robust even when the data
+    starts with a small gap (e.g. a weekend with no trades on some markets).
+
+    Raises
+    ------
+    ValueError
+        If the DataFrame has fewer than 2 rows, or if the most common gap
+        does not match any known timeframe.
+    """
+    timestamps = sorted(df["timestamp"].astype("int64").tolist())
+
+    if len(timestamps) < 2:
+        raise ValueError(
+            "Need at least 2 candles to auto-detect the timeframe. "
+            "Pass source_timeframe='Xh' explicitly if your data is very short."
+        )
+
+    # Compute gaps between consecutive timestamps (up to first 20 candles)
+    sample = timestamps[:21]
+    gaps = [sample[i + 1] - sample[i] for i in range(len(sample) - 1)]
+
+    # Pick the most frequently occurring gap
+    most_common_gap = max(set(gaps), key=gaps.count)
+
+    # Look it up in TIMEFRAME_MS
+    for tf, tf_ms in TIMEFRAME_MS.items():
+        if most_common_gap == tf_ms:
+            return tf
+
+    # Not found — give the user something actionable
+    seconds  = most_common_gap // 1000
+    minutes  = seconds // 60
+    hours    = minutes // 60
+    readable = (
+        f"{hours}h" if hours and minutes % 60 == 0
+        else f"{minutes}m" if minutes and seconds % 60 == 0
+        else f"{seconds}s"
+    )
+    raise ValueError(
+        f"Cannot detect timeframe: the most common gap between candles is "
+        f"{most_common_gap} ms ({readable}), which does not match any "
+        f"supported timeframe. "
+        f"Supported: {sorted(TIMEFRAME_MS)}. "
+        f"Pass source_timeframe='...' explicitly to override."
+    )
+
+
+def validate_conversion(source_tf: str, target_tf: str) -> None:
+    """
+    Raise ``ValueError`` if converting *source_tf* → *target_tf* is not valid.
+
+    Rules
+    -----
+    * Same timeframe is rejected.
+    * Going down (target smaller than source) is rejected.
+    * ``"1M"`` (monthly) as a source is always rejected.
+    * For fixed-length timeframes, ``target_ms`` must be a whole multiple
+      of ``source_ms``.
+    * ``"1M"`` as a target is always accepted (pandas uses calendar months).
+    """
+    if source_tf == target_tf:
+        raise ValueError(
+            f"source and target timeframe are both '{source_tf}'. "
+            f"They must be different."
+        )
+
+    # Monthly source → always impossible to go higher
+    if source_tf == "1M":
+        raise ValueError(
+            "Cannot convert from monthly ('1M'): "
+            "there is no supported timeframe above 1M."
+        )
+
+    # Monthly target → always valid (any fixed TF can roll up to a month)
+    if target_tf == "1M":
+        return
+
+    source_ms = TIMEFRAME_MS[source_tf]
+    target_ms = TIMEFRAME_MS[target_tf]
+
+    # Going down — target is smaller than or equal to source
+    if target_ms <= source_ms:
+        raise ValueError(
+            f"Cannot convert {source_tf} → {target_tf}: "
+            f"the target ({target_tf} = {target_ms} ms) must be "
+            f"larger than the source ({source_tf} = {source_ms} ms). "
+            f"Downsampling is not supported."
+        )
+
+    # Not a whole multiple — e.g. 4h → 6h (6h / 4h = 1.5 — not whole)
+    if target_ms % source_ms != 0:
+        raise ValueError(
+            f"Cannot convert {source_tf} → {target_tf}: "
+            f"{target_tf} ({target_ms} ms) is not a whole multiple of "
+            f"{source_tf} ({source_ms} ms). "
+            f"The ratio is {target_ms / source_ms:.2f}. "
+            f"It must be an integer (e.g. 1h → 4h gives ratio 4.0 ✓)."
+        )
+
+
+def can_convert(source_tf: str, target_tf: str) -> bool:
+    """``True`` when :func:`validate_conversion` would accept the pair."""
+    try:
+        validate_conversion(normalize_timeframe(source_tf), normalize_timeframe(target_tf))
+    except ValueError:
+        return False
+    return True
+
+
+def resample_ohlcv(
+    df: pd.DataFrame,
+    target_timeframe: str,
+    source_timeframe: str | None = None,
+    drop_incomplete: bool = True,
+) -> pd.DataFrame:
+    """
+    Resample OHLCV *df* to a higher timeframe.  Pure: no I/O, no printing,
+    and *df* is never mutated.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must have a ``timestamp`` column in **UTC milliseconds**, plus the
+        usual ``open``/``high``/``low``/``close`` (``volume`` and the extra
+        Collector columns are aggregated when present).
+    target_timeframe : str
+        The timeframe to produce, e.g. ``"5m"``, ``"4h"``, ``"1d"``.
+    source_timeframe : str | None
+        Skip detection and assert the source timeframe.  When given it must
+        match what the timestamps actually show.
+    drop_incomplete : bool
+        ``True`` (default, and what :class:`Converter` does) drops any bucket
+        that does not hold a full set of source candles — typically the
+        still-forming candle at the tail.  ``False`` keeps it, which is what
+        a live chart wants for its forming candle.
+
+    Returns
+    -------
+    pd.DataFrame
+        Same column schema as the input, in library-standard column order,
+        ``timestamp`` in UTC milliseconds, index reset.
+
+    Raises
+    ------
+    ValueError
+        Empty frame, no ``timestamp`` column, undetectable timeframe, a
+        ``source_timeframe`` that contradicts the data, or a conversion that
+        is not a whole multiple (see :func:`validate_conversion` — note that
+        *target* must differ from *source*).
+    """
+    if df is None or df.empty:
+        raise ValueError("Cannot resample an empty DataFrame.")
+    if "timestamp" not in df.columns:
+        raise ValueError(
+            "DataFrame has no 'timestamp' column. "
+            f"Columns found: {list(df.columns)}"
+        )
+
+    target_tf = normalize_timeframe(target_timeframe)
+
+    frame = df.copy()
+    frame["timestamp"] = frame["timestamp"].astype("int64")
+    frame = frame.sort_values("timestamp").reset_index(drop=True)
+
+    source_tf = detect_timeframe(frame)
+    if source_timeframe:
+        hint = normalize_timeframe(source_timeframe)
+        if hint != source_tf:
+            raise ValueError(
+                f"The source_timeframe you provided ('{hint}') "
+                f"does not match the detected timeframe ('{source_tf}'). "
+                f"Remove source_timeframe and let it be detected automatically, "
+                f"or correct the value."
+            )
+
+    validate_conversion(source_tf, target_tf)
+    return _resample_frame(frame, source_tf, target_tf, drop_incomplete=drop_incomplete)
+
+
+def _resample_frame(
+    df: pd.DataFrame,
+    source_tf: str,
+    target_tf: str,
+    drop_incomplete: bool = True,
+) -> pd.DataFrame:
+    """
+    Resample *df* from *source_tf* to *target_tf*.
+
+    Returns a DataFrame with the same column schema as the input,
+    with incomplete groups at the edges dropped.
+
+    How aggregation works
+    ---------------------
+    * open         → first
+    * high         → max
+    * low          → min
+    * close        → last
+    * volume       → sum
+    * quote_volume → sum
+    * trades       → sum
+    * taker_buy_*  → sum
+    * close_time   → last   (close time of the last sub-candle in the group)
+    * timestamp    → first  (open time of the first sub-candle = new open time)
+    """
+    freq = _PANDAS_FREQ[target_tf]
+
+    # Build a datetime index from the millisecond timestamps
+    df = df.copy()
+    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df = df.set_index("datetime").sort_index()
+
+    # Define aggregation rules for every column we care about
+    # (extra columns not listed here are silently dropped)
+    agg_rules: dict[str, str] = {
+        "open":            "first",
+        "high":            "max",
+        "low":             "min",
+        "close":           "last",
+        "volume":          "sum",
+        "close_time":      "last",
+        "quote_volume":    "sum",
+        "trades":          "sum",
+        "taker_buy_base":  "sum",
+        "taker_buy_quote": "sum",
+    }
+
+    # Only aggregate columns that actually exist in the source data
+    existing_agg = {col: rule for col, rule in agg_rules.items() if col in df.columns}
+
+    resampled = df.resample(freq).agg(existing_agg)
+
+    # Drop groups where there was no data at all (open is NaN)
+    resampled = resampled.dropna(subset=["open"])
+
+    # ---- Drop incomplete groups ------------------------------------
+    if drop_incomplete:
+        resampled = _drop_incomplete_groups(df, resampled, source_tf, target_tf, freq)
+
+    # Convert datetime index back to UTC millisecond timestamp.
+    # pandas 2.x changed internal resolution from ns → ms when unit="ms"
+    # is used, so `astype("int64") // 1_000_000` breaks there.
+    # Subtracting the UTC epoch and dividing by 1 ms works in all versions.
+    _epoch = pd.Timestamp("1970-01-01", tz="UTC")
+    resampled["timestamp"] = (
+        (resampled.index - _epoch) / pd.Timedelta(milliseconds=1)
+    ).astype("int64")
+    resampled = resampled.reset_index(drop=True)
+
+    # Ensure correct column order, filling any missing optional columns with None
+    final_cols = [c for c in _COLUMNS if c in resampled.columns]
+    return resampled[final_cols]
+
+
+def _drop_incomplete_groups(
+    source_df:   pd.DataFrame,
+    resampled:   pd.DataFrame,
+    source_tf:   str,
+    target_tf:   str,
+    freq:        str,
+) -> pd.DataFrame:
+    """
+    Remove groups that do not have the expected number of source candles.
+
+    For fixed-length timeframes, every complete group must contain
+    exactly ``target_ms // source_ms`` source candles.
+
+    For monthly targets (``"1M"``), we count source candles per calendar
+    month and compare against the most common count.  We keep only groups
+    that match the mode — this drops partial months at both edges.
+    """
+    if target_tf == "1M":
+        return _drop_incomplete_months(source_df, resampled, freq)
+
+    source_ms   = TIMEFRAME_MS[source_tf]
+    target_ms   = TIMEFRAME_MS[target_tf]
+    expected    = target_ms // source_ms
+
+    # Count how many source rows fall into each resampled bucket
+    counts = source_df.resample(freq).size()
+
+    # Keep only buckets that have exactly the right number of candles
+    complete_idx = counts[counts == expected].index
+    return resampled[resampled.index.isin(complete_idx)]
+
+
+def _drop_incomplete_months(
+    source_df: pd.DataFrame,
+    resampled: pd.DataFrame,
+    freq:      str,
+) -> pd.DataFrame:
+    """
+    For monthly targets, drop months that have fewer candles than the mode.
+
+    Why the mode and not a fixed number?
+    A daily → monthly conversion has 28–31 source candles per group
+    depending on the month.  Using the mode (most common count) means
+    February is still kept — only partially-collected months (the current
+    live month, or a partial month at the start of the data) are dropped.
+    """
+    counts = source_df.resample(freq).size()
+
+    if counts.empty:
+        return resampled
+
+    mode_count  = counts.mode().iloc[0]
+    # Accept months within ±1 candle of the mode to handle February / DST
+    tolerance   = 1
+    valid_idx   = counts[counts >= mode_count - tolerance].index
+
+    return resampled[resampled.index.isin(valid_idx)]
+
+
+# ===========================================================================
 # Converter
 # ===========================================================================
 
@@ -219,107 +547,12 @@ class Converter:
         return filepath
 
     def _detect_timeframe(self, df: pd.DataFrame) -> str:
-        """
-        Infer the timeframe of *df* by measuring the gap between its timestamps.
-
-        We look at the **most common** gap across the first 20 rows rather than
-        just the first two.  This makes detection robust even when the data
-        starts with a small gap (e.g. a weekend with no trades on some markets).
-
-        Raises
-        ------
-        ValueError
-            If the DataFrame has fewer than 2 rows, or if the most common gap
-            does not match any known timeframe.
-        """
-        timestamps = sorted(df["timestamp"].astype("int64").tolist())
-
-        if len(timestamps) < 2:
-            raise ValueError(
-                "Need at least 2 candles to auto-detect the timeframe. "
-                "Pass source_timeframe='Xh' explicitly if your data is very short."
-            )
-
-        # Compute gaps between consecutive timestamps (up to first 20 candles)
-        sample = timestamps[:21]
-        gaps = [sample[i + 1] - sample[i] for i in range(len(sample) - 1)]
-
-        # Pick the most frequently occurring gap
-        most_common_gap = max(set(gaps), key=gaps.count)
-
-        # Look it up in TIMEFRAME_MS
-        for tf, tf_ms in TIMEFRAME_MS.items():
-            if most_common_gap == tf_ms:
-                return tf
-
-        # Not found — give the user something actionable
-        seconds  = most_common_gap // 1000
-        minutes  = seconds // 60
-        hours    = minutes // 60
-        readable = (
-            f"{hours}h" if hours and minutes % 60 == 0
-            else f"{minutes}m" if minutes and seconds % 60 == 0
-            else f"{seconds}s"
-        )
-        raise ValueError(
-            f"Cannot detect timeframe: the most common gap between candles is "
-            f"{most_common_gap} ms ({readable}), which does not match any "
-            f"supported timeframe. "
-            f"Supported: {sorted(TIMEFRAME_MS)}. "
-            f"Pass source_timeframe='...' explicitly to override."
-        )
+        """Infer the source timeframe — see :func:`detect_timeframe`."""
+        return detect_timeframe(df)
 
     def _validate_conversion(self, source_tf: str, target_tf: str) -> None:
-        """
-        Raise ``ValueError`` if converting *source_tf* → *target_tf* is not valid.
-
-        Rules
-        -----
-        * Same timeframe is rejected.
-        * Going down (target smaller than source) is rejected.
-        * ``"1M"`` (monthly) as a source is always rejected.
-        * For fixed-length timeframes, ``target_ms`` must be a whole multiple
-          of ``source_ms``.
-        * ``"1M"`` as a target is always accepted (pandas uses calendar months).
-        """
-        if source_tf == target_tf:
-            raise ValueError(
-                f"source and target timeframe are both '{source_tf}'. "
-                f"They must be different."
-            )
-
-        # Monthly source → always impossible to go higher
-        if source_tf == "1M":
-            raise ValueError(
-                "Cannot convert from monthly ('1M'): "
-                "there is no supported timeframe above 1M."
-            )
-
-        # Monthly target → always valid (any fixed TF can roll up to a month)
-        if target_tf == "1M":
-            return
-
-        source_ms = TIMEFRAME_MS[source_tf]
-        target_ms = TIMEFRAME_MS[target_tf]
-
-        # Going down — target is smaller than or equal to source
-        if target_ms <= source_ms:
-            raise ValueError(
-                f"Cannot convert {source_tf} → {target_tf}: "
-                f"the target ({target_tf} = {target_ms} ms) must be "
-                f"larger than the source ({source_tf} = {source_ms} ms). "
-                f"Downsampling is not supported."
-            )
-
-        # Not a whole multiple — e.g. 4h → 6h (6h / 4h = 1.5 — not whole)
-        if target_ms % source_ms != 0:
-            raise ValueError(
-                f"Cannot convert {source_tf} → {target_tf}: "
-                f"{target_tf} ({target_ms} ms) is not a whole multiple of "
-                f"{source_tf} ({source_ms} ms). "
-                f"The ratio is {target_ms / source_ms:.2f}. "
-                f"It must be an integer (e.g. 1h → 4h gives ratio 4.0 ✓)."
-            )
+        """Reject an impossible conversion — see :func:`validate_conversion`."""
+        validate_conversion(source_tf, target_tf)
 
     def _load_source(self) -> "tuple[pd.DataFrame, str]":
         """
@@ -404,71 +637,8 @@ class Converter:
         source_tf: str,
         target_tf: str,
     ) -> pd.DataFrame:
-        """
-        Resample *df* from *source_tf* to *target_tf*.
-
-        Returns a DataFrame with the same column schema as the input,
-        with incomplete groups at the edges dropped.
-
-        How aggregation works
-        ---------------------
-        * open         → first
-        * high         → max
-        * low          → min
-        * close        → last
-        * volume       → sum
-        * quote_volume → sum
-        * trades       → sum
-        * taker_buy_*  → sum
-        * close_time   → last   (close time of the last sub-candle in the group)
-        * timestamp    → first  (open time of the first sub-candle = new open time)
-        """
-        freq = _PANDAS_FREQ[target_tf]
-
-        # Build a datetime index from the millisecond timestamps
-        df = df.copy()
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        df = df.set_index("datetime").sort_index()
-
-        # Define aggregation rules for every column we care about
-        # (extra columns not listed here are silently dropped)
-        agg_rules: dict[str, str] = {
-            "open":            "first",
-            "high":            "max",
-            "low":             "min",
-            "close":           "last",
-            "volume":          "sum",
-            "close_time":      "last",
-            "quote_volume":    "sum",
-            "trades":          "sum",
-            "taker_buy_base":  "sum",
-            "taker_buy_quote": "sum",
-        }
-
-        # Only aggregate columns that actually exist in the source data
-        existing_agg = {col: rule for col, rule in agg_rules.items() if col in df.columns}
-
-        resampled = df.resample(freq).agg(existing_agg)
-
-        # Drop groups where there was no data at all (open is NaN)
-        resampled = resampled.dropna(subset=["open"])
-
-        # ---- Drop incomplete groups ------------------------------------
-        resampled = self._drop_incomplete(df, resampled, source_tf, target_tf, freq)
-
-        # Convert datetime index back to UTC millisecond timestamp.
-        # pandas 2.x changed internal resolution from ns → ms when unit="ms"
-        # is used, so `astype("int64") // 1_000_000` breaks there.
-        # Subtracting the UTC epoch and dividing by 1 ms works in all versions.
-        _epoch = pd.Timestamp("1970-01-01", tz="UTC")
-        resampled["timestamp"] = (
-            (resampled.index - _epoch) / pd.Timedelta(milliseconds=1)
-        ).astype("int64")
-        resampled = resampled.reset_index(drop=True)
-
-        # Ensure correct column order, filling any missing optional columns with None
-        final_cols = [c for c in _COLUMNS if c in resampled.columns]
-        return resampled[final_cols]
+        """Aggregate to the target timeframe — see :func:`resample_ohlcv`."""
+        return _resample_frame(df, source_tf, target_tf)
 
     def _drop_incomplete(
         self,
@@ -478,29 +648,8 @@ class Converter:
         target_tf:   str,
         freq:        str,
     ) -> pd.DataFrame:
-        """
-        Remove groups that do not have the expected number of source candles.
-
-        For fixed-length timeframes, every complete group must contain
-        exactly ``target_ms // source_ms`` source candles.
-
-        For monthly targets (``"1M"``), we count source candles per calendar
-        month and compare against the most common count.  We keep only groups
-        that match the mode — this drops partial months at both edges.
-        """
-        if target_tf == "1M":
-            return self._drop_incomplete_monthly(source_df, resampled, freq)
-
-        source_ms   = TIMEFRAME_MS[source_tf]
-        target_ms   = TIMEFRAME_MS[target_tf]
-        expected    = target_ms // source_ms
-
-        # Count how many source rows fall into each resampled bucket
-        counts = source_df.resample(freq).size()
-
-        # Keep only buckets that have exactly the right number of candles
-        complete_idx = counts[counts == expected].index
-        return resampled[resampled.index.isin(complete_idx)]
+        """Drop partial buckets — see :func:`_drop_incomplete_groups`."""
+        return _drop_incomplete_groups(source_df, resampled, source_tf, target_tf, freq)
 
     def _drop_incomplete_monthly(
         self,
@@ -508,26 +657,8 @@ class Converter:
         resampled: pd.DataFrame,
         freq:      str,
     ) -> pd.DataFrame:
-        """
-        For monthly targets, drop months that have fewer candles than the mode.
-
-        Why the mode and not a fixed number?
-        A daily → monthly conversion has 28–31 source candles per group
-        depending on the month.  Using the mode (most common count) means
-        February is still kept — only partially-collected months (the current
-        live month, or a partial month at the start of the data) are dropped.
-        """
-        counts = source_df.resample(freq).size()
-
-        if counts.empty:
-            return resampled
-
-        mode_count  = counts.mode().iloc[0]
-        # Accept months within ±1 candle of the mode to handle February / DST
-        tolerance   = 1
-        valid_idx   = counts[counts >= mode_count - tolerance].index
-
-        return resampled[resampled.index.isin(valid_idx)]
+        """Drop partial months — see :func:`_drop_incomplete_months`."""
+        return _drop_incomplete_months(source_df, resampled, freq)
 
     def _resolve_filepath(
         self,

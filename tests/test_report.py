@@ -1241,7 +1241,9 @@ class TestReportFrontendWiring:
 
     def test_markers_use_uid_fallback(self, html):
         assert "trade.uid ?? trade.trade_id" in html
-        assert "(t.uid ?? t.trade_id) === hoveredTradeId" in html
+        # openChart resolves the pinned trade first, then the hovered one
+        assert "const wantedId = pinnedTradeId ?? hoveredTradeId;" in html
+        assert "(t.uid ?? t.trade_id) === wantedId" in html
 
     def test_pan_zoom_bound_once(self, html):
         assert "_panZoomBound" in html
@@ -1253,3 +1255,89 @@ class TestReportFrontendWiring:
 
     def test_config_mixed_guard(self, html):
         assert "function fmtCfg" in html
+
+
+# ---------------------------------------------------------------------------
+# 17. v1.1.0 — the equity-chart trade popup is pinned by a click
+# ---------------------------------------------------------------------------
+
+class TestTradePopupPinning:
+    """The box used to be a pure hover tooltip: it hid as soon as the pointer
+    left the dot, and it carried ``pointer-events:none``, so its "Open on
+    Candle Chart" button could never be reached.  A click now pins it, and only
+    an outside click / Esc / its own ✕ closes it."""
+
+    @pytest.fixture()
+    def html(self) -> str:
+        import AlgoTradeKit.report._server as _srv
+        return (_srv.STATIC_DIR / "report.html").read_text(encoding="utf-8")
+
+    def test_click_on_a_dot_pins_the_box(self, html):
+        assert "function pinTooltip" in html
+        assert "let pinnedTradeId = null;" in html
+        # the Chart.js click handler pins instead of showing a transient box
+        on_click = html.split("onClick: (evt, elements)")[1].split("},\n    }")[0]
+        assert "pinTooltip(trade, evt.native)" in on_click
+
+    def test_pinned_box_is_clickable(self, html):
+        assert "#trade-tooltip.pinned{pointer-events:auto" in html
+        assert 'id="tt-close"' in html
+        assert "function closePinnedTooltip" in html
+
+    def test_hover_cannot_move_or_hide_a_pinned_box(self, html):
+        ext = html.split("function externalTooltip")[1].split("function ")[0]
+        assert "if (pinnedTradeId != null) return;" in ext
+        hide = html.split("function hideTooltip")[1].split("function ")[0]
+        assert "if (pinnedTradeId != null) return;" in hide
+
+    def test_outside_click_and_escape_close_it(self, html):
+        assert "document.addEventListener('mousedown'" in html
+        assert "closePinnedTooltip();" in html
+        assert "e.key === 'Escape' && pinnedTradeId != null" in html
+        # the box itself must be excluded from the outside-click test
+        assert "document.getElementById('trade-tooltip').contains(e.target)" in html
+
+    def test_mousemove_autohide_only_applies_to_the_preview(self, html):
+        move = html.split("// Hover preview only")[1].split("// ── Open candle chart")[0]
+        assert "if (pinnedTradeId != null) return;" in move
+
+    def test_rerender_drops_the_pin(self, html):
+        build = html.split("function buildEquityChart")[1].split("function ")[0]
+        assert "closePinnedTooltip();" in build
+
+    def test_open_chart_link_uses_the_reports_own_host(self, html):
+        # 127.0.0.1 pointed at the viewer's machine when the report came from a VPS
+        assert "http://${location.hostname}:${reportData.chart_port}/" in html
+        assert "http://127.0.0.1:${reportData.chart_port}/" not in html
+
+
+class TestOpenChartRoundTrip:
+    """The report → chart navigation the pinned button finally makes reachable."""
+
+    def test_open_chart_message_navigates_the_chart(self):
+        from AlgoTradeKit.visual import Chart
+
+        sent: list[dict] = []
+        chart = Chart(title="nav")
+        chart._shown = True
+        chart._server.send = lambda msg: sent.append(msg)
+
+        # what simulate/_engine.py wires as on_open_chart
+        markers = [{"trade_id": 7, "open_time": 1_700_000_400_000}]
+
+        def on_open_chart(trade_id: int) -> None:
+            marker = next((m for m in markers if m["trade_id"] == trade_id), None)
+            if marker:
+                chart.navigate_to_candle(marker["open_time"])
+
+        on_open_chart(7)
+
+        assert sent == [{"type": "navigate_to_candle", "timestamp": 1_700_000_400}]
+
+    def test_report_server_dispatches_open_chart(self):
+        from AlgoTradeKit.report._server import ReportServer
+
+        got: list[int] = []
+        srv = ReportServer(title="t", on_open_chart=got.append)
+        srv._handle_browser_msg({"type": "open_chart", "trade_id": 7})
+        assert got == [7]

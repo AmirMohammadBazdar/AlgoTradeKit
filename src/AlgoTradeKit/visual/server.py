@@ -26,6 +26,9 @@ log = logging.getLogger("algotradekit.visual.server")
 # Path is relative to THIS file — always resolves correctly regardless of cwd
 STATIC_DIR = Path(__file__).parent / "static"
 
+#: Seconds uvicorn may spend closing live connections before it stops anyway.
+_SHUTDOWN_GRACE = 2
+
 # Ports assigned to a ChartServer that hasn't started its thread yet.
 # Prevents two Chart() calls from getting the same port number.
 _reserved_ports: set[int] = set()
@@ -58,6 +61,22 @@ def _find_free_port(start: int = 8700, host: str = "127.0.0.1") -> int:
         f"(probed on host {host!r} — is it a local interface? "
         f"Pass an explicit port= to skip probing)"
     )
+
+
+def _dispatch(loop, coro_fn, *args) -> None:
+    r"""Run *coro_fn(\*args)* on *loop* from another thread, or drop it.
+
+    The coroutine is only created once the loop is known to be usable: build
+    it first and a send after ``stop()`` leaves an un-awaited coroutine behind,
+    which surfaces as a RuntimeWarning from wherever the garbage collector
+    happens to be running.
+    """
+    if loop is None or loop.is_closed():
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(coro_fn(*args), loop)
+    except RuntimeError:        # loop stopped between the check and the call
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +155,7 @@ class ChartServer:
         self._manager = ConnectionManager()
         self._loop:   asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._uvicorn: uvicorn.Server | None = None
         self._app    = self._build_app()
 
         # Set by Chart to receive browser → Python messages.
@@ -191,8 +211,9 @@ class ChartServer:
         ready = threading.Event()
 
         def _run():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
 
             config = uvicorn.Config(
                 self._app,
@@ -200,8 +221,13 @@ class ChartServer:
                 port=self.port,
                 loop="asyncio",
                 log_level="warning",
+                # Without a bound, shutdown waits for open WebSockets: a
+                # browser tab left on this port keeps it busy long after
+                # stop() has given up waiting.
+                timeout_graceful_shutdown=_SHUTDOWN_GRACE,
             )
             server = uvicorn.Server(config)
+            self._uvicorn = server
 
             # Patch startup so we can signal readiness
             _orig = server.startup
@@ -211,7 +237,18 @@ class ChartServer:
                 ready.set()
 
             server.startup = _patched_startup
-            self._loop.run_until_complete(server.serve())
+            try:
+                loop.run_until_complete(server.serve())
+            finally:
+                # Clean up through the local, never self._loop: stop() clears
+                # that as soon as its join times out, and a shutdown waiting on
+                # a browser that is still connected outlasts the join. Reading
+                # the attribute here raised AttributeError on None out of the
+                # server thread.
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                finally:
+                    loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -224,9 +261,31 @@ class ChartServer:
         log.info("ChartServer started → %s (bound to %s)", self.url, self.host)
 
     def stop(self) -> None:
+        """Shut the server down cleanly.
+
+        Asking uvicorn to exit lets ``serve()`` return on its own, so the
+        thread unwinds normally.  Stopping the loop underneath it instead --
+        which is what this used to do -- raised "Event loop stopped before
+        Future completed" out of every server thread.
+        """
         _reserved_ports.discard(self.port)
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._uvicorn is not None:
+            self._uvicorn.should_exit = True
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3)
+        self._loop = None
+        self._uvicorn = None
+
+    def __del__(self) -> None:
+        # A server that is created and never started still holds its port
+        # reservation, and only stop() releases one.  Charts built but never
+        # shown would therefore drain the 200-port range.  A running server is
+        # referenced by its own thread, so it is never collected here.
+        try:
+            _reserved_ports.discard(self.port)
+        except Exception:       # pragma: no cover - interpreter shutdown
+            pass
 
     # ── URLs ───────────────────────────────────────────────────────────────
 
@@ -262,8 +321,212 @@ class ChartServer:
         elif msg_type == "navigate_to_candle":
             self._last_navigate = message
 
-        if self._loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(
-            self._manager.broadcast(message), self._loop
-        )
+        _dispatch(self._loop, self._manager.broadcast, message)
+
+
+# ---------------------------------------------------------------------------
+# Page server (v1.1.0) — one port, several charts
+# ---------------------------------------------------------------------------
+
+class PageServer:
+    """
+    Serves a multi-chart page: a shell that lays out one ``<iframe>`` per view,
+    every view loading the ordinary chart page.
+
+    Why frames rather than one document with several charts: a chart's DOM ids
+    (``ilgrp-EMA(20)``), its inline legend handlers and its overlay canvases
+    are all page-global. Two charts in one document would collide on every one
+    of them. A document per view is what "independent chart" already means to a
+    browser, and it leaves the single-chart code — which the whole simulate and
+    trader display rests on — completely untouched.
+
+    Everything still arrives on **one port**, which matters when the only way in
+    is an SSH tunnel.
+
+    Routes
+    ------
+    ``GET /``        the shell
+    ``GET /view``    the ordinary chart page (loaded by each frame)
+    ``GET /layout``  JSON: title, theme, sync flags, rows of view ids
+    ``WS  /ws``      ``?view=<id>`` picks which view's messages this socket gets
+
+    Parameters
+    ----------
+    title, port, host
+        As :class:`ChartServer`.  The same ``host="0.0.0.0"`` security warning
+        applies — there is no authentication.
+    """
+
+    def __init__(self, title: str = "Chart Page", port: int = 0,
+                 host: str = "127.0.0.1") -> None:
+        self.title = title
+        self.host  = host
+        self.port  = port or _find_free_port(host=host)
+
+        self._loop:   asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._uvicorn: uvicorn.Server | None = None
+        self._lock    = threading.Lock()
+
+        # ws → the view id it subscribed to
+        self._sockets: dict[WebSocket, str] = {}
+        # view id → its cached init / navigate, replayed on (re)connect
+        self._last_init:     dict[str, dict] = {}
+        self._last_navigate: dict[str, dict] = {}
+
+        # Filled in by ChartPage before start()
+        self.layout_payload: dict = {}
+        # view id → callback(msg: dict) for browser → Python messages
+        self.on_message: dict = {}
+
+        self._app = self._build_app()
+
+    # ── FastAPI application ────────────────────────────────────────────────
+
+    def _build_app(self) -> FastAPI:
+        app = FastAPI(docs_url=None, redoc_url=None)
+
+        @app.get("/", response_class=HTMLResponse)
+        async def shell():
+            return HTMLResponse((STATIC_DIR / "page.html").read_text(encoding="utf-8"))
+
+        @app.get("/view", response_class=HTMLResponse)
+        async def view():
+            return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+
+        @app.get("/layout")
+        async def layout():
+            return self.layout_payload
+
+        @app.websocket("/ws")
+        async def ws_endpoint(websocket: WebSocket):
+            view_id = websocket.query_params.get("view", "")
+            await websocket.accept()
+            with self._lock:
+                self._sockets[websocket] = view_id
+
+            for cache in (self._last_init, self._last_navigate):
+                cached = cache.get(view_id)
+                if cached is not None:
+                    try:
+                        await websocket.send_text(json.dumps(cached))
+                    except Exception:
+                        pass
+
+            try:
+                while True:
+                    raw = await websocket.receive_text()
+                    handler = self.on_message.get(view_id)
+                    if handler:
+                        try:
+                            handler(json.loads(raw))
+                        except Exception:
+                            pass
+            except WebSocketDisconnect:
+                with self._lock:
+                    self._sockets.pop(websocket, None)
+
+        return app
+
+    # ── Lifecycle ──────────────────────────────────────────────────────────
+
+    def start(self, open_browser: bool = True) -> None:
+        """Start the server in a daemon thread and optionally open a browser tab."""
+        ready = threading.Event()
+
+        def _run():
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
+            config = uvicorn.Config(
+                self._app, host=self.host, port=self.port,
+                loop="asyncio", log_level="warning",
+                timeout_graceful_shutdown=_SHUTDOWN_GRACE,
+            )
+            server = uvicorn.Server(config)
+            self._uvicorn = server
+            _orig = server.startup
+
+            async def _patched_startup(sockets=None):
+                await _orig(sockets)
+                ready.set()
+
+            server.startup = _patched_startup
+            try:
+                loop.run_until_complete(server.serve())
+            finally:
+                # Clean up through the local, never self._loop: stop() clears
+                # that as soon as its join times out, and a shutdown waiting on
+                # a browser that is still connected outlasts the join. Reading
+                # the attribute here raised AttributeError on None out of the
+                # server thread.
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                finally:
+                    loop.close()
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+        ready.wait(timeout=5)
+
+        if open_browser:
+            import webbrowser
+            webbrowser.open(self.url)
+
+        log.info("PageServer started → %s (bound to %s)", self.url, self.host)
+
+    def stop(self) -> None:
+        """Shut the server down cleanly — see :meth:`ChartServer.stop`."""
+        _reserved_ports.discard(self.port)
+        if self._uvicorn is not None:
+            self._uvicorn.should_exit = True
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3)
+        self._loop = None
+        self._uvicorn = None
+
+    def __del__(self) -> None:
+        try:
+            _reserved_ports.discard(self.port)
+        except Exception:       # pragma: no cover - interpreter shutdown
+            pass
+
+    # ── URLs ───────────────────────────────────────────────────────────────
+
+    @property
+    def display_host(self) -> str:
+        """Host usable in a browser URL — see :attr:`ChartServer.display_host`."""
+        return "127.0.0.1" if self.host in ("0.0.0.0", "::") else self.host
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.display_host}:{self.port}"
+
+    # ── Messaging ──────────────────────────────────────────────────────────
+
+    def send(self, view_id: str, message: dict) -> None:
+        """Send *message* to the sockets showing *view_id* (thread-safe)."""
+        msg_type = message.get("type")
+        if msg_type == "init":
+            self._last_init[view_id] = message
+            self._last_navigate.pop(view_id, None)
+        elif msg_type == "navigate_to_candle":
+            self._last_navigate[view_id] = message
+
+        _dispatch(self._loop, self._broadcast, view_id, message)
+
+    async def _broadcast(self, view_id: str, message: dict) -> None:
+        text = json.dumps(message)
+        dead = []
+        with self._lock:
+            targets = [ws for ws, vid in self._sockets.items() if vid == view_id]
+        for ws in targets:
+            try:
+                await ws.send_text(text)
+            except Exception:
+                dead.append(ws)
+        if dead:
+            with self._lock:
+                for ws in dead:
+                    self._sockets.pop(ws, None)

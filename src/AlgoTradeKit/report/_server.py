@@ -141,6 +141,7 @@ class ReportServer:
         self._manager      = _ConnectionManager()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
+        self._uvicorn: uvicorn.Server | None = None
         self._pending_data: dict | None = None   # sent to every new WS connect
         self._app          = self._build_app()
 
@@ -202,6 +203,7 @@ class ReportServer:
                 log_level="warning",
             )
             server = uvicorn.Server(config)
+            self._uvicorn = server
             _orig = server.startup
 
             async def _patched_startup(sockets=None):
@@ -209,7 +211,15 @@ class ReportServer:
                 ready.set()
 
             server.startup = _patched_startup
-            self._loop.run_until_complete(server.serve())
+            try:
+                self._loop.run_until_complete(server.serve())
+            finally:
+                # Let pending callbacks finish before the loop goes away,
+                # otherwise uvicorn's lifespan task is destroyed mid-flight.
+                try:
+                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                finally:
+                    self._loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
@@ -222,9 +232,21 @@ class ReportServer:
         log.info("ReportServer started → %s (bound to %s)", self.url, self.host)
 
     def stop(self) -> None:
+        """Shut the server down cleanly.
+
+        Asking uvicorn to exit lets ``serve()`` return on its own, so the
+        thread unwinds normally.  Stopping the loop underneath it instead --
+        which is what this used to do -- raised "Event loop stopped before
+        Future completed" out of every server thread.
+        """
         _reserved_ports.discard(self.port)
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._uvicorn is not None:
+            self._uvicorn.should_exit = True
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3)
+        self._loop = None
+        self._uvicorn = None
 
     # ── URLs ───────────────────────────────────────────────────────────────
 
@@ -246,12 +268,19 @@ class ReportServer:
     # ── Data push ─────────────────────────────────────────────────────────
 
     def send(self, message: dict) -> None:
-        """Thread-safe broadcast to all connected browser clients."""
-        if self._loop is None:
+        """Thread-safe broadcast to all connected browser clients.
+
+        The coroutine is created only once the loop is known to be usable --
+        building it first means a send after ``stop()`` leaves an un-awaited
+        coroutine for the garbage collector to complain about.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
             return
-        asyncio.run_coroutine_threadsafe(
-            self._manager.broadcast(message), self._loop
-        )
+        try:
+            asyncio.run_coroutine_threadsafe(self._manager.broadcast(message), loop)
+        except RuntimeError:        # loop stopped between the check and the call
+            pass
 
     def set_report_data(self, data: dict) -> None:
         """

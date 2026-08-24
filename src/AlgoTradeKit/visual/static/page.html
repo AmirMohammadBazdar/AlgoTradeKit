@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AlgoTradeKit — Chart Page</title>
+<style>
+:root{
+  --bg:#0d1117; --bg2:#161b22; --bg3:#21262d; --border:#30363d;
+  --text:#e6edf3; --text2:#8b949e; --text3:#6e7681; --accent:#58a6ff;
+  --hh:34px;
+}
+body.light{
+  --bg:#ffffff; --bg2:#f6f8fa; --bg3:#eaeef2; --border:#d0d7de;
+  --text:#1f2328; --text2:#57606a; --text3:#8c959f; --accent:#0969da;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);
+     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+     display:flex;flex-direction:column}
+
+#hdr{height:var(--hh);background:var(--bg2);border-bottom:1px solid var(--border);
+     display:flex;align-items:center;padding:0 12px;gap:14px;flex-shrink:0}
+#logo{font-size:12px;font-weight:600;color:var(--accent);letter-spacing:.04em}
+#page-title{font-size:12px;color:var(--text2)}
+#sync-box{margin-left:auto;display:flex;align-items:center;gap:6px}
+.sync-btn{height:22px;padding:0 9px;border-radius:5px;border:1px solid var(--border);
+          background:transparent;color:var(--text2);font-size:10px;cursor:pointer;
+          font-family:'Courier New',monospace;letter-spacing:.04em}
+.sync-btn.on{background:var(--accent)22;color:var(--accent);border-color:var(--accent)55}
+.sync-btn:hover:not(.on){background:var(--bg3)}
+
+/* ── Layout: rows of cells, draggable on both axes ─────────────── */
+#page{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.row{display:flex;flex-direction:row;overflow:hidden;min-height:60px}
+.cell{position:relative;overflow:hidden;min-width:80px;display:flex}
+.cell iframe{flex:1;border:0;width:100%;height:100%;display:block}
+/* The active chart is the one driving the others, so it has to be obvious.
+   A 1px border at 40% alpha, drawn at the very edge next to a divider, is not:
+   this is an inset ring, which reads as a highlight rather than a hairline. */
+.cell::after{content:'';position:absolute;inset:0;pointer-events:none;
+             box-shadow:inset 0 0 0 2px transparent;transition:box-shadow .12s}
+.cell.active::after{box-shadow:inset 0 0 0 2px var(--accent)cc}
+
+.rdiv{height:5px;background:var(--border);cursor:row-resize;flex-shrink:0;opacity:.45}
+.cdiv{width:5px;background:var(--border);cursor:col-resize;flex-shrink:0;opacity:.45}
+.rdiv:hover,.cdiv:hover,.rdiv.dragging,.cdiv.dragging{opacity:1;background:var(--accent)}
+
+#empty{margin:auto;color:var(--text3);font-size:12px}
+
+/* ── Replay bar (v1.1.0) ─────────────────────────────────────── */
+#rp{display:flex;align-items:center;gap:2px;margin-left:14px}
+#rp-controls{display:none;align-items:center;gap:2px}
+#rp-controls.open{display:flex}
+#rp-clock{font-family:'Courier New',monospace;font-size:10px;color:var(--text2);
+          padding:0 6px;white-space:nowrap}
+#rp-speed{height:22px;background:var(--bg3);color:var(--text2);border:1px solid var(--border);
+          border-radius:4px;font-size:10px;font-family:'Courier New',monospace;cursor:pointer}
+#rp-note{font-size:10px;color:var(--accent);padding-left:8px;display:none}
+#rp-note.show{display:inline}
+</style>
+</head>
+<body>
+
+<div id="hdr">
+  <span id="logo">⬡ AlgoTradeKit</span>
+  <span id="page-title">Chart Page</span>
+  <div id="rp">
+    <button class="sync-btn" id="rp-btn" onclick="replayToggle()"
+            title="Bar replay — every chart on this page steps together">⏵⏵ REPLAY</button>
+    <div id="rp-controls">
+      <button class="sync-btn" onclick="replayToStart()" title="Back to the start bar">⏮</button>
+      <button class="sync-btn" onclick="replayStep(-1)" title="One step back (Shift+←)">◀</button>
+      <button class="sync-btn" id="rp-play" onclick="replayPlayPause()" title="Play / pause (Space)">▶</button>
+      <button class="sync-btn" onclick="replayStep(1)" title="One step forward (Shift+→)">▶|</button>
+      <select id="rp-speed" onchange="replaySetSpeed(this.value)">
+        <option value="0.25">0.25x</option><option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option><option value="2">2x</option>
+        <option value="5">5x</option><option value="10">10x</option>
+      </select>
+      <span id="rp-clock"></span>
+      <button class="sync-btn" onclick="replayExit()" title="Leave replay (Esc)">✕</button>
+    </div>
+    <span id="rp-note">click a candle on any chart to start</span>
+  </div>
+  <div id="sync-box">
+    <button class="sync-btn" id="sync-time"  onclick="toggleSync('time')"  title="Scroll and zoom every chart together">TIME</button>
+    <button class="sync-btn" id="sync-cross" onclick="toggleSync('crosshair')" title="Mirror the crosshair onto every chart">CROSSHAIR</button>
+  </div>
+</div>
+
+<div id="page"><div id="empty">loading…</div></div>
+
+<script>
+'use strict';
+// ═══════════════════════════════════════════════════════════════
+//  CHART PAGE SHELL
+//  Owns layout, focus and synchronisation. Each chart lives in its
+//  own frame, which keeps their DOM ids, legend handlers and overlay
+//  canvases from colliding; the shell only relays between them.
+// ═══════════════════════════════════════════════════════════════
+let layout = null;
+let sync   = {time: true, crosshair: true};
+let activeView = null;
+// The last range and crosshair relayed. A frame reports a range change on a
+// later animation frame, so a flag set and cleared around the broadcast is
+// already off when the echo arrives — the charts would then relay the same
+// range to each other for ever. Dropping a repeat by value ends it.
+let lastRange = null, lastCrosshair = null;
+const SAME_TIME = (a, b) => a != null && b != null && Math.abs(a - b) < 1;
+const frames = {};                     // view id → window
+
+async function loadLayout(){
+  const res = await fetch('layout');
+  layout = await res.json();
+  document.title = layout.title ? layout.title + ' — AlgoTradeKit' : 'AlgoTradeKit';
+  document.getElementById('page-title').textContent = layout.title || '';
+  document.body.classList.toggle('light', layout.theme === 'light');
+  sync = Object.assign({time: true, crosshair: true}, layout.sync || {});
+  renderSyncButtons();
+  renderLayout();
+}
+
+function titleOf(id){
+  const v = (layout.views || []).find(v => v.id === id);
+  return v ? v.title : id;
+}
+
+function renderLayout(){
+  const page = document.getElementById('page');
+  page.innerHTML = '';
+  const rows = layout.rows || [];
+  if(!rows.length){
+    page.innerHTML = '<div id="empty">no charts on this page</div>';
+    return;
+  }
+
+  rows.forEach((ids, ri) => {
+    if(ri > 0) page.appendChild(makeDivider('rdiv'));
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.flex = 1;
+    ids.forEach((id, ci) => {
+      if(ci > 0) row.appendChild(makeDivider('cdiv'));
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.id = 'cell-' + id;
+      cell.style.flex = 1;
+      const f = document.createElement('iframe');
+      // chrome=compact drops the frame's own header bar: one page-level header
+      // is enough, and the vertical space matters when charts are stacked.
+      f.src = `view?view=${encodeURIComponent(id)}&chrome=compact&title=${encodeURIComponent(titleOf(id))}`;
+      f.title = titleOf(id);
+      f.onload = () => { frames[id] = f.contentWindow; };
+      cell.appendChild(f);
+      row.appendChild(cell);
+    });
+    page.appendChild(row);
+  });
+
+  const first = (rows[0] || [])[0];
+  if(first) setActive(first);
+}
+
+// ── Dividers ───────────────────────────────────────────────────
+// Both axes work the same way: the two siblings either side of the handle
+// share their combined flex, so dragging moves the boundary between them.
+function makeDivider(cls){
+  const d = document.createElement('div');
+  d.className = cls;
+  d.addEventListener('mousedown', ev => startDrag(ev, d, cls === 'rdiv'));
+  return d;
+}
+
+function startDrag(ev, handle, vertical){
+  ev.preventDefault();
+  handle.classList.add('dragging');
+  const before = handle.previousElementSibling, after = handle.nextElementSibling;
+  if(!before || !after) return;
+
+  const start = vertical ? ev.clientY : ev.clientX;
+  const bf = parseFloat(before.style.flex) || 1;
+  const af = parseFloat(after.style.flex)  || 1;
+  const total = bf + af;
+  const box = handle.parentElement.getBoundingClientRect();
+  const span = vertical ? box.height : box.width;
+
+  // Frames swallow mousemove once the pointer crosses into them, so block
+  // their pointer events for the duration of the drag.
+  document.querySelectorAll('iframe').forEach(f => f.style.pointerEvents = 'none');
+
+  const onMove = e => {
+    const delta = ((vertical ? e.clientY : e.clientX) - start) / span * total;
+    before.style.flex = Math.max(0.08, bf + delta);
+    after.style.flex  = Math.max(0.08, af - delta);
+  };
+  const onUp = () => {
+    handle.classList.remove('dragging');
+    document.querySelectorAll('iframe').forEach(f => f.style.pointerEvents = '');
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// ── Focus ──────────────────────────────────────────────────────
+function setActive(id){
+  activeView = id;
+  document.querySelectorAll('.cell').forEach(c =>
+    c.classList.toggle('active', c.id === 'cell-' + id));
+}
+
+// ── Sync ───────────────────────────────────────────────────────
+function renderSyncButtons(){
+  document.getElementById('sync-time').classList.toggle('on', !!sync.time);
+  document.getElementById('sync-cross').classList.toggle('on', !!sync.crosshair);
+}
+
+function toggleSync(which){
+  sync[which] = !sync[which];
+  renderSyncButtons();
+  if(which === 'crosshair' && !sync.crosshair) broadcast(null, {t: 'crosshair-clear'});
+}
+
+function broadcast(fromId, msg){
+  Object.entries(frames).forEach(([id, win]) => {
+    if(id === fromId || !win) return;
+    try{ win.postMessage(msg, '*'); }catch{}
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PAGE-WIDE BAR REPLAY (v1.1.0)
+//  One cursor for the whole page. The frames render it; the shell
+//  owns it. Stepping by the finest source timeframe on the page is
+//  what keeps a 3m and a 5m chart on the same instant instead of
+//  each counting its own candles.
+// ═══════════════════════════════════════════════════════════════
+let replay = {active:false, picking:false, cursor:null, start:null,
+              playing:false, timer:null, speed:1,
+              step:60, first:null, last:null};
+
+function replayToggle(){
+  if(replay.active || replay.picking) replayExit();
+  else replayBegin();
+}
+
+function replayBegin(){
+  replay.picking = true;
+  document.getElementById('rp-btn').classList.add('on');
+  document.getElementById('rp-note').classList.add('show');
+  broadcast(null, {t:'replay-arm'});
+  broadcast(null, {t:'replay-info'});      // frames answer with their extents
+  replay.first = replay.last = null;
+  replay.step  = null;
+}
+
+function noteReplayInfo(msg){
+  // The page can only step as finely as its finest chart, and can only cover
+  // the span every chart has data for.
+  replay.step  = replay.step  == null ? msg.step  : Math.min(replay.step,  msg.step);
+  replay.first = replay.first == null ? msg.first : Math.max(replay.first, msg.first);
+  replay.last  = replay.last  == null ? msg.last  : Math.min(replay.last,  msg.last);
+}
+
+function replayPickedAt(time){
+  if(!replay.picking) return;
+  replay.picking = false;
+  document.getElementById('rp-note').classList.remove('show');
+  document.getElementById('rp-controls').classList.add('open');
+  replay.active = true;
+  replay.start  = time;
+  replaySeek(time);
+}
+
+function replaySeek(t){
+  if(!replay.active) return;
+  if(replay.first != null) t = Math.max(replay.first, t);
+  if(replay.last  != null) t = Math.min(replay.last,  t);
+  replay.cursor = t;
+  broadcast(null, {t:'replay-cursor', time:t});
+  const clock = document.getElementById('rp-clock');
+  clock.textContent = new Date(t * 1000).toISOString().slice(0,16).replace('T',' ') + ' UTC';
+}
+
+function replayStep(dir){
+  if(!replay.active) return;
+  const before = replay.cursor;
+  replaySeek(replay.cursor + dir * (replay.step || 60));
+  if(dir > 0 && replay.cursor === before) replayPause();   // ran out of data
+}
+
+function replayToStart(){ if(replay.active) replaySeek(replay.start); }
+function replayPlayPause(){ replay.playing ? replayPause() : replayPlay(); }
+
+function replayPlay(){
+  if(!replay.active || replay.playing) return;
+  replay.playing = true;
+  document.getElementById('rp-play').textContent = '⏸';
+  const tick = () => {
+    if(!replay.playing) return;
+    replayStep(1);
+    if(replay.playing) replay.timer = setTimeout(tick, 500 / replay.speed);
+  };
+  replay.timer = setTimeout(tick, 500 / replay.speed);
+}
+
+function replayPause(){
+  replay.playing = false;
+  clearTimeout(replay.timer);
+  replay.timer = null;
+  document.getElementById('rp-play').textContent = '▶';
+}
+
+function replaySetSpeed(v){ replay.speed = parseFloat(v) || 1; }
+
+function replayExit(){
+  replayPause();
+  replay.active = replay.picking = false;
+  replay.cursor = null;
+  document.getElementById('rp-btn').classList.remove('on');
+  document.getElementById('rp-note').classList.remove('show');
+  document.getElementById('rp-controls').classList.remove('open');
+  document.getElementById('rp-clock').textContent = '';
+  broadcast(null, {t:'replay-exit'});
+}
+
+document.addEventListener('keydown', e => {
+  if(!replay.active) return;
+  if(e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '')) return;
+  if(e.key === 'Escape'){ replayExit(); e.preventDefault(); }
+  else if(e.code === 'Space'){ replayPlayPause(); e.preventDefault(); }
+  else if(e.shiftKey && e.key === 'ArrowRight'){ replayStep(1);  e.preventDefault(); }
+  else if(e.shiftKey && e.key === 'ArrowLeft'){  replayStep(-1); e.preventDefault(); }
+});
+
+window.addEventListener('message', ev => {
+  const msg = ev.data;
+  if(!msg || typeof msg !== 'object' || !msg.t) return;
+
+  // Trust only our own frames — the id has to match the window that sent it.
+  const id = msg.view;
+  if(!id || frames[id] !== ev.source) return;
+
+  switch(msg.t){
+    case 'focus':
+      setActive(id);
+      break;
+    case 'range':
+      // Sync by TIME, never by candle index: a 3m and a 5m chart have
+      // completely different logical indices for the same instant.
+      if(!sync.time) break;
+      // Only the chart being used may move the others. Each chart snaps a
+      // range to its own bars, so letting every chart answer back makes them
+      // chase each other's rounding and shake.
+      if(id !== activeView) break;
+      if(lastRange && SAME_TIME(lastRange.from, msg.from)
+                   && SAME_TIME(lastRange.to, msg.to)) break;
+      lastRange = {from: msg.from, to: msg.to};
+      broadcast(id, {t: 'range', from: msg.from, to: msg.to});
+      break;
+    case 'navigate':
+      // The report sent one chart to a trade; the rest of the page follows.
+      broadcast(id, {t: 'navigate', time: msg.time});
+      break;
+    case 'crosshair':
+      if(!sync.crosshair) break;
+      if(SAME_TIME(lastCrosshair, msg.time)) break;             // an echo
+      lastCrosshair = msg.time;
+      broadcast(id, {t: 'crosshair', time: msg.time, price: msg.price});
+      break;
+    case 'crosshair-clear':
+      if(!sync.crosshair) break;
+      broadcast(id, {t: 'crosshair-clear'});
+      break;
+    case 'replay-info':
+      noteReplayInfo(msg);
+      break;
+    case 'replay-pick':
+      replayPickedAt(msg.time);
+      break;
+    case 'layout-changed':
+      loadLayout();
+      break;
+  }
+});
+
+loadLayout();
+</script>
+</body>
+</html>

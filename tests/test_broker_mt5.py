@@ -357,12 +357,43 @@ def test_diagnostics_remote_host_skips_local_checks(monkeypatch):
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda cmd: None)   # would say Part A if local
-    client = BridgeClient("192.0.2.1", 18812, timeout=0.25)  # TEST-NET-1: unroutable
+
+    # Hermetic on purpose.  This used to dial 192.0.2.1 (TEST-NET-1) and trust
+    # it to be unroutable, which is not true everywhere: on a network whose ISP
+    # runs a catch-all middlebox the connect *succeeds* and the call turns into
+    # a read timeout, so the test failed for a reason that had nothing to do
+    # with the diagnostic being tested.
+    def _unreachable(address, timeout=None, *args, **kwargs):
+        raise OSError(101, "Network is unreachable")
+
+    monkeypatch.setattr(socket, "create_connection", _unreachable)
+
+    client = BridgeClient("192.0.2.1", 18812, timeout=0.25)
     with pytest.raises(ConnectionFailed) as err:
         client.call("ping")
     msg = str(err.value)
     assert "192.0.2.1:18812" in msg and "Part G" in msg
     assert "Part A" not in msg and "Wine is not installed" not in msg
+
+
+def test_diagnostics_silent_peer_points_to_part_g():
+    """A port that accepts TCP but never answers must diagnose, not leak a bare
+    TimeoutError — the D4 contract is diagnose-and-stop for every failure."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)                      # completes the handshake, never replies
+    host, port = server.getsockname()
+    client = BridgeClient(host, port, timeout=0.25)
+    try:
+        with pytest.raises(ConnectionFailed) as err:
+            client.call("ping")
+        msg = str(err.value)
+        assert "accepted the connection but sent no reply" in msg
+        assert f"{host}:{port}" in msg
+        assert "Part G" in msg and "Troubleshooting" in msg
+    finally:
+        client.close()
+        server.close()
 
 
 # ---------------------------------------------------------------------------

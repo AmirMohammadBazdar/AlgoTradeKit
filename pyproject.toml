@@ -45,6 +45,12 @@ dev = [
     "twine",
 ]
 
+# Native MetaTrader 5 transport (Windows only).  The MetaTrader5 wheel exists
+# for Windows alone, so the marker keeps `pip install AlgoTradeKit[mt5]` a
+# no-op everywhere else instead of an install error.  On Linux the terminal
+# runs under Wine and is reached through the bridge — see MT5_WINE_SETUP.md.
+mt5 = ['MetaTrader5; platform_system == "Windows"']
+
 [project.urls]
 Homepage   = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
 Repository = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
@@ -66,6 +72,7 @@ packages = ["src/AlgoTradeKit"]
 only-include = [
     "src/AlgoTradeKit",
     "tests",
+    "examples",
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
@@ -96,3 +103,14 @@ target-version = ["py310", "py311", "py312"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts   = "-v --tb=short"
+# uvicorn's WebSocket implementation still calls the deprecated websockets
+# legacy API, and the websockets client warns about its own ConnectionClosed
+# accessor. Nothing in AlgoTradeKit can act on either, and left unfiltered they
+# bury the warnings that do matter. Anything raised by our own code must stay
+# visible, so these are matched by message rather than blanket-ignored.
+filterwarnings = [
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    "ignore:websockets.server.WebSocketServerProtocol is deprecated:DeprecationWarning",
+    "ignore:remove second argument of ws_handler:DeprecationWarning",
+    "ignore:ConnectionClosed.code is deprecated:DeprecationWarning",
+]

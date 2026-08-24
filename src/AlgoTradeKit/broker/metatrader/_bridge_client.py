@@ -55,6 +55,24 @@ def _diagnose_unreachable(host: str, port: int, exc: OSError) -> str:
     )
 
 
+def _diagnose_silent(host: str, port: int, timeout: float, exc: BaseException) -> str:
+    """
+    Explain a connection that was *accepted* but never answered.
+
+    Distinct from :func:`_diagnose_unreachable`: something IS listening on that
+    port, so the wine/prefix checks would only mislead.  Common causes are a
+    port forwarded to the wrong service, a captive middlebox that accepts every
+    TCP connection, or a bridge whose terminal is still initialising.
+    """
+    return (
+        f"The MetaTrader bridge at {host}:{port} accepted the connection but sent no "
+        f"reply within {timeout:g}s — see MT5_WINE_SETUP.md Part G and Troubleshooting. "
+        "Check that bridge_server.py (not another service, a proxy, or a stale SSH "
+        "tunnel) is what listens there, and that the terminal finished starting. "
+        f"(underlying error: {exc!r})"
+    )
+
+
 class BridgeClient:
     """Minimal, thread-safe JSON-RPC client for the MetaTrader bridge."""
 
@@ -103,9 +121,18 @@ class BridgeClient:
             except (OSError, ConnectionFailed):
                 # One transparent reconnect + retry
                 self.close()
-                sock = self._connect()
-                sock.sendall(payload)
-                line = self._read_line(sock)
+                try:
+                    sock = self._connect()
+                    sock.sendall(payload)
+                    line = self._read_line(sock)
+                except TimeoutError as exc:
+                    # The socket connected but the peer never answered.  Without
+                    # this the caller would get a bare "timed out" with none of
+                    # the guidance every other bridge failure carries.
+                    self.close()
+                    raise ConnectionFailed(
+                        _diagnose_silent(self.host, self.port, self.timeout, exc)
+                    ) from exc
 
         resp = json.loads(line)
         if not resp.get("ok", False):
