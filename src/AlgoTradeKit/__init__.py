@@ -1,6 +1,6 @@
 """AlgoTradeKit — Algorithmic Trading Toolkit"""
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __author__ = "Amir Mohammad Bazdar"
 
 __all__ = ["run_live"]
