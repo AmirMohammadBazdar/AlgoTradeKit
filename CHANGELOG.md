@@ -7,6 +7,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.1.1] — 2026-09-03
+
+Bar replay: shapes that outlive the cursor.
+
+### Fixed
+
+- **A zone that ends in the future disappeared during replay.** A box, trendline
+  or Fibonacci drawn from candle N to N+10 vanished from the chart until the
+  cursor passed N+10 — so a zone the trader could already see was missing for
+  exactly the candles it mattered on. Any shape running past the cursor is now
+  drawn **up to the cursor**: present, without giving away where it ends. Only
+  a position box's label is still blanked, because that announces the outcome.
+- **Placing a shape used candles replay had not revealed.** The chart is asked
+  where a moment sits on screen, and it only answers for candles the price
+  scale is currently showing. While replaying, the far edge of such a shape
+  lands on a hidden candle, so there was no answer — and no answer meant the
+  whole shape was dropped, which is what made it disappear entirely rather than
+  merely overshoot. Positions are now measured against the candles actually on
+  screen.
+
 ## [1.1.0] — 2026-08-24
 
 Charting. One set of candles in, any timeframe out, several charts at once, and
