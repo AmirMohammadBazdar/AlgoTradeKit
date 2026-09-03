@@ -1256,3 +1256,90 @@ out.noBars    = ev('(() => {const keep = allBars; allBars = []; '
     assert result["before"] == -5                    # extrapolated backwards
     assert result["after"] == 95                     # and forwards
     assert result["noBars"] is None                  # nothing to interpolate from
+
+
+# ---------------------------------------------------------------------------
+# Replay: a shape that outlives the cursor is cut short, not hidden
+# ---------------------------------------------------------------------------
+
+def test_a_zone_that_extends_past_the_cursor_is_drawn_up_to_it():
+    """A zone marked from candle N to N+10 exists as soon as N is reached. It
+    must appear, ending at the cursor — hiding it until N+10 loses information
+    the trader already had, and drawing it whole gives away the future."""
+    result = _run(CHART_HTML, _REPLAY_SETUP + """
+const t = ctx.__bars.map(b => b.time);
+ctx.__d = [
+  {id: 'zone',   type: 'box',       time1: t[2], price1: 1, time2: t[9], price2: 2},
+  {id: 'ahead',  type: 'box',       time1: t[8], price1: 1, time2: t[9], price2: 2},
+  {id: 'past',   type: 'box',       time1: t[1], price1: 1, time2: t[3], price2: 2},
+  {id: 'line',   type: 'trendline', time1: t[2], price1: 1, time2: t[9], price2: 2},
+  {id: 'level',  type: 'hline',     price: 100},
+  {id: 'trade',  type: 'position_box', open_time: t[2], close_time: t[9],
+   label: 'TP +2R'},
+];
+ev('globalThis.__d.forEach(d => { drawings[d.id] = d; })');
+
+ev('replayToggle()');
+ev('handleMsg({type: "replay_data", stepSeconds: 60, sourceBars: globalThis.__src})');
+ev('replayPick(globalThis.__bars[4].time)');       // cursor sits at candle 5
+
+out.cursor  = ev('replay.cursor');
+out.visible = ev('replayVisibleDrawings().map(d => d.id)');
+out.shapes  = ev('(() => {const m = {};'
+              + ' replayVisibleDrawings().forEach(d => m[d.id] ='
+              + '   {t1: d.time1 ?? null, t2: d.time2 ?? null,'
+              + '    close: d.close_time ?? null, label: d.label ?? null});'
+              + ' return m;})()');
+out.storedZoneEnd = ev('drawings.zone.time2');
+
+// A real price scale only answers for the candles the series was given, so
+// teach the stub exactly that. Without it the test cannot see the failure:
+// the far corner of a zone lands on a candle replay has not revealed, the
+// scale has no position for it, and the renderer drops the whole shape.
+const onScale = (ev('mainSeries').setData._last || []).map(b => b.time);
+mainChartStub()._state.barTimes = onScale;
+out.shownCount = onScale.length;
+out.totalBars  = ev('allBars.length');
+out.xAtClip    = ev('timeToX(replay.cursor)');
+out.xAtStart   = ev('timeToX(replay.shown[0].time)');
+// what the old code did: measure against every candle, including hidden ones
+out.xBeyond    = ev('timeToX(allBars[allBars.length - 1].time)');
+
+ev('replayExit()');
+out.afterExit = ev('replayVisibleDrawings().map(d => d.id).sort()');
+out.zoneWhole = ev('replayVisibleDrawings().find(d => d.id === "zone").time2');
+""")
+    assert result["topLevelError"] is None
+    cursor = result["cursor"]
+
+    # the zone is on the chart, ending at the cursor rather than at N+10
+    assert "zone" in result["visible"]
+    assert result["shapes"]["zone"]["t2"] == cursor
+    assert result["shapes"]["zone"]["t1"] < cursor          # it started earlier
+
+    # a zone that has not begun is still withheld
+    assert "ahead" not in result["visible"]
+
+    # one that already finished is untouched
+    assert result["shapes"]["past"]["t2"] < cursor
+
+    # trendlines are spans too
+    assert result["shapes"]["line"]["t2"] == cursor
+
+    # timeless shapes are unaffected
+    assert "level" in result["visible"]
+
+    # a trade still open keeps its outcome hidden
+    assert result["shapes"]["trade"]["close"] == cursor
+    assert result["shapes"]["trade"]["label"] == ""
+
+    # only the drawn copy is clipped, and the clipped edge has a real position
+    assert result["storedZoneEnd"] > cursor
+    assert result["shownCount"] < result["totalBars"]      # replay is hiding some
+    assert isinstance(result["xAtClip"], (int, float))     # the clipped edge lands
+    assert result["xAtClip"] > result["xAtStart"]          # and to the right of the start
+    assert isinstance(result["xBeyond"], (int, float))     # extrapolated, not lost
+
+    # leaving replay restores every shape in full
+    assert result["afterExit"] == ["ahead", "level", "line", "past", "trade", "zone"]
+    assert result["zoneWhole"] == result["storedZoneEnd"]

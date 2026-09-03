@@ -1733,33 +1733,44 @@ function resizeOverlays(){
 // made on 1m data disappears the moment the chart is switched to 5m or 15m:
 // its times now fall *between* candles. Interpolating between the neighbouring
 // candles keeps every drawing exactly where it was put, on any timeframe.
+// The candles the price scale currently holds. While replaying that is the
+// revealed slice, not the whole history: asking the scale about a candle it is
+// not showing answers nothing, and interpolating from those answers gives
+// nothing either — which is how a shape ended up with no position at all.
+function scaleBars(){
+  if(replay.active && replay.shown && replay.shown.length) return replay.shown;
+  return allBars;
+}
+
 function timeToX(time){
   if(!mainChart) return null;
   const scale = mainChart.timeScale();
   let x = null;
   try{ x = scale.timeToCoordinate(time); }catch{}
   if(x != null) return x;
-  if(allBars.length < 2) return null;
 
-  const last = allBars.length - 1;
+  const bars = scaleBars();
+  if(bars.length < 2) return null;
+
+  const last = bars.length - 1;
   let lo, hi;
-  if(time <= allBars[0].time){ lo = 0; hi = 1; }              // before the data
-  else if(time >= allBars[last].time){ lo = last - 1; hi = last; }   // after it
+  if(time <= bars[0].time){ lo = 0; hi = 1; }                 // before the data
+  else if(time >= bars[last].time){ lo = last - 1; hi = last; }      // after it
   else {
     let a = 0, b = last;
     while(b - a > 1){
       const mid = (a + b) >> 1;
-      if(allBars[mid].time <= time) a = mid; else b = mid;
+      if(bars[mid].time <= time) a = mid; else b = mid;
     }
     lo = a; hi = b;
   }
   let x0 = null, x1 = null;
   try{
-    x0 = scale.timeToCoordinate(allBars[lo].time);
-    x1 = scale.timeToCoordinate(allBars[hi].time);
+    x0 = scale.timeToCoordinate(bars[lo].time);
+    x1 = scale.timeToCoordinate(bars[hi].time);
   }catch{}
   if(x0 == null || x1 == null) return null;
-  const t0 = allBars[lo].time, t1 = allBars[hi].time;
+  const t0 = bars[lo].time, t1 = bars[hi].time;
   if(t1 === t0) return x0;
   return x0 + (x1 - x0) * ((time - t0) / (t1 - t0));
 }
@@ -2754,7 +2765,7 @@ let _lastCrossTime = null;
 let replay = {
   active:false, picking:false, cursor:null, start:null,
   playing:false, timer:null, speed:1,
-  srcBars:[], stepSec:0, shownBars:-1, armed:false, pendingStart:false,
+  srcBars:[], stepSec:0, shownBars:-1, shown:null, armed:false, pendingStart:false,
 };
 
 function displayTfSec(){
@@ -2855,6 +2866,7 @@ function replayExit(){
   replay.active = replay.picking = false;
   replay.cursor = null;
   replay.shownBars = -1;
+  replay.shown = null;
   document.body.classList.remove('rp-picking');
   document.getElementById('rp-bar').classList.remove('open');
   document.getElementById('rp-btn').classList.remove('on');
@@ -2927,6 +2939,7 @@ function replayRender(force){
     if(forming){
       mainSeries.update(forming);
       if(volumeSeries) volumeSeries.update(volPoint(forming));
+      if(replay.shown && replay.shown.length) replay.shown[replay.shown.length - 1] = forming;
     }
     redrawAll();
     return;
@@ -2935,6 +2948,7 @@ function replayRender(force){
 
   const closed = allBars.slice(0, k);
   const shown  = forming ? closed.concat([forming]) : closed;
+  replay.shown = shown;             // what timeToX must measure against
   mainSeries.setData(shown);
   if(volumeSeries) volumeSeries.setData(shown.map(volPoint));
 
@@ -2981,13 +2995,33 @@ function replayVisibleDrawings(){
   for(const d of all){
     const start = drawingStartTime(d);
     if(start != null && start > T) continue;      // has not happened yet
-    if(d.close_time != null && d.close_time > T){
-      // A trade still open at the cursor: stop the box there and drop the
-      // label, which would otherwise announce how the trade ends.
-      out.push(Object.assign({}, d, {close_time: T, label: ''}));
-    } else {
-      out.push(d);
-    }
+    const shape = clipDrawingTo(d, T);
+    if(shape) out.push(shape);
+  }
+  return out;
+}
+
+// A shape that runs past the cursor is drawn up to it. A zone that will last
+// another ten candles exists now — only its far edge lies in the future — so
+// it belongs on the chart, cut short. Hiding it altogether, which is what
+// happened before, loses information the trader already had.
+function clipDrawingTo(d, T){
+  let out = d;
+  const set = (key, value) => {
+    if(out === d) out = Object.assign({}, d);
+    out[key] = value;
+  };
+
+  // A trade still open at the cursor: its label announces how it ends.
+  if(d.close_time != null && d.close_time > T){ set('close_time', T); set('label', ''); }
+
+  // Spans: box, trendline, fib — clip whichever end runs ahead
+  if(d.time1 != null && d.time2 != null){
+    if(d.time1 > T && d.time2 > T) return null;   // wholly in the future
+    if(d.time1 > T) set('time1', T);
+    if(d.time2 > T) set('time2', T);
+  } else if(d.time2 != null && d.time2 > T){
+    set('time2', T);
   }
   return out;
 }
