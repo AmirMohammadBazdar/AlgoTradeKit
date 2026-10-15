@@ -19,6 +19,7 @@ needs no API key:
 python examples/01_backtest_report.py          # backtest → chart + report
 python examples/02_chart_timeframes_replay.py  # timeframe switching + bar replay
 python examples/03_multi_chart_page.py         # three synced charts on one page
+python examples/04_telegram_messages.py        # text to your Telegram (needs TELEGRAM_BOT_TOKEN)
 ```
 
 > ### 🚀 New in v1.1.0 — the chart grew up
