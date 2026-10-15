@@ -51,6 +51,12 @@ dev = [
 # runs under Wine and is reached through the bridge — see MT5_WINE_SETUP.md.
 mt5 = ['MetaTrader5; platform_system == "Windows"']
 
+# Notifications (AlgoTradeKit.notify).  Text needs nothing beyond the core
+# install; PySocks lets requests reach Telegram through a SOCKS proxy
+# (socks5h://…).  `telegram` is the same list under the backend's name.
+notify = ["PySocks>=1.7.1"]
+telegram = ["PySocks>=1.7.1"]
+
 [project.urls]
 Homepage   = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
 Repository = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
