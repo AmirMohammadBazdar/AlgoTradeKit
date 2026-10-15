@@ -186,6 +186,7 @@ class TestPublicApiSurface:
                         "show_combined_report", "save_combined_report_html"]),
             ("broker", ["Broker", "BaseBroker", "MetaTraderBroker", "TradingCosts",
                         "COMMISSION_TYPE_PER_LOT"]),
+            ("notify", ["TelegramNotifier", "TelegramChat", "TelegramError", "NotifyError"]),
         ],
     )
     def test_advertised_exports_are_real(self, module, names):
