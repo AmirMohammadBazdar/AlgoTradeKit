@@ -5,8 +5,10 @@ The Telegram backend (v1.2.0): :class:`TelegramNotifier`, :class:`TelegramChat`,
 :meth:`TelegramNotifier.find_chats`.
 
 It talks to the Bot API over HTTPS with ``requests``, a handful of calls
-(``getMe``, ``getChat``, ``getChatMember``, ``sendMessage``, ``getUpdates``),
-and no Telegram library.
+(``getMe``, ``getChat``, ``getChatMember``, ``sendMessage``, ``editMessageText``,
+``getUpdates``), and no Telegram library.  A trade's messages reply to its first
+one (``reply_parameters``, which still sends when that message was deleted), and
+a trailing stop edits it.
 
 Telegram's limits shape it:
 
@@ -33,7 +35,7 @@ from typing import Any
 import requests
 
 from . import _template
-from ._core import Notifier, NotifyError, _Destination, _Outcome
+from ._core import Notifier, NotifyError, _Destination, _Outcome, check_kinds
 
 _API = "https://api.telegram.org"
 
@@ -114,7 +116,9 @@ class TelegramChat:
         Send without sound.
     events
         The kinds this chat gets, as a set, or ``None`` for every kind except
-        ``sl_move``.  An empty set: only what names the chat in ``to=``.
+        ``sl_move``.  An empty set: only what names the chat in ``to=``.  A chat
+        that gets ``sl_move`` sees each trade's first message edited as its stop
+        moves.
     symbols
         The symbols this chat gets, as a set compared in capitals, or ``None`` for
         all.  A message about no symbol is not kept out.
@@ -141,9 +145,10 @@ class TelegramChat:
         object.__setattr__(self, "thread_id", thread)
         if not isinstance(self.silent, bool):
             raise TypeError(f"silent must be True or False, got {self.silent!r}")
-        object.__setattr__(
-            self, "events", _name_set(self.events, "events", '{"signal", "close"}')
-        )
+        events = _name_set(self.events, "events", '{"signal", "close"}')
+        if events is not None:
+            check_kinds(events)
+        object.__setattr__(self, "events", events)
         symbols = _name_set(self.symbols, "symbols", '{"BTCUSDT"}')
         object.__setattr__(
             self, "symbols", None if symbols is None else frozenset(s.upper() for s in symbols)
@@ -467,16 +472,25 @@ class TelegramNotifier(Notifier):
         Seconds each request may take.
     base_url
         Another Bot API server: a self-hosted one, or a fake in tests.
+    templates
+        Your own text for a kind of message, ``{kind: text}``, or ``None`` to never
+        send that kind: ``{"open": "…", "sl_move": None}``.  ``"text"`` wraps every
+        custom text, which its ``{text}`` holds: ``{"text": "<b>ATK</b> · {text}"}``.
+        A trade event's fields are its placeholders (``{entry_price}``,
+        ``{net_pnl}``, …), checked when the notifier is wired into trading.
 
     Messages are queued, paced and retried on the notifier's own thread (see
     :meth:`send_text`); ``close()`` delivers what is left, and so does the end of the
-    program, for up to 10 seconds.
+    program, for up to 10 seconds.  ``TraderConfig(notifiers=[bot])`` sends a
+    trading session's events through it.
     """
 
     _service = "Telegram"
     _tag = "telegram"
     _error = TelegramError
     _max_length = 4096
+    _can_reply = True
+    _can_edit = True
 
     def __init__(
         self,
@@ -489,6 +503,7 @@ class TelegramNotifier(Notifier):
         check: bool = True,
         timeout: float = 10.0,
         base_url: str = _API,
+        templates: Mapping[str, str | None] | None = None,
     ) -> None:
         self._token = _check_token(token)
         self._bot_id = int(self._token.partition(":")[0])
@@ -506,7 +521,7 @@ class TelegramNotifier(Notifier):
         self._session = requests.Session()
         super().__init__(
             {name: _destination(name, chat) for name, chat in specs.items()},
-            zone=zone, rich=parse_mode == "HTML",
+            zone=zone, rich=parse_mode == "HTML", templates=templates,
         )
         if check:
             self._check()
@@ -567,7 +582,9 @@ class TelegramNotifier(Notifier):
         return _api_call(self._session, self._base_url, self._token, method, params,
                          timeout=self._timeout, proxies=self._proxies)
 
-    def _deliver(self, dest: _Destination, text: str, *, silent: bool) -> _Outcome:
+    def _deliver(
+        self, dest: _Destination, text: str, *, silent: bool, reply_to: Any = None
+    ) -> _Outcome:
         chat: TelegramChat = dest.target
         params: dict[str, Any] = {
             "chat_id": chat.chat_id,
@@ -580,11 +597,35 @@ class TelegramNotifier(Notifier):
             params["message_thread_id"] = chat.thread_id
         if silent:
             params["disable_notification"] = True
+        if reply_to is not None:
+            # A deleted root never fails the reply: it then goes as a plain message.
+            params["reply_parameters"] = {
+                "message_id": reply_to, "allow_sending_without_reply": True,
+            }
         answer = self._call("sendMessage", params)
+        return self._outcome(answer, message_id=answer.fields.get("message_id"))
+
+    def _edit(self, dest: _Destination, message_id: Any, text: str) -> _Outcome:
+        chat: TelegramChat = dest.target
+        params: dict[str, Any] = {
+            "chat_id": chat.chat_id,
+            "message_id": message_id,
+            "text": text,
+            "link_preview_options": {"is_disabled": True},
+        }
+        if self._parse_mode is not None:
+            params["parse_mode"] = self._parse_mode
+        answer = self._call("editMessageText", params)
+        if answer.status == 400 and "message is not modified" in answer.reason.lower():
+            return _Outcome("sent", message_id=message_id)   # already says this: done
+        return self._outcome(answer, message_id=message_id)
+
+    @staticmethod
+    def _outcome(answer: _Answer, *, message_id: Any) -> _Outcome:
         if answer.status == 0:
             return _Outcome("unreachable", reason=answer.reason)
         if answer.ok:
-            return _Outcome("sent", message_id=answer.fields.get("message_id"))
+            return _Outcome("sent", message_id=message_id)
         if answer.status == 429:
             return _Outcome("wait", reason=answer.reason, retry_after=answer.retry_after)
         if answer.status >= 500:
