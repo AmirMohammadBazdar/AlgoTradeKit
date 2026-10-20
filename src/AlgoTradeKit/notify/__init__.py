@@ -29,18 +29,49 @@ Errors
 
 Constants
     KIND_TEXT           The kind of a ``send_text`` message.
+    KIND_SIGNAL / KIND_EXIT_SIGNAL / KIND_OPEN / KIND_SL_MOVE / KIND_RISK_FREE /
+    KIND_TP_LEVEL / KIND_CLOSE / KIND_DAILY_LOSS / KIND_RECONCILE / KIND_ERROR
+                        A trading session's events, named as its event types.
+    KIND_MESSAGE        A strategy's own message (``self.notify(...)``).
+    KIND_START / KIND_STOP
+                        A trading session's start and stop.
+    KIND_DAILY_SUMMARY  The day's summary, at 00:00 in the notifier's zone.
+
+A chat's ``events`` picks its kinds; by default it gets all of them but
+``sl_move``, which edits the trade's first message instead where a chat asks for
+it.
 
 Placeholders in a text: ``{time}``, ``{date}``, ``{symbol}``, ``{price}`` (the last
 price, from ``broker.get_ticker(symbol)``) and ``{header}``, a ready-made first
 line, «🕑 {time} · {symbol} {price}».  Times are UTC unless the notifier is given
-a ``timezone``.
+a ``timezone``.  ``templates={kind: text}`` replaces a kind's default text.
+
+Trading events arrive through ``TraderConfig(notifiers=[bot])``, for ``run_live``
+and ``Trader`` alike.
 
 The module imports no other part of AlgoTradeKit: a broker arrives as an object.
 Text needs nothing beyond the core install; a SOCKS proxy needs
 ``pip install "AlgoTradeKit[notify]"``.
 """
 
-from ._core import KIND_TEXT, NotifyError
+from ._core import (
+    KIND_CLOSE,
+    KIND_DAILY_LOSS,
+    KIND_DAILY_SUMMARY,
+    KIND_ERROR,
+    KIND_EXIT_SIGNAL,
+    KIND_MESSAGE,
+    KIND_OPEN,
+    KIND_RECONCILE,
+    KIND_RISK_FREE,
+    KIND_SIGNAL,
+    KIND_SL_MOVE,
+    KIND_START,
+    KIND_STOP,
+    KIND_TEXT,
+    KIND_TP_LEVEL,
+    NotifyError,
+)
 from ._telegram import TelegramChat, TelegramChatInfo, TelegramError, TelegramNotifier
 
 __all__ = [
@@ -50,4 +81,18 @@ __all__ = [
     "TelegramError",
     "NotifyError",
     "KIND_TEXT",
+    "KIND_SIGNAL",
+    "KIND_EXIT_SIGNAL",
+    "KIND_OPEN",
+    "KIND_SL_MOVE",
+    "KIND_RISK_FREE",
+    "KIND_TP_LEVEL",
+    "KIND_CLOSE",
+    "KIND_DAILY_LOSS",
+    "KIND_RECONCILE",
+    "KIND_ERROR",
+    "KIND_MESSAGE",
+    "KIND_START",
+    "KIND_STOP",
+    "KIND_DAILY_SUMMARY",
 ]
