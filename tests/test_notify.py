@@ -417,8 +417,12 @@ class TestPublicNames:
     def test_exports(self):
         import AlgoTradeKit.notify as notify
 
-        assert set(notify.__all__) == {"TelegramNotifier", "TelegramChat", "TelegramChatInfo",
-                                       "TelegramError", "NotifyError", "KIND_TEXT"}
+        assert set(notify.__all__) == {
+            "TelegramNotifier", "TelegramChat", "TelegramChatInfo", "TelegramError",
+            "NotifyError", "KIND_TEXT", "KIND_SIGNAL", "KIND_EXIT_SIGNAL", "KIND_OPEN",
+            "KIND_SL_MOVE", "KIND_RISK_FREE", "KIND_TP_LEVEL", "KIND_CLOSE", "KIND_DAILY_LOSS",
+            "KIND_RECONCILE", "KIND_ERROR", "KIND_MESSAGE", "KIND_START", "KIND_STOP",
+            "KIND_DAILY_SUMMARY"}
         assert KIND_TEXT == "text"
         assert issubclass(TelegramError, NotifyError)
 
