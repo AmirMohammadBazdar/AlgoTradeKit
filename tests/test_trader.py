@@ -157,11 +157,14 @@ from AlgoTradeKit.trader import (
     EVENT_DAILY_LOSS,
     EVENT_ERROR,
     EVENT_EXIT_SIGNAL,
+    EVENT_MESSAGE,
     EVENT_OPEN,
     EVENT_RECONCILE,
     EVENT_RISK_FREE,
     EVENT_SIGNAL,
     EVENT_SL_MOVE,
+    EVENT_START,
+    EVENT_STOP,
     EVENT_TP_LEVEL,
     EXEC_CANDLE_CLOSE,
     EXEC_CANDLE_UPDATE,
@@ -175,11 +178,14 @@ from AlgoTradeKit.trader import (
     ErrorEvent,
     EventStream,
     ExitSignalEvent,
+    MessageEvent,
     OpenEvent,
     ReconcileEvent,
     RiskFreeEvent,
     SignalEvent,
     SlMoveEvent,
+    StartEvent,
+    StopEvent,
     TerminalEventPrinter,
     TpLevelEvent,
     Trader,
@@ -746,6 +752,9 @@ class TestExports:
             "DailyLossEvent",
             "ReconcileEvent",
             "ErrorEvent",
+            "StartEvent",
+            "StopEvent",
+            "MessageEvent",
             "EventStream",
             "TerminalEventPrinter",
             "attach_terminal_printer",
@@ -759,6 +768,9 @@ class TestExports:
             "EVENT_DAILY_LOSS",
             "EVENT_RECONCILE",
             "EVENT_ERROR",
+            "EVENT_START",
+            "EVENT_STOP",
+            "EVENT_MESSAGE",
             "ALL_EVENT_TYPES",
             "SOURCE_SIM",
             "SOURCE_LIVE",
@@ -810,6 +822,7 @@ class TestEventTypesAndConstants:
         assert ALL_EVENT_TYPES == frozenset({
             "signal", "exit_signal", "open", "sl_move", "risk_free",
             "tp_level", "close", "daily_loss", "reconcile", "error",
+            "start", "stop", "message",
         })
         assert isinstance(ALL_EVENT_TYPES, frozenset)
 
@@ -825,6 +838,9 @@ class TestEventTypesAndConstants:
             DailyLossEvent: EVENT_DAILY_LOSS,
             ReconcileEvent: EVENT_RECONCILE,
             ErrorEvent: EVENT_ERROR,
+            StartEvent: EVENT_START,
+            StopEvent: EVENT_STOP,
+            MessageEvent: EVENT_MESSAGE,
         }
         for cls, etype in expected.items():
             assert cls.event_type == etype, cls
@@ -1129,6 +1145,11 @@ class TestTerminalPrinterLines:
             DailyLossEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, limit=1.0, loss=2.0),
             ReconcileEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE),
             ErrorEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, where="w", message="m"),
+            StartEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, mode="live",
+                       symbols=("BTCUSDT",)),
+            StopEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, mode="live",
+                      reason="stop()", open_positions=0),
+            MessageEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, text="t"),
         ]
         assert {e.event_type for e in events} == ALL_EVENT_TYPES
         for event in events:
