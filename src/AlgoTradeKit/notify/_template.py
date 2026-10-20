@@ -21,20 +21,32 @@ Values print for a person to read, not for ``awk``:
 * times (:class:`Moment`) — ``2026-10-14 14:03 UTC``, or in a notifier's zone
   ``2026-10-14 17:33 (UTC+03:30)``, with the offset of that moment.  A spec is a
   ``strftime`` pattern in the same zone: ``{time:%H:%M}``;
-* dates (:class:`Day`) — ``2026-10-14``; ``{date:%d %b}`` → ``14 Oct``.
+* dates (:class:`Day`) — ``2026-10-14``; ``{date:%d %b}`` → ``14 Oct``;
+* sizes (:class:`Size`) — at most 4 decimals, but at least 4 significant digits:
+  ``0.2222``, ``0.01``, ``0.0001235``;
+* money (:class:`Money`) — ``$100``, ``$512.40``: cents, and no «.00»; a P&L
+  (:class:`Pnl`) always has its sign and its cents: ``+$200.00``, ``-$100.00``;
+* ratios (:class:`Ratio`, :class:`SignedRatio`) — two decimals: ``2.00``,
+  ``+2.00``; a fraction (:class:`Percent`) prints as a percent: ``50%``, ``33.3%``.
+
+An explicit spec formats the raw number of any of them.
 
 With rich text on, every field's value is escaped (``&``, ``<``, ``>``) and the
 template's own text is left alone: its tags work, and a symbol or a venue's
-message can never break the markup.
+message can never break the markup.  A :class:`Markup` value — text rendered
+once already, such as the custom text a ``templates={"text": …}`` wrapper holds
+— goes in as it is.
 
 The engine is not tied to custom texts: :func:`fields_of` and :func:`render`
 take any set of field names, and a custom text (``send_text``) is the case that
-knows :data:`TEXT_FIELDS`.
+knows :data:`TEXT_FIELDS`.  The trade-event templates (``AlgoTradeKit.trader``)
+bring their own.
 """
 
 from __future__ import annotations
 
 import html
+import math
 import string
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -50,6 +62,11 @@ HEADER_TEMPLATE = "🕑 {time} · {symbol} {price}"
 #: Most decimals a number prints with when the template gives no spec.
 _MAX_DECIMALS = 8
 
+#: A size prints with at least this many decimals, and this many significant digits.
+_SIZE_DECIMALS = 4
+#: … but never with more decimals than this.
+_SIZE_MAX_DECIMALS = 12
+
 _FORMATTER = string.Formatter()
 
 
@@ -57,25 +74,117 @@ _FORMATTER = string.Formatter()
 # Values
 # ---------------------------------------------------------------------------
 
+def _finite(value: float) -> bool:
+    return not (value != value or value in (float("inf"), float("-inf")))
+
+
 def human_number(value: float) -> str:
     """``64312.5`` → ``64,312.5``: separators, own decimals, at most 8 of them."""
     value = float(value)
-    if value != value or value in (float("inf"), float("-inf")):
+    if not _finite(value):
         return str(value)
     text = f"{value:,.{_MAX_DECIMALS}f}".rstrip("0").rstrip(".")
     return "0" if text == "-0" else text
+
+
+def human_size(value: float) -> str:
+    """``0.2222222`` → ``0.2222``: at most 4 decimals, but at least 4 significant
+    digits — ``0.01``, ``0.0001235``, ``1,250.5``."""
+    value = float(value)
+    if not _finite(value):
+        return str(value)
+    if value == 0:
+        return "0"
+    magnitude = math.floor(math.log10(abs(value)))
+    decimals = min(max(_SIZE_DECIMALS, _SIZE_DECIMALS - 1 - magnitude), _SIZE_MAX_DECIMALS)
+    text = f"{value:,.{decimals}f}".rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
+
+
+def human_money(value: float) -> str:
+    """``100`` → ``$100``, ``512.4`` → ``$512.40``, ``-100`` → ``-$100``."""
+    value = round(float(value), 2) + 0.0
+    if not _finite(value):
+        return str(value)
+    text = f"{abs(value):,.2f}"
+    if text.endswith(".00"):
+        text = text[:-3]
+    return f"-${text}" if value < 0 else f"${text}"
+
+
+def human_pnl(value: float) -> str:
+    """A profit or a loss: always its sign and its cents — ``+$200.00``, ``-$100.00``."""
+    value = round(float(value), 2) + 0.0
+    if not _finite(value):
+        return str(value)
+    return f"{'-' if value < 0 else '+'}${abs(value):,.2f}"
 
 
 class Number(float):
     """A float that prints for a person (:func:`human_number`) unless a spec is given."""
 
     __slots__ = ()
+    _human = staticmethod(human_number)
 
     def __format__(self, spec: str) -> str:
-        return float.__format__(self, spec) if spec else human_number(self)
+        return float.__format__(self, spec) if spec else self._human(self)
 
     def __str__(self) -> str:
-        return human_number(self)
+        return self._human(self)
+
+
+class Size(Number):
+    """A position size: :func:`human_size`."""
+
+    __slots__ = ()
+    _human = staticmethod(human_size)
+
+
+class Money(Number):
+    """An amount of money: :func:`human_money`."""
+
+    __slots__ = ()
+    _human = staticmethod(human_money)
+
+
+class Pnl(Number):
+    """A profit or a loss: :func:`human_pnl`."""
+
+    __slots__ = ()
+    _human = staticmethod(human_pnl)
+
+
+class Ratio(Number):
+    """A reward-to-risk ratio or an R level, two decimals: ``2.00``."""
+
+    __slots__ = ()
+    _human = staticmethod(lambda value: f"{float(value):.2f}")
+
+
+class SignedRatio(Number):
+    """An R multiple with its sign: ``+2.00``, ``-1.00``."""
+
+    __slots__ = ()
+    _human = staticmethod(lambda value: f"{round(float(value), 2) + 0.0:+.2f}")
+
+
+class Percent(Number):
+    """A fraction, printed as a percent with at most one decimal: ``50%``, ``33.3%``."""
+
+    __slots__ = ()
+    _human = staticmethod(
+        lambda value: f"{float(value) * 100:.1f}".rstrip("0").rstrip(".") + "%"
+    )
+
+
+class Markup(str):
+    """Text that is markup already: :func:`render` puts it in as it is, unescaped.
+
+    A custom text inside its ``templates={"text": …}`` wrapper, or a strategy's
+    message inside its event template, was rendered once, with its own values
+    escaped; escaping it again would break its tags."""
+
+    __slots__ = ()
 
 
 def offset_label(moment: datetime) -> str:
@@ -179,15 +288,17 @@ def fields_of(template: str, known: Sequence[str]) -> list[str]:
 def render(template: str, values: Mapping[str, Any], *, escape: bool) -> str:
     """Fill *template* (already checked by :func:`fields_of`) with *values*.
 
-    With *escape*, every value is HTML-escaped after formatting; the template's
-    own text is left as written."""
+    With *escape*, every value is HTML-escaped after formatting, except a
+    :class:`Markup` value; the template's own text is left as written."""
     out: list[str] = []
     for literal, name, spec, _conversion in _FORMATTER.parse(template):
         out.append(literal)
         if name is None:
             continue
-        text = format(values[name], spec or "")
-        out.append(html.escape(text, quote=False) if escape else text)
+        value = values[name]
+        text = format(value, spec or "")
+        out.append(html.escape(text, quote=False) if escape and not isinstance(value, Markup)
+                   else text)
     return "".join(out)
 
 
