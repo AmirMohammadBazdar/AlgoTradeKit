@@ -1032,6 +1032,7 @@ class ExecutionEngine:
             fill_price=fill_price, size=size, margin_amount=margin_amount,
             risk_amount=risk_amount, stop_loss=signal.stop_loss,
             next_tp=pos.next_tp, order_id=outcome.entry.order_id or None,
+            signal_time=int(signal.timestamp),
         ))
         if outcome.tp_error:
             self._error("attach_take_profit", outcome.tp_error,
