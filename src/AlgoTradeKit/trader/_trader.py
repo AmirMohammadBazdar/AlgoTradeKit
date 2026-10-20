@@ -145,6 +145,17 @@ into them and adds the safety rails, the journal flush points
 multi-pair form; ``trader/_display.py`` the live display bridge this
 module hands its candles, forming rows and trade events to.
 
+Notifications (v1.2.0)
+----------------------
+``config.notifiers`` sends a pair's events as messages (``trader/_notify.py``):
+the adapter only enqueues on the trading thread.  ``run()`` emits ``START`` on
+every pair's stream after the seeds and before the first pair starts — so a
+``RECONCILE`` follows it — and ``STOP`` after the shutdown, ``on_stop``
+applied, a crash or a failed start included; the notifiers are then closed, so
+the stop message is out before ``run()`` returns.  A strategy's
+``self.notify(...)`` speaks only on a closed candle: the hook is set around
+each closed-candle step, muted on forming evaluations and in the display's copy.
+
 Threading: one consumer loop per pair drains that pair's queue — the calling
 thread itself in the single-pair form, one ``atk-trader-pair-<symbol>``
 thread per pair in the multi-pair form (the supervising caller thread then
@@ -205,9 +216,19 @@ from ._events import (
     EventStream,
     ExitSignalEvent,
     SignalEvent,
+    StartEvent,
+    StopEvent,
     attach_terminal_printer,
 )
 from ._execution import ExecutionEngine, LiveTrade
+from ._notify import (
+    NotifySession,
+    OpenPosition,
+    PairView,
+    message_hook,
+    mute_hook,
+    wire_notifiers,
+)
 from ._run_live import _signal_rr
 from ._scheduler import CandleCloseScheduler, SchedulerTick, timeframe_ms
 from ._state import (
@@ -245,6 +266,9 @@ _MT5_DEAL_ENTRY_IN = MT5_DEAL_ENTRY_IN
 #: (a stale forming row / tick / reconcile marker is worthless once a newer
 #: one exists; candles and user-data fills are never dropped).
 _COALESCE_KINDS = frozenset({"forming", "tick", "reconcile"})
+
+#: The mode a Trader session announces (``StartEvent.mode`` / ``StopEvent.mode``).
+_MODE_LIVE = "live"
 
 
 class _DailyLossGuard:
@@ -390,6 +414,7 @@ class _PairWorker:
         self._exit_acted: set[int] = set()          # candle_ts → exit action taken
         self._forming: dict[str, float] | None = None   # tick-mode synthesized row
         self._last_committed_ts = 0
+        self.last_price: float | None = None        # newest price seen: {price} of messages
         self.daily_loss = _DailyLossGuard(self)     # max-daily-loss gate
         self.display = None                         # _DisplayBridge (Trader wires it)
 
@@ -489,6 +514,7 @@ class _PairWorker:
         result = self.strategy.run({self.tf: frame}, mode=StrategyMode.BACKTEST)
         self.data = result.data
         self._last_committed_ts = int(frame["timestamp"].iloc[-1])
+        self.last_price = float(frame["close"].iloc[-1])
 
     def start(self) -> None:
         """Arm the engine, reconcile the journal, start every producer.
@@ -705,10 +731,19 @@ class _PairWorker:
         newest = len(candles) - 1
         for idx, candle in enumerate(candles):
             candle_ts = int(candle["timestamp"])
-            signals, exits = advance_live_candle(
-                self.strategy, self.data, candle,
-                recompute_window=self.config.recompute_window,
+            self.last_price = float(candle["close"])
+            # self.notify speaks only here, for a newly closed candle.
+            self.strategy._notify_hook = message_hook(
+                self.events, symbol=self.config.symbol, source=SOURCE_LIVE,
+                candle_time=lambda ts=candle_ts: ts,
             )
+            try:
+                signals, exits = advance_live_candle(
+                    self.strategy, self.data, candle,
+                    recompute_window=self.config.recompute_window,
+                )
+            finally:
+                self.strategy._notify_hook = None
             self._last_committed_ts = candle_ts
             if self._forming is not None and self._forming["timestamp"] <= candle_ts:
                 self._forming = None
@@ -754,10 +789,17 @@ class _PairWorker:
         self.daily_loss.evaluate(candle_ts, float(candle["close"]))
         if self.config.execution == EXEC_CANDLE_CLOSE:
             return  # ladder-detection feed only — no forming strategy evaluation
-        signals, exits = evaluate_forming_candle(
-            self.strategy, self.data, candle,
-            recompute_window=self.config.recompute_window,
-        )
+        self.last_price = float(candle["close"])
+        # A forming evaluation is throwaway: self.notify says nothing here, and a
+        # mistake in its text never costs the evaluation — the close reports it.
+        self.strategy._notify_hook = mute_hook
+        try:
+            signals, exits = evaluate_forming_candle(
+                self.strategy, self.data, candle,
+                recompute_window=self.config.recompute_window,
+            )
+        finally:
+            self.strategy._notify_hook = None
         self._act_on_exits(exits, candle_ts)
         self._act_on_signals(signals, candle_ts, allow_entry=True)
 
@@ -1103,6 +1145,35 @@ class _PairWorker:
             )
 
 
+class _LiveView(PairView):
+    """What a pair tells its notifiers (``trader/_notify.py``): read off the
+    worker, never from the venue."""
+
+    mode = _MODE_LIVE
+
+    def __init__(self, worker: _PairWorker) -> None:
+        self._worker = worker
+        self.symbol = worker.config.symbol
+        self.timeframe = worker.tf
+        self.timeframe_ms = worker.tf_ms
+
+    def last_price(self) -> float | None:
+        return self._worker.last_price
+
+    def candle_anchor(self) -> int | None:
+        return self._worker._last_committed_ts or None
+
+    def open_positions(self) -> list[OpenPosition]:
+        """A copy of the engine's tracked trades (the engine has no lock: its
+        ``open_trades`` is a tuple copy, as the display bridge reads it)."""
+        return [
+            OpenPosition(trade.pos.trade_id, trade.pos.direction,
+                         float(trade.pos.entry_price), float(trade.pos.size),
+                         float(trade.pos.stop_loss))
+            for trade in self._worker.engine.open_trades
+        ]
+
+
 class Trader:
     """
     Real-order live trading on one or more ``(broker, symbol)`` pairs
@@ -1224,6 +1295,9 @@ class Trader:
         self.settings = TraderSettings(
             on_stop=on_stop, state_path=state_path, kill_switch_file=kill_switch_file
         )
+        # What the notifiers announce: a new id for this run (trader_id persists
+        # across restarts, so it cannot be the session).
+        self._notify_session = NotifySession(_MODE_LIVE, on_stop=self.settings.on_stop)
         # One session id for every pair (: the journal stores one
         # trader_id;: client_order_ids stay uniform across pairs).
         session_id = trader_id if trader_id is not None else secrets.token_hex(3)
@@ -1239,14 +1313,17 @@ class Trader:
                 quote_asset=quote_asset,
             )
             worker = _PairWorker(pair, events=events, engine=engine)
+            wire_notifiers(events, pair.config, _LiveView(worker), self._notify_session)
             if pair.config.display:
                 # display bridge.  Sim modes get a dedicated strategy
                 # instance (deep-copied pristine, before any seed): the
                 # worker and the display sim each advance their own copy —
-                # sharing one would double-advance its state.
+                # sharing one would double-advance its state.  The copy's
+                # self.notify is muted: the worker's own says it once.
                 sim_strategy = None
                 if pair.config.display_trades != DISPLAY_TRADES_REAL:
                     sim_strategy = copy.deepcopy(pair.strategy)
+                    sim_strategy._notify_hook = mute_hook
                 worker.display = _DisplayBridge(worker, sim_strategy=sim_strategy)
             self._workers.append(worker)
         #: disambiguate journal keys when the same (market, symbol)
@@ -1266,6 +1343,7 @@ class Trader:
             for worker in self._workers:
                 worker.events.subscribe(self._events_all.emit)
         self._stop_event = threading.Event()
+        self._stop_reason: str | None = None   # what the STOP event says ended the run
         self._explicit_trader_id = trader_id is not None
         self._combined = None       # combined report page (multi-pair display)
         self._ran = False
@@ -1359,6 +1437,12 @@ class Trader:
         the reconcile…) aborts the start: pairs already started are shut
         down again — feeds stopped, positions **kept** protected — and
         the error propagates.
+
+        Every pair's stream gets a ``START`` after the seeds and a ``STOP``
+        after the shutdown (``"Ctrl+C"``, ``"SIGTERM"``, ``"kill switch"``,
+        ``"stop()"``, or ``"crash"`` with the error) — a failed start sends its
+        ``STOP`` too.  The notifiers of ``config.notifiers`` are closed after it,
+        so the stop message is out before this returns.
         """
         if self._ran:
             raise RuntimeError("Trader.run() may only run once per instance.")
@@ -1378,10 +1462,16 @@ class Trader:
         try:
             for worker in self._workers:
                 worker.seed()          # all seeds first — fail fast
+            symbols = tuple(worker.config.symbol for worker in self._workers)
+            for worker in self._workers:
+                worker.events.emit(StartEvent(
+                    time=now_ms(), symbol="", source=SOURCE_LIVE, mode=_MODE_LIVE,
+                    symbols=symbols, session_id=self._notify_session.id,
+                ))
             for worker in self._workers:
                 started.append(worker)   # a mid-start failure shuts it down too
                 worker.start()
-        except BaseException:
+        except BaseException as exc:
             # Abort: stop whatever already started; positions stay protected
             # by their venue SL/TP — never close_all on a failed start.
             for worker in started:
@@ -1389,6 +1479,11 @@ class Trader:
                     worker.shutdown()
                 except Exception:  # noqa: BLE001 — best-effort cleanup
                     pass
+            if isinstance(exc, KeyboardInterrupt):
+                self._announce_stop("Ctrl+C", None, count_positions=False)
+            else:
+                self._announce_stop("crash", f"{type(exc).__name__}: {exc}",
+                                    count_positions=False)
             raise
         #: one combined report across the displaying pairs.  Armed
         # after every pair started — a candle landing in this gap skips one
@@ -1398,6 +1493,7 @@ class Trader:
         watcher = self._start_kill_switch_watcher()
         print(f"{_LOG_PREFIX}: live trading {self._describe_pairs()} — Ctrl+C to stop.")
         threads: list[threading.Thread] = []
+        error: str | None = None
         try:
             if not self._multi:
                 self._workers[0].run_loop()
@@ -1415,6 +1511,11 @@ class Trader:
                         thread.join(timeout=_QUEUE_POLL_SECONDS)
         except KeyboardInterrupt:
             print(f"{_LOG_PREFIX}: Ctrl+C — stopping.")
+            self._request_stop("Ctrl+C")
+        except BaseException as exc:
+            self._request_stop("crash")
+            error = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
             self._stop_event.set()
             for worker in self._workers:
@@ -1427,6 +1528,8 @@ class Trader:
             if watcher is not None:
                 watcher.join(timeout=5.0)
             self._restore_signal_handlers(previous_handlers)
+            # after on_stop: open_positions is what is really left
+            self._announce_stop(self._stop_reason or "stop()", error, count_positions=True)
         if not self._multi:
             return list(self._workers[0].closed_trades)
         return list(self.closed_trades)   # all pairs, sorted by close_time
@@ -1434,9 +1537,28 @@ class Trader:
     def stop(self) -> None:
         """End :meth:`run` promptly — every pair (callable from any thread /
         a subscriber)."""
+        self._request_stop("stop()")
+
+    def _request_stop(self, reason: str) -> None:
+        """Stop every pair; the first reason given is the one the STOP event says."""
+        if self._stop_reason is None:
+            self._stop_reason = reason
         self._stop_event.set()
         for worker in self._workers:
             worker.stop_event.set()
+
+    def _announce_stop(self, reason: str, error: str | None, *, count_positions: bool) -> None:
+        """``STOP`` on every pair's stream, then close the notifiers — sharing one
+        10 s — so the stop message is out before ``run()`` returns or raises.
+        Without *count_positions* (a failed start) no position count is given."""
+        for worker in self._workers:
+            worker.events.emit(StopEvent(
+                time=now_ms(), symbol="", source=SOURCE_LIVE, mode=_MODE_LIVE,
+                reason=reason,
+                open_positions=len(worker.engine.open_trades) if count_positions else None,
+                error=error, session_id=self._notify_session.id,
+            ))
+        self._notify_session.close()
 
     def _describe_pairs(self) -> str:
         """Startup-log description: ``SYMBOL (mode, tf)`` per pair."""
@@ -1524,7 +1646,7 @@ class Trader:
                 else signal_module.Signals(signum).name
             )
             print(f"{_LOG_PREFIX}: {label} — stopping. (again = force quit)")
-            self.stop()
+            self._request_stop(label)
 
         for signum in (signal_module.SIGINT, signal_module.SIGTERM):
             try:
@@ -1556,7 +1678,7 @@ class Trader:
                         f"{_LOG_PREFIX}: kill-switch file {path!r} detected — "
                         "stopping."
                     )
-                    self.stop()
+                    self._request_stop("kill switch")
                     return
 
         thread = threading.Thread(
