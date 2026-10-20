@@ -8,9 +8,16 @@ Nothing here knows about Telegram.  A backend (``TelegramNotifier``) subclasses
 request (:meth:`Notifier._deliver`).  The core owns the rest:
 
 Kinds
-    Every message has one: ``send_text`` sends :data:`KIND_TEXT`.  A destination
-    whose ``events`` is ``None`` gets every kind except ``sl_move`` — a trailing
-    stop that moves on 70 candles would drown a chat.
+    Every message has one: ``send_text`` sends :data:`KIND_TEXT`, and the trade
+    events of ``AlgoTradeKit.trader`` send theirs, named as the events are
+    (:data:`KINDS`).  A destination whose ``events`` is ``None`` gets every kind
+    except ``sl_move`` — a trailing stop that moves on 70 candles would drown a
+    chat.
+Templates
+    ``templates={kind: text | None}`` replaces a kind's default text; ``None``
+    means that kind is never sent.  The ``text`` kind wraps every custom text,
+    which its ``{text}`` holds.  The trade-event kinds are checked when the
+    notifier is wired into trading, which knows their fields.
 Destinations
     Named by a dict's keys; a chat given on its own is named by its address as text.
     Each has ``events`` (a set of kinds, or ``None``) and ``symbols`` (a set, or
@@ -43,6 +50,12 @@ Shutdown
 Daily jobs
     ``add_daily_job(job, at="00:00")`` runs a callable once a day at a wall-clock
     time in the notifier's zone, on a thread of its own.
+Work for the trade-event adapter
+    The trading thread only appends to an inbox (:meth:`Notifier._post`); the
+    sender thread drains it, outside the lock, and the work queues the messages.
+    A message can reply to an earlier one, or edit it, resolved just before it
+    goes, once the earlier one's id is known; a backend without replies or edits
+    sends a plain new message instead.
 
 Lines are printed from the notifier's own threads, never the caller's:
 ``[AlgoTradeKit] telegram: …``.
@@ -57,7 +70,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Callable, Hashable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 
@@ -65,9 +78,40 @@ from . import _template
 
 #: The kind of a ``send_text`` message.
 KIND_TEXT = "text"
+#: The kinds of the trade events, named as ``AlgoTradeKit.trader`` names its events.
+KIND_SIGNAL = "signal"
+KIND_EXIT_SIGNAL = "exit_signal"
+KIND_OPEN = "open"
+KIND_SL_MOVE = "sl_move"
+KIND_RISK_FREE = "risk_free"
+KIND_TP_LEVEL = "tp_level"
+KIND_CLOSE = "close"
+KIND_DAILY_LOSS = "daily_loss"
+KIND_RECONCILE = "reconcile"
+KIND_ERROR = "error"
+#: A strategy's own message (``BaseStrategy.notify``).
+KIND_MESSAGE = "message"
+#: A trading session's start and stop.
+KIND_START = "start"
+KIND_STOP = "stop"
+#: The summary of a day, sent at 00:00 in the notifier's zone.
+KIND_DAILY_SUMMARY = "daily_summary"
+
+#: Every kind, in the order an error lists them.
+KINDS = (
+    KIND_TEXT, KIND_SIGNAL, KIND_EXIT_SIGNAL, KIND_OPEN, KIND_SL_MOVE, KIND_RISK_FREE,
+    KIND_TP_LEVEL, KIND_CLOSE, KIND_DAILY_LOSS, KIND_RECONCILE, KIND_ERROR, KIND_MESSAGE,
+    KIND_START, KIND_STOP, KIND_DAILY_SUMMARY,
+)
 
 #: Kinds a destination with ``events=None`` does not get: a trailing stop moves too often.
-_NOT_BY_DEFAULT = frozenset({"sl_move"})
+_NOT_BY_DEFAULT = frozenset({KIND_SL_MOVE})
+
+#: Kinds that go out without sound, unless a chat is silent anyway.
+SILENT_KINDS = frozenset({KIND_SL_MOVE, KIND_RISK_FREE, KIND_DAILY_SUMMARY})
+
+#: The fields of a ``templates={"text": …}`` wrapper: the text, then a custom text's own.
+_WRAPPER_FIELDS = (KIND_TEXT, *_template.TEXT_FIELDS)
 
 #: At most this many messages wait; past it the oldest are dropped.
 MAX_WAITING = 1_000
@@ -98,6 +142,7 @@ _JOIN_IDLE = 5.0
 _JOBS_RECHECK = 30.0
 
 _CLOSED = "notifier closed before the message was sent"
+_SUPERSEDED = "replaced by a newer edit before it went"
 
 _TAG_OR_ENTITY = re.compile(r"<[^<>]*>|&#?[0-9A-Za-z]+;")
 _TAG = re.compile(r"<[^<>]*>")
@@ -125,6 +170,39 @@ class NotifyError(Exception):
 
 def _plural(count: int, noun: str) -> str:
     return f"{count:,} {noun}" if count == 1 else f"{count:,} {noun}s"
+
+
+def check_kinds(names: Iterable[str]) -> None:
+    """Raise ``ValueError`` for a kind nobody knows: «unknown kind 'sginal' — known: …»."""
+    for name in sorted(names):
+        if name not in KINDS:
+            raise ValueError(f"unknown kind {name!r} — known: {', '.join(KINDS)}")
+
+
+def _check_templates(templates: Any) -> dict[str, str | None]:
+    """``templates={kind: text | None}``, checked: known kinds, strings or ``None``, and
+    the ``text`` wrapper's fields (the trade-event kinds are checked when wired)."""
+    if templates is None:
+        return {}
+    if not isinstance(templates, Mapping):
+        raise TypeError(
+            'templates must be a dict such as {"open": "…", "sl_move": None}, '
+            f"got {type(templates).__name__}"
+        )
+    checked: dict[str, str | None] = {}
+    for kind, template in templates.items():
+        if not isinstance(kind, str):
+            raise TypeError(f"templates must be keyed by kind names, got {kind!r}")
+        check_kinds([kind])
+        if template is not None and not isinstance(template, str):
+            raise TypeError(
+                f"templates[{kind!r}] must be a string, or None to send nothing, "
+                f"got {type(template).__name__}"
+            )
+        checked[kind] = template
+    if checked.get(KIND_TEXT) is not None:
+        _template.fields_of(checked[KIND_TEXT], _WRAPPER_FIELDS)
+    return checked
 
 
 # ---------------------------------------------------------------------------
@@ -337,10 +415,24 @@ class _Message:
 
 
 class _Delivery:
-    """One message on its way to one destination."""
+    """One message on its way to one destination.
+
+    The trade-event adapter can give it more, all resolved on the sender thread
+    just before the first part goes:
+
+    * ``reply()`` — the id of the message to reply to, or ``None``;
+    * ``edit()`` — ``(message id, text)`` to edit that message instead, or ``None``
+      to send the body as a new message.  An edit the service refuses goes as a
+      new message after all;
+    * ``coalesce`` — a newer delivery with the same key, to the same destination,
+      replaces this one while it waits;
+    * ``on_done(message_id, text)`` — called once it is done: with the id and the
+      text of its first part when it went out, with ``None`` and ``None`` when not.
+    """
 
     __slots__ = (
         "seq", "message", "dest", "silent", "waiter", "parts", "next_part", "first_id", "done",
+        "reply", "edit", "coalesce", "on_done", "first_text", "editing",
     )
 
     def __init__(
@@ -356,6 +448,12 @@ class _Delivery:
         self.next_part = 0
         self.first_id: Any = None
         self.done = False
+        self.reply: Callable[[], Any] | None = None
+        self.edit: Callable[[], tuple[Any, str] | None] | None = None
+        self.coalesce: Hashable | None = None
+        self.on_done: Callable[[Any, str | None], None] | None = None
+        self.first_text: str | None = None    # the first part as it went out
+        self.editing: Any = None              # the message the attempt on its way edits
 
 
 class _Job:
@@ -400,11 +498,17 @@ def _register_exit_flush() -> None:
 
 
 def _flush_at_exit() -> None:
-    notifiers = list(_open_notifiers)
-    deadline = time.monotonic() + _EXIT_FLUSH_SECONDS
-    for notifier in notifiers:
+    close_notifiers(list(_open_notifiers), _EXIT_FLUSH_SECONDS)
+
+
+def close_notifiers(notifiers: Iterable[Notifier], timeout: float = 10.0) -> None:
+    """Close several notifiers within one shared *timeout*: each delivers what it
+    has queued, all at the same time, until the time runs out."""
+    unique = list(dict.fromkeys(notifiers))
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    for notifier in unique:
         notifier._begin_close()
-    for notifier in notifiers:
+    for notifier in unique:
         notifier._end_close(deadline)
 
 
@@ -426,15 +530,21 @@ class Notifier:
     _error: type[NotifyError] = NotifyError
     #: The longest text one message may hold, as :meth:`_measure` counts it.
     _max_length = 4096
+    #: Can a message reply to an earlier one (:meth:`_deliver`'s ``reply_to``)?
+    _can_reply = False
+    #: Can an earlier message be edited (:meth:`_edit`)?
+    _can_edit = False
     #: The clock; tests replace it.
     _clock = _SystemClock()
 
     def __init__(
-        self, destinations: Mapping[str, _Destination], *, zone: tzinfo | None, rich: bool
+        self, destinations: Mapping[str, _Destination], *, zone: tzinfo | None, rich: bool,
+        templates: Mapping[str, str | None] | None = None,
     ) -> None:
         self._destinations = dict(destinations)
         self._zone = zone
         self._rich = rich
+        self._templates = _check_templates(templates)
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)       # wakes the sender
         self._finished = threading.Condition(self._lock)   # a delivery ended
@@ -456,6 +566,10 @@ class Notifier:
         self._down_failures = 0
         self._probe_at = 0.0
         self._down_line_at: float | None = None
+        self._inbox: deque[Callable[[], None]] = deque()   # work the sender runs
+        self._callbacks: list[tuple[Callable[[Any, str | None], None], Any, str | None]] = []
+        self._working = False                 # the sender is running work or callbacks
+        self._local = threading.local()       # .generation: on a sender thread, its own
         self._jobs_lock = threading.Lock()
         self._jobs_cond = threading.Condition(self._jobs_lock)
         self._jobs: list[_Job] = []
@@ -468,8 +582,19 @@ class Notifier:
     # For the backend
     # ------------------------------------------------------------------
 
-    def _deliver(self, dest: _Destination, text: str, *, silent: bool) -> _Outcome:
-        """Send one part to *dest*.  Runs on the sender thread; never raises."""
+    def _deliver(
+        self, dest: _Destination, text: str, *, silent: bool, reply_to: Any = None
+    ) -> _Outcome:
+        """Send one part to *dest*.  Runs on the sender thread; never raises.
+
+        ``reply_to`` (a backend with :attr:`_can_reply`) is the message this one
+        answers; the core passes it only when the message is a reply."""
+        raise NotImplementedError
+
+    def _edit(self, dest: _Destination, message_id: Any, text: str) -> _Outcome:
+        """Replace the text of message *message_id* in *dest* (a backend with
+        :attr:`_can_edit`).  ``"sent"`` when done — an edit that changes nothing
+        counts as done; ``"refused"`` makes it a new message instead."""
         raise NotImplementedError
 
     @staticmethod
@@ -522,14 +647,28 @@ class Notifier:
           refused it, or if the service stayed unreachable for 21 s; that message is
           then withdrawn.  ``wait=False`` queues it and returns ``{name: None}`` at
           once.  Either way ``{}`` means no chat takes it.
+        * A ``templates={"text": …}`` wrapper puts the text where its ``{text}`` is,
+          with the same placeholders around it; ``{"text": None}`` sends no text.
 
         Mistakes in the text raise ``ValueError`` here, before anything is queued.
         """
         names = _template.fields_of(text, _template.TEXT_FIELDS)
+        if KIND_TEXT in self._templates and self._templates[KIND_TEXT] is None:
+            return {}   # templates={"text": None}: custom texts are not sent
+        wrapper = self._templates.get(KIND_TEXT)
+        if wrapper is not None:
+            names += [
+                name for name in _template.fields_of(wrapper, _WRAPPER_FIELDS)
+                if name != KIND_TEXT and name not in names
+            ]
         values = _template.text_values(
             names, now=self._clock.time(), zone=self._zone, symbol=symbol, broker=broker
         )
         body = _template.render(text, values, escape=self._rich)
+        if wrapper is not None:
+            body = _template.render(
+                wrapper, {**values, KIND_TEXT: _template.Markup(body)}, escape=self._rich
+            )
         return self._enqueue(KIND_TEXT, body, symbol=symbol, to=to, silent=silent, wait=wait)
 
     def _select(self, kind: str, symbol: str | None, to: Any) -> list[_Destination]:
@@ -586,6 +725,67 @@ class Notifier:
             )
         return {dest.name: waiter.sent[dest.name] for dest in dests}
 
+    # ------------------------------------------------------------------
+    # For the trade-event adapter (``AlgoTradeKit.trader``)
+    # ------------------------------------------------------------------
+
+    def _template_for(self, kind: str) -> tuple[bool, str | None]:
+        """``(True, text or None)`` when ``templates=`` names *kind*; ``(False, None)``
+        when the default applies."""
+        if kind in self._templates:
+            return True, self._templates[kind]
+        return False, None
+
+    def _recipients(self, kind: str, symbol: str | None) -> list[_Destination]:
+        """The destinations whose filters let a message of *kind* about *symbol* in."""
+        return self._select(kind, symbol, None)
+
+    def _post(self, work: Callable[[], None]) -> None:
+        """Have the sender thread run ``work()``, outside the lock, in the order
+        posted.  The trading thread posts: this appends and returns, and never
+        waits on the service."""
+        with self._lock:
+            self._ensure_thread_locked()
+            self._inbox.append(work)
+            self._wake_locked()
+
+    def _queue_event(
+        self,
+        dest: _Destination,
+        kind: str,
+        symbol: str | None,
+        body: str,
+        *,
+        queued_at: float,
+        silent: bool,
+        reply: Callable[[], Any] | None = None,
+        edit: Callable[[], tuple[Any, str] | None] | None = None,
+        coalesce: Hashable | None = None,
+        on_done: Callable[[Any, str | None], None] | None = None,
+    ) -> None:
+        """Queue one message for one destination (see :class:`_Delivery` for
+        *reply*, *edit*, *coalesce* and *on_done*).  *queued_at* is the wall time the
+        late marker counts from: when the event was received."""
+        message = _Message(kind, symbol, body, queued_at)
+        with self._lock:
+            stale = getattr(self._local, "generation", None)
+            if stale is not None and stale != self._generation:
+                return   # work of a sender that close() already stopped
+            self._ensure_thread_locked()
+            if coalesce is not None:
+                for older in list(dest.waiting):
+                    if (older.coalesce == coalesce and older is not self._in_flight
+                            and older.next_part == 0):
+                        self._finish_locked(older, reason=_SUPERSEDED)
+            delivery = _Delivery(next(self._seq), message, dest, silent, None)
+            delivery.reply, delivery.edit = reply, edit
+            delivery.coalesce, delivery.on_done = coalesce, on_done
+            dest.waiting.append(delivery)
+            self._order.append(delivery)
+            self._waiting += 1
+            self._trim_locked()
+            self._wake_locked()
+
     def _trim_locked(self) -> None:
         """Drop the oldest waiting messages past :data:`MAX_WAITING`."""
         kept = None
@@ -621,12 +821,24 @@ class Notifier:
         self._thread.start()
 
     def _run(self, generation: int) -> None:
+        self._local.generation = generation
         while True:
             with self._lock:
                 delivery = self._next_locked(generation)
                 lines, self._lines = self._lines, []
+                callbacks, self._callbacks = self._callbacks, []
+                work: list[Callable[[], None]] = []
+                if delivery is None and generation == self._generation:
+                    work = list(self._inbox)
+                    self._inbox.clear()
+                self._working = bool(callbacks or work)
             for line in lines:
                 self._say(line)
+            if callbacks or work:
+                self._run_work(callbacks, work)
+                with self._lock:
+                    self._working = False
+                    self._finished.notify_all()
             if delivery is None:
                 if generation != self._generation:
                     return
@@ -638,9 +850,27 @@ class Notifier:
             with self._lock:
                 self._settle_locked(delivery, outcome)
 
+    def _run_work(
+        self,
+        callbacks: list[tuple[Callable[[Any, str | None], None], Any, str | None]],
+        work: list[Callable[[], None]],
+    ) -> None:
+        """The adapter's callbacks, then its work, on the sender thread, outside the
+        lock: a failure prints one line and never stops the sender."""
+        for callback, message_id, text in callbacks:
+            try:
+                callback(message_id, text)
+            except Exception as exc:  # noqa: BLE001 — the sender must outlive any one message
+                self._say(f"could not keep track of a message ({type(exc).__name__}: {exc})")
+        for item in work:
+            try:
+                item()
+            except Exception as exc:  # noqa: BLE001
+                self._say(f"could not prepare a message ({type(exc).__name__}: {exc})")
+
     def _next_locked(self, generation: int) -> _Delivery | None:
-        """The next delivery that is due, marked in flight; ``None`` to print lines or
-        to stop.  Waits while nothing is due."""
+        """The next delivery that is due, marked in flight; ``None`` to print lines,
+        to run the adapter's work or to stop.  Waits while nothing is due."""
         while True:
             self._dirty = False
             if generation != self._generation:
@@ -648,7 +878,7 @@ class Notifier:
             now = self._clock.monotonic()
             self._seen = now
             line_at = self._drop_line_locked(now)
-            if self._lines:
+            if self._lines or self._callbacks or self._inbox:
                 return None
             delivery, due_at = self._choose_locked(now)
             if delivery is not None:
@@ -709,8 +939,16 @@ class Notifier:
     def _attempt(self, delivery: _Delivery) -> _Outcome:
         """Send the delivery's next part.  The first part carries the late marker,
         and the split is worked out with it, so the marker never pushes a part past
-        the limit."""
+        the limit.  An edit, and the message a reply answers, are resolved here,
+        just before the first part goes."""
+        reply_to = None
         if delivery.next_part == 0:
+            delivery.editing = None
+            if delivery.edit is not None and self._can_edit:
+                target = delivery.edit()
+                if target is not None:
+                    delivery.editing, delivery.first_text = target
+                    return self._edit(delivery.dest, delivery.editing, delivery.first_text)
             body = delivery.message.body
             late = self._clock.time() - delivery.message.queued_at
             if late >= _LATE_AFTER:
@@ -718,10 +956,14 @@ class Notifier:
             delivery.parts = split_text(
                 body, self._max_length, rich=self._rich, measure=self._measure
             )
+            delivery.first_text = delivery.parts[0]
+            if delivery.reply is not None and self._can_reply:
+                reply_to = delivery.reply()
         assert delivery.parts is not None
-        return self._deliver(
-            delivery.dest, delivery.parts[delivery.next_part], silent=delivery.silent
-        )
+        text = delivery.parts[delivery.next_part]
+        if reply_to is not None:
+            return self._deliver(delivery.dest, text, silent=delivery.silent, reply_to=reply_to)
+        return self._deliver(delivery.dest, text, silent=delivery.silent)
 
     def _settle_locked(self, delivery: _Delivery, outcome: _Outcome) -> None:
         if self._in_flight is delivery:
@@ -741,6 +983,10 @@ class Notifier:
         if outcome.status == "sent":
             pace.sent.append(now)
             dest.failures = 0
+            if delivery.editing is not None:   # an edit: one request, and it is done
+                delivery.first_id = delivery.editing
+                self._finish_locked(delivery)
+                return
             if delivery.next_part == 0:
                 delivery.first_id = outcome.message_id
             delivery.next_part += 1
@@ -750,6 +996,12 @@ class Notifier:
         elif outcome.status == "wait":
             pace.sent.append(now)
             pace.hold = now + max(outcome.retry_after, _RETRY_STEPS[0])
+        elif outcome.status == "refused" and delivery.editing is not None:
+            # The message to edit is gone, or may no longer be edited: the body goes
+            # as a new message, in its turn.
+            pace.sent.append(now)
+            dest.failures = 0
+            delivery.edit = delivery.editing = delivery.first_text = None
         elif outcome.status == "refused":
             pace.sent.append(now)
             dest.failures = 0
@@ -816,6 +1068,11 @@ class Notifier:
             pass
         self._waiting -= 1
         self._waited.discard(delivery)
+        if delivery.on_done is not None:
+            if reason is None:
+                self._callbacks.append((delivery.on_done, delivery.first_id, delivery.first_text))
+            else:
+                self._callbacks.append((delivery.on_done, None, None))
         waiter = delivery.waiter
         if waiter is not None:
             if reason is None:
@@ -859,7 +1116,9 @@ class Notifier:
             if thread is None:
                 return
             if thread is not threading.current_thread():
-                while self._waiting and thread.is_alive():
+                while (
+                    self._waiting or self._inbox or self._working or self._callbacks
+                ) and thread.is_alive():
                     left = deadline - time.monotonic()
                     if left <= 0:
                         break
@@ -868,8 +1127,11 @@ class Notifier:
             for delivery in unsent:
                 self._finish_locked(delivery, reason=_CLOSED)
             self._order.clear()
-            if unsent:
-                self._lines.append(f"closed with {_plural(len(unsent), 'message')} unsent")
+            unsent_count = len(unsent) + len(self._inbox)   # work never run: one message each
+            self._inbox.clear()
+            self._callbacks.clear()
+            if unsent_count:
+                self._lines.append(f"closed with {_plural(unsent_count, 'message')} unsent")
             on_request = self._in_flight is not None
             self._generation += 1
             self._thread = None
