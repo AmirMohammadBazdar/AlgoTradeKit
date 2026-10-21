@@ -222,9 +222,12 @@ from ._events import (
 )
 from ._execution import ExecutionEngine, LiveTrade
 from ._notify import (
+    Capture,
     NotifySession,
     OpenPosition,
     PairView,
+    candles_of,
+    drawn,
     message_hook,
     mute_hook,
     wire_notifiers,
@@ -396,6 +399,7 @@ class _PairWorker:
         self.tf_ms = timeframe_ms(self.tf)
 
         self.data: dict[str, pd.DataFrame] = {}
+        self.strategy_drawings: list[dict] = []   # the seed's, for pictures (v1.2.0)
         self.closed_trades: list[ClosedTrade] = []
         self.stop_event = threading.Event()
         self.queue: queue.Queue = queue.Queue()
@@ -513,6 +517,7 @@ class _PairWorker:
             frame[col] = frame[col].astype(float)
         result = self.strategy.run({self.tf: frame}, mode=StrategyMode.BACKTEST)
         self.data = result.data
+        self.strategy_drawings = list(result.drawings)   # for pictures (v1.2.0)
         self._last_committed_ts = int(frame["timestamp"].iloc[-1])
         self.last_price = float(frame["close"].iloc[-1])
 
@@ -1156,6 +1161,13 @@ class _LiveView(PairView):
         self.symbol = worker.config.symbol
         self.timeframe = worker.tf
         self.timeframe_ms = worker.tf_ms
+        self.chart_indicators = tuple(dict(spec) for spec in worker.config.chart_indicators)
+        self.picture_config = worker.config
+        self.warmup_candles = max(200, int(worker.strategy.warmup_period or 0))
+
+    @property
+    def drawings(self) -> tuple:   # the seed's, as the live chart draws them
+        return tuple(self._worker.strategy_drawings)
 
     def last_price(self) -> float | None:
         return self._worker.last_price
@@ -1172,6 +1184,18 @@ class _LiveView(PairView):
                          float(trade.pos.stop_loss))
             for trade in self._worker.engine.open_trades
         ]
+
+    def capture(self, rows: int, since: int | None = None) -> Capture | None:
+        """On the trading thread.  The frame is re-bound as candles arrive, and the
+        engine's trades are a tuple copy, so neither needs a lock."""
+        frame = self._worker.data.get(self.timeframe)
+        if frame is None or not len(frame):
+            return None
+        return Capture(candles_of(frame, rows, since),
+                       tuple(drawn(trade.pos) for trade in self._worker.engine.open_trades))
+
+    def capture_now(self, rows: int) -> Capture | None:
+        return self.capture(rows)
 
 
 class Trader:
