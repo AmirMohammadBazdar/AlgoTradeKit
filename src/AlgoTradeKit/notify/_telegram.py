@@ -6,14 +6,18 @@ The Telegram backend (v1.2.0): :class:`TelegramNotifier`, :class:`TelegramChat`,
 
 It talks to the Bot API over HTTPS with ``requests``, a handful of calls
 (``getMe``, ``getChat``, ``getChatMember``, ``sendMessage``, ``editMessageText``,
-``getUpdates``), and no Telegram library.  A trade's messages reply to its first
-one (``reply_parameters``, which still sends when that message was deleted), and
-a trailing stop edits it.
+``getUpdates``; for pictures and files ``sendPhoto``, ``sendDocument`` and
+``editMessageCaption``, uploaded as multipart), and no Telegram library.  A
+trade's messages reply to its first one (``reply_parameters``, which still sends
+when that message was deleted), and a trailing stop edits it.
 
 Telegram's limits shape it:
 
 * a message holds 4,096 characters, which Telegram counts in UTF-16 units, so an
   emoji counts two; a longer text goes as several messages;
+* a picture's caption holds 1,024; a longer one goes as a reply to the picture.  A
+  picture is at most 10 MB, with a width + height of at most 10,000, and a file at
+  most 50 MB;
 * at most one message a second to a chat, and 20 a minute to a group or a channel
   (a chat id below 0, or an ``@name``); a 429 says how long to wait, and is
   waited;
@@ -27,6 +31,8 @@ carries it in its URL, so a URL in an error is masked as ``bot<id>:***``.
 from __future__ import annotations
 
 import importlib.util
+import json
+import mimetypes
 import re
 from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass
@@ -35,7 +41,7 @@ from typing import Any
 import requests
 
 from . import _template
-from ._core import Notifier, NotifyError, _Destination, _Outcome, check_kinds
+from ._core import Notifier, NotifyError, _Destination, _Media, _Outcome, check_kinds
 
 _API = "https://api.telegram.org"
 
@@ -387,6 +393,31 @@ def _api_call(
     return _parse_answer(response)
 
 
+def _api_upload(
+    session: requests.Session, base_url: str, token: str, method: str,
+    fields: Mapping[str, Any], files: Mapping[str, tuple[str, bytes, str]], *, timeout: float,
+    proxies: dict[str, str] | None,
+) -> _Answer:
+    """One Bot API call with a file, as a multipart upload (v1.2.0).  Never raises,
+    as :func:`_api_call`."""
+    form = {
+        key: json.dumps(value) if isinstance(value, (dict, list))
+        else ("true" if value is True else "false" if value is False else str(value))
+        for key, value in fields.items()
+    }
+    reason = None
+    try:
+        response = session.post(
+            f"{base_url}/bot{token}/{method}", data=form, files=dict(files),
+            timeout=timeout, proxies=proxies,
+        )
+    except requests.exceptions.RequestException as exc:
+        reason = _network_reason(exc, timeout)
+    if reason is not None:
+        return _Answer(0, reason=reason)
+    return _parse_answer(response)
+
+
 def _chats_in(updates: Any) -> list[TelegramChatInfo]:
     """Every chat named in *updates*, in the order first seen, each with its latest
     details."""
@@ -476,6 +507,18 @@ class TelegramNotifier(Notifier):
         Your own text for a kind of message, ``{kind: text}``, or ``None`` to never
         send that kind: ``{"open": "…", "sl_move": None}``.  ``"text"`` wraps every
         custom text, which its ``{text}`` holds: ``{"text": "<b>ATK</b> · {text}"}``.
+    images
+        The kinds of trade message that carry a picture of the pair's chart (v1.2.0),
+        ``{"open", "close"}``: its text becomes the caption.  An OPEN and a SIGNAL show
+        the last 100 candles with the position; a CLOSE, the trade from 20 candles
+        before its entry.  ``text``, ``start`` and ``stop`` name no pair and are
+        refused.  Needs the ``[notify]`` extra and its browser, checked now with
+        ``check=True``: ``pip install "AlgoTradeKit[notify]"``, then ``playwright
+        install chromium``.
+
+    Pictures of your own: :meth:`send_chart` (a chart, or a broker's candles between
+    two datetimes), :meth:`send_photo` (bytes you made) and :meth:`send_report` (a
+    backtest's figures, balance curve and HTML report).
         A trade event's fields are its placeholders (``{entry_price}``,
         ``{net_pnl}``, …), checked when the notifier is wired into trading.
 
@@ -491,6 +534,9 @@ class TelegramNotifier(Notifier):
     _max_length = 4096
     _can_reply = True
     _can_edit = True
+    _can_send_media = True
+    #: A picture's upload gets this much longer than a text's request.
+    _UPLOAD_EXTRA = 30.0
 
     def __init__(
         self,
@@ -504,6 +550,7 @@ class TelegramNotifier(Notifier):
         timeout: float = 10.0,
         base_url: str = _API,
         templates: Mapping[str, str | None] | None = None,
+        images: Any = None,
     ) -> None:
         self._token = _check_token(token)
         self._bot_id = int(self._token.partition(":")[0])
@@ -521,10 +568,14 @@ class TelegramNotifier(Notifier):
         self._session = requests.Session()
         super().__init__(
             {name: _destination(name, chat) for name, chat in specs.items()},
-            zone=zone, rich=parse_mode == "HTML", templates=templates,
+            zone=zone, rich=parse_mode == "HTML", templates=templates, images=images,
         )
         if check:
             self._check()
+            if self._images:   # what cannot fix itself is found now (Q3.7 a)
+                from ..visual import _snapshot
+
+                _snapshot.check_engine()
 
     def __repr__(self) -> str:
         bot = f"@{self._bot_username}" if self._bot_username else f"bot {self._bot_id}"
@@ -619,6 +670,51 @@ class TelegramNotifier(Notifier):
         if answer.status == 400 and "message is not modified" in answer.reason.lower():
             return _Outcome("sent", message_id=message_id)   # already says this: done
         return self._outcome(answer, message_id=message_id)
+
+    def _edit_caption(self, dest: _Destination, message_id: Any, text: str) -> _Outcome:
+        chat: TelegramChat = dest.target
+        params: dict[str, Any] = {"chat_id": chat.chat_id, "message_id": message_id,
+                                  "caption": text}
+        if self._parse_mode is not None:
+            params["parse_mode"] = self._parse_mode
+        answer = self._call("editMessageCaption", params)
+        if answer.status == 400 and "message is not modified" in answer.reason.lower():
+            return _Outcome("sent", message_id=message_id)   # already says this: done
+        return self._outcome(answer, message_id=message_id)
+
+    def _deliver_media(
+        self, dest: _Destination, media: _Media, data: bytes, caption: str | None, *,
+        silent: bool, reply_to: Any = None,
+    ) -> _Outcome:
+        chat: TelegramChat = dest.target
+        photo = media.kind == _Media.PHOTO
+        fields: dict[str, Any] = {"chat_id": chat.chat_id}
+        if caption:
+            fields["caption"] = caption
+            if self._parse_mode is not None:
+                fields["parse_mode"] = self._parse_mode
+        if chat.thread_id is not None:
+            fields["message_thread_id"] = chat.thread_id
+        if silent:
+            fields["disable_notification"] = True
+        if reply_to is not None:
+            fields["reply_parameters"] = {
+                "message_id": reply_to, "allow_sending_without_reply": True,
+            }
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif data[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        else:
+            mime = mimetypes.guess_type(media.filename)[0] or "application/octet-stream"
+        field = "photo" if photo else "document"
+        answer = _api_upload(
+            self._session, self._base_url, self._token,
+            "sendPhoto" if photo else "sendDocument", fields,
+            {field: (media.filename, data, mime)},
+            timeout=self._timeout + self._UPLOAD_EXTRA, proxies=self._proxies,
+        )
+        return self._outcome(answer, message_id=answer.fields.get("message_id"))
 
     @staticmethod
     def _outcome(answer: _Answer, *, message_id: Any) -> _Outcome:
