@@ -38,6 +38,15 @@ The day (E3)
     At 00:00 in the notifier's zone, per pair: the trades closed that day (won or
     lost by their whole net), the day's net with its TP levels, and the
     positions open now.
+Pictures (v1.2.0, Q3.3 b)
+    For the kinds a notifier's ``images=`` names, the message is a picture of the
+    pair's chart with its text as the caption, drawn by the live chart's own
+    recipe (``populate_chart``): a SIGNAL or an OPEN shows the last 100 candles
+    with the position, a CLOSE the trade from 20 candles before its entry, any
+    other kind the last 100 candles with the open positions.  The candles are
+    copied on the trading thread when the event comes in; the picture is made on
+    the notifier's, just before the message goes.  One that cannot be made sends
+    the text alone, with one line.
 Times
     ``{time}`` is when the event was received, by the machine clock (Q2.2 c).
     ``{candle_time}`` is the opening of the candle the event belongs to: an
@@ -77,9 +86,12 @@ from ..notify._core import (
     KIND_STOP,
     KIND_TEXT,
     KIND_TP_LEVEL,
+    PICTURE_CANDLES,
     SILENT_KINDS,
     Notifier,
     _Destination,
+    _Media,
+    _Sent,
     close_notifiers,
 )
 from ..strategy._base import _NOTIFY_FIELDS, _check_notify_text
@@ -167,6 +179,12 @@ _DASH = "—"
 #: A slice smaller than this part of the trade's size leaves nothing open.
 _SIZE_TOLERANCE = 1e-9
 
+#: A CLOSE's picture starts this many candles before the trade's entry.
+_CLOSE_LEAD = 20
+
+#: The columns a picture's candles are copied with.
+_OHLCV = ("timestamp", "open", "high", "low", "close", "volume")
+
 _ON_STOP_CLOSE_ALL = "close_all"
 
 
@@ -218,6 +236,53 @@ class OpenPosition(NamedTuple):
     stop_loss: float | None
 
 
+class _Drawn(NamedTuple):
+    """A position as a picture draws it: the shape ``add_open_position`` takes."""
+
+    open_time: int              # UTC ms
+    entry_price: float
+    stop_loss: float
+    direction: str
+    trade_id: Any
+    next_tp: float | None
+    sl_history: tuple = ()
+
+
+class Capture(NamedTuple):
+    """What a picture is made of, copied when its event came in: the pair's
+    candles, one array per OHLCV column, and its open positions."""
+
+    columns: dict[str, Any]     # column name -> a numpy copy
+    positions: tuple[_Drawn, ...]
+
+    def frame(self) -> Any:
+        """The candles as a DataFrame — built on the notifier's thread."""
+        import pandas as pd
+
+        return pd.DataFrame(self.columns)
+
+
+def drawn(position: Any) -> _Drawn:
+    """A plain copy of an open ``_InternalPosition``, for a picture."""
+    history = position.sl_history[-1:] if position.sl_history else ()
+    return _Drawn(int(position.open_time), float(position.entry_price),
+                  float(position.stop_loss), position.direction, position.trade_id,
+                  position.next_tp, tuple(dict(entry) for entry in history))
+
+
+def candles_of(frame: Any, rows: int, since: int | None) -> dict[str, Any]:
+    """The last *rows* candles of *frame*, or those from *since* (UTC ms) on: a copy of
+    each OHLCV column.  Column slices of numpy arrays, not a DataFrame copy — on the
+    trading thread that is 0.05 ms for 300 candles instead of about 1 ms (v1.2.0)."""
+    stamps = frame["timestamp"].to_numpy()
+    if since is not None:
+        start = int(stamps.searchsorted(int(since)))
+    else:
+        start = max(0, len(stamps) - int(rows))
+    return {column: frame[column].to_numpy()[start:].copy()
+            for column in _OHLCV if column in frame.columns}
+
+
 class PairView:
     """What a runner tells its notifiers about one pair — read-only.
 
@@ -242,6 +307,26 @@ class PairView:
     def open_positions(self) -> list[OpenPosition]:
         """The pair's open positions now."""
         return []
+
+    # ---- pictures (v1.2.0) -------------------------------------------------
+
+    #: What a picture draws besides the candles: ``TraderConfig.chart_indicators``,
+    #: the strategy's drawings, and the config its trades are drawn with.
+    chart_indicators: tuple = ()
+    drawings: tuple = ()
+    picture_config: Any = None
+    #: Candles kept before a picture's window, for its indicators to settle there.
+    warmup_candles = 200
+
+    def capture(self, rows: int, since: int | None = None) -> Capture | None:
+        """The candles — the last *rows*, or those from *since* (UTC ms) on — and the
+        open positions now, as copies, for a picture.  Called on the trading thread
+        while the runner is on the event, so it must be cheap and never raise."""
+        return None
+
+    def capture_now(self, rows: int) -> Capture | None:
+        """:meth:`capture` from the notifier's own thread: the day's summary."""
+        return None
 
 
 class NotifySession:
@@ -623,7 +708,8 @@ def _hub_of(notifier: Notifier) -> _Hub:
 class _Trade:
     """What an adapter remembers of one open trade."""
 
-    __slots__ = ("direction", "first_sl", "size", "signal_time", "net", "gross", "risk", "closed")
+    __slots__ = ("direction", "first_sl", "size", "signal_time", "net", "gross", "risk", "closed",
+                 "slices")
 
     def __init__(self) -> None:
         self.direction: str | None = None
@@ -634,6 +720,7 @@ class _Trade:
         self.gross = 0.0
         self.risk = 0.0
         self.closed = 0.0
+        self.slices: list[Any] = []   # their ClosedTrade records, for the CLOSE's picture
 
 
 class _Day:
@@ -662,7 +749,8 @@ class _Adapter:
         self._cancel_job: Callable[[], None] | None = None
 
     # ------------------------------------------------------------------
-    # On the trading thread: three reads and an append
+    # On the trading thread: three reads and an append — and, for a kind
+    # that carries a picture, a copy of the candles it shows
     # ------------------------------------------------------------------
 
     def __call__(self, event: TraderEvent) -> None:
@@ -671,13 +759,30 @@ class _Adapter:
         view = self.view
         price = view.last_price() if view is not None else None
         anchor = view.candle_anchor() if view is not None else None
-        notifier._post(lambda: self._handle(event, received, price, anchor))
+        scene = None
+        if view is not None and event.event_type in notifier._images:
+            scene = self._capture(event)
+        notifier._post(lambda: self._handle(event, received, price, anchor, scene))
+
+    def _capture(self, event: TraderEvent) -> Capture | None:
+        view = self.view
+        assert view is not None
+        warmup = max(0, int(view.warmup_candles))
+        try:
+            trade = getattr(event, "trade", None)
+            if isinstance(event, CloseEvent) and trade is not None and view.timeframe_ms:
+                lead = (_CLOSE_LEAD + warmup) * view.timeframe_ms
+                return view.capture(0, since=int(trade.open_time) - lead)
+            return view.capture(PICTURE_CANDLES + warmup)
+        except Exception:  # noqa: BLE001 — a picture never costs a candle
+            return None
 
     # ------------------------------------------------------------------
     # On the notifier's thread
     # ------------------------------------------------------------------
 
-    def _handle(self, event: TraderEvent, received: float, price: Any, anchor: Any) -> None:
+    def _handle(self, event: TraderEvent, received: float, price: Any, anchor: Any,
+                scene: Capture | None = None) -> None:
         handler = {
             EVENT_SIGNAL: self._on_signal,
             EVENT_OPEN: self._on_open,
@@ -694,7 +799,9 @@ class _Adapter:
             EVENT_STOP: self._on_stop,
         }.get(event.event_type)
         if handler is not None:
-            handler(event, received, self._common(event, received, price, anchor))
+            values = self._common(event, received, price, anchor)
+            values["_scene"] = scene
+            handler(event, received, values)
 
     def _common(
         self, event: TraderEvent, received: float, price: Any, anchor: Any
@@ -769,13 +876,14 @@ class _Adapter:
         reply: Callable[[], Any] | None = None,
         edit: Callable[[], tuple[Any, str] | None] | None = None,
         coalesce: Any = None,
-        on_done: Callable[[Any, str | None], None] | None = None,
+        on_done: Callable[..., None] | None = None,
+        media: _Media | None = None,
     ) -> None:
         self.notifier._queue_event(
             dest, kind, symbol, body,
             queued_at=received,
             silent=dest.silent or kind in SILENT_KINDS or silent,
-            reply=reply, edit=edit, coalesce=coalesce, on_done=on_done,
+            reply=reply, edit=edit, coalesce=coalesce, on_done=on_done, media=media,
         )
 
     def _send(self, kind: str, event: TraderEvent, received: float,
@@ -790,14 +898,15 @@ class _Adapter:
         body = self._body(kind, values)
         if body is None:
             return
+        media = self._media(kind, event, values)
         for dest in dests:
-            self._queue(dest, kind, symbol, body, received, silent=silent)
+            self._queue(dest, kind, symbol, body, received, silent=silent, media=media)
 
     # ---- roots ---------------------------------------------------------
 
     def _root(self, dest: _Destination, symbol: str | None, trade_id: Any,
-              trade: _Trade | None) -> tuple[Any, str] | None:
-        """``(message id, text)`` of the trade's root in *dest*, if it went out."""
+              trade: _Trade | None) -> _Sent | None:
+        """The trade's root in *dest*, if it went out."""
         roots = self.hub.roots.get(dest.name)
         if not roots:
             return None
@@ -807,21 +916,24 @@ class _Adapter:
             return roots.get(("signal", self, trade.signal_time, trade.direction))
         return None
 
-    def _keep_root(self, dest: _Destination, key: tuple) -> Callable[[Any, str | None], None]:
-        def keep(message_id: Any, text: str | None) -> None:
+    def _keep_root(self, dest: _Destination, key: tuple) -> Callable[..., None]:
+        def keep(message_id: Any, text: str | None, text_id: Any = None,
+                 caption: bool = False) -> None:
             if message_id is None or text is None:
                 return   # never went out: its replies go as plain messages
             roots = self.hub.roots.setdefault(dest.name, OrderedDict())
-            roots[key] = (message_id, text)
+            # The text lives in the root itself, unless a long caption went as a reply.
+            roots[key] = _Sent(message_id, text,
+                               message_id if text_id is None else text_id, caption)
             roots.move_to_end(key)
             while len(roots) > _ROOTS_PER_CHAT:
                 roots.popitem(last=False)
         return keep
 
     def _forget_root(self, dest: _Destination, trade_id: Any,
-                     trade: _Trade) -> Callable[[Any, str | None], None]:
-        def forget(message_id: Any, text: str | None) -> None:
-            del message_id, text
+                     trade: _Trade) -> Callable[..., None]:
+        def forget(*sent: Any) -> None:
+            del sent
             roots = self.hub.roots.get(dest.name)
             if roots:
                 roots.pop(("open", self, trade_id), None)
@@ -832,7 +944,7 @@ class _Adapter:
                    trade: _Trade | None) -> Callable[[], Any]:
         def reply() -> Any:
             root = self._root(dest, symbol, trade_id, trade)
-            return None if root is None else root[0]
+            return None if root is None else root.message_id
         return reply
 
     def _trade(self, trade_id: Any) -> _Trade:
@@ -869,11 +981,12 @@ class _Adapter:
             return
         # The OPEN this signal leads to names it by its timestamp (signal_time).
         stamp = int(event.signal.timestamp) if event.signal is not None else int(event.time)
+        media = self._media(KIND_SIGNAL, event, values)
         for dest in dests:
             on_done = None
             if not self._gets(dest, KIND_OPEN, symbol):
                 on_done = self._keep_root(dest, ("signal", self, stamp, event.direction))
-            self._queue(dest, KIND_SIGNAL, symbol, body, received, on_done=on_done)
+            self._queue(dest, KIND_SIGNAL, symbol, body, received, on_done=on_done, media=media)
 
     def _on_open(self, event: OpenEvent, received: float, values: dict[str, Any]) -> None:
         trade = self._trades[event.trade_id] = _Trade()
@@ -899,8 +1012,9 @@ class _Adapter:
         body = self._body(KIND_OPEN, values) if dests else None
         if body is None:
             return
+        media = self._media(KIND_OPEN, event, values)
         for dest in dests:
-            self._queue(dest, KIND_OPEN, symbol, body, received,
+            self._queue(dest, KIND_OPEN, symbol, body, received, media=media,
                         on_done=self._keep_root(dest, ("open", self, event.trade_id)))
 
     def _on_sl_move(self, event: SlMoveEvent, received: float, values: dict[str, Any]) -> None:
@@ -924,22 +1038,23 @@ class _Adapter:
             moved = format(_template.Moment(received, self.notifier._zone), "%H:%M")
             line = (f"SL {_template.Number(trade.first_sl)} → {_template.Number(event.new_sl)} "
                     f"({cause}) · {moved}")
+        media = self._media(KIND_SL_MOVE, event, values)
         for dest in dests:
             edit = None
             if line is not None:
                 edit = self._edit_for(dest, symbol, event.trade_id, trade, line)
             self._queue(dest, KIND_SL_MOVE, symbol, body, received,
                         reply=self._reply_for(dest, symbol, event.trade_id, trade),
-                        edit=edit, coalesce=("sl_move", self, event.trade_id))
+                        edit=edit, coalesce=("sl_move", self, event.trade_id), media=media)
 
     def _edit_for(self, dest: _Destination, symbol: str | None, trade_id: Any,
-                  trade: _Trade, line: str) -> Callable[[], tuple[Any, str] | None]:
-        def edit() -> tuple[Any, str] | None:
+                  trade: _Trade, line: str) -> Callable[[], tuple[Any, str, bool] | None]:
+        def edit() -> tuple[Any, str, bool] | None:
             root = self._root(dest, symbol, trade_id, trade)
-            if root is None:
+            if root is None or root.text_id is None:
                 return None   # no root there: the move goes as a new silent message
-            message_id, text = root
-            return message_id, _with_sl_line(text, line)
+            # A picture's root: its caption, or the reply that holds a long one.
+            return root.text_id, _with_sl_line(root.text, line), root.caption
         return edit
 
     def _on_risk_free(self, event: RiskFreeEvent, received: float,
@@ -958,6 +1073,7 @@ class _Adapter:
             trade.gross += piece.gross_pnl
             trade.risk += piece.risk_amount
             trade.closed += piece.size
+            trade.slices.append(piece)
         day = self._day(received)
         day.net += event.realized_pnl
         day.realized = True
@@ -983,8 +1099,11 @@ class _Adapter:
         day = self._day(received)
         day.net += event.net_pnl
         day.realized = True
+        values["_slices"] = [*trade.slices, piece] if piece is not None else list(trade.slices)
         if partial:   # the venue reduced the position: the trade goes on
             trade.net, trade.gross, trade.risk, trade.closed = net, gross, risk, closed
+            if piece is not None:
+                trade.slices.append(piece)
         else:
             self._trades.pop(event.trade_id, None)
             day.trades += 1
@@ -1014,11 +1133,13 @@ class _Adapter:
         body = self._body(kind, values) if dests else None
         if body is None:
             return
+        media = self._media(kind, event, values)
         for dest in dests:
             self._queue(
                 dest, kind, symbol, body, received,
                 reply=self._reply_for(dest, symbol, event.trade_id, trade),
                 on_done=self._forget_root(dest, event.trade_id, trade) if final else None,
+                media=media,
             )
 
     def _on_plain(self, event: Any, received: float, values: dict[str, Any]) -> None:
@@ -1170,5 +1291,63 @@ class _Adapter:
         body = self._body(KIND_DAILY_SUMMARY, values) if dests else None
         if body is None:
             return
+        media = None
+        if KIND_DAILY_SUMMARY in notifier._images:
+            try:
+                values["_scene"] = view.capture_now(PICTURE_CANDLES + max(0, view.warmup_candles))
+            except Exception:  # noqa: BLE001 — the summary goes without its picture
+                values["_scene"] = None
+            media = self._media(KIND_DAILY_SUMMARY, None, values)
         for dest in dests:
-            self._queue(dest, KIND_DAILY_SUMMARY, symbol, body, now)
+            self._queue(dest, KIND_DAILY_SUMMARY, symbol, body, now, media=media)
+
+    # ---- pictures ------------------------------------------------------
+
+    def _media(self, kind: str, event: Any, values: dict[str, Any]) -> _Media | None:
+        """The picture a message of *kind* carries, made later by :meth:`_draw`."""
+        scene = values.get("_scene")
+        if scene is None or kind not in self.notifier._images or self.view is None:
+            return None
+        trade_id = getattr(event, "trade_id", None)
+        label = kind if trade_id is None else f"{kind} #{trade_id}"
+        slices = values.get("_slices") or []
+        return _Media(_Media.PHOTO, make=lambda: self._draw(kind, event, scene, slices),
+                      fallback=True, label=label, filename=f"{kind}.png")
+
+    def _draw(self, kind: str, event: Any, scene: Capture, slices: list[Any]) -> bytes:
+        """The picture of one message: the live chart's recipe over the candles
+        copied when the event came in."""
+        from ..simulate._report import _build_trade_markers
+        from ..visual import Chart
+        from ..visual.indicator_renderer import populate_chart
+
+        view = self.view
+        assert view is not None
+        frame = scene.frame()
+        if not len(frame):
+            raise ValueError("no candles to draw")
+        stamps = frame["timestamp"]
+        positions = list(scene.positions)
+        markers: list[dict] = []
+        first = int(stamps.iloc[max(0, len(frame) - PICTURE_CANDLES)])
+        last = int(stamps.iloc[-1])
+        if kind == KIND_SIGNAL:   # the position the signal proposes
+            when = int(event.signal.timestamp) if event.signal is not None else last
+            positions = [_Drawn(when, float(event.entry_price), float(event.stop_loss),
+                                event.direction, -1, event.take_profit)]
+        elif kind == KIND_OPEN:
+            when = int(event.signal_time if event.signal_time is not None else event.time)
+            positions = [_Drawn(when, float(event.fill_price), float(event.stop_loss),
+                                event.direction, event.trade_id, event.next_tp)]
+        elif kind == KIND_CLOSE and slices:
+            markers = _build_trade_markers(slices)
+            positions = [p for p in positions if p.trade_id != event.trade_id]
+            opened = int(slices[0].open_time)
+            lead = _CLOSE_LEAD * (view.timeframe_ms or 0)
+            first = max(int(stamps.iloc[0]), opened - lead)
+            last = max(first, min(last, int(slices[-1].close_time)))
+        chart = Chart(title=view.symbol, source_timeframe=view.timeframe or None)
+        populate_chart(chart, frame, indicators=view.chart_indicators, drawings=view.drawings,
+                       trade_markers=markers, open_positions=positions,
+                       config=view.picture_config)
+        return chart.screenshot(first, last, timezone=self.notifier._zone)
