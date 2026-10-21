@@ -56,6 +56,14 @@ Work for the trade-event adapter
     A message can reply to an earlier one, or edit it, resolved just before it
     goes, once the earlier one's id is known; a backend without replies or edits
     sends a plain new message instead.
+Pictures and files (v1.2.0)
+    ``send_photo``, ``send_chart`` and ``send_report`` send a picture or a file
+    through the same queue, as messages of kind ``text``; its text is the caption.
+    A picture is made on the sender thread, just before its message is first tried,
+    and once for every destination.  A caption too long for the backend goes as a
+    reply to the picture.  A trade's picture that cannot be made lets its message
+    go as text; a picture you asked for is not sent without it.  A backend that
+    cannot send pictures sends the text alone.
 
 Lines are printed from the notifier's own threads, never the caller's:
 ``[AlgoTradeKit] telegram: …``.
@@ -72,7 +80,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import _template
 
@@ -112,6 +120,13 @@ SILENT_KINDS = frozenset({KIND_SL_MOVE, KIND_RISK_FREE, KIND_DAILY_SUMMARY})
 
 #: The fields of a ``templates={"text": …}`` wrapper: the text, then a custom text's own.
 _WRAPPER_FIELDS = (KIND_TEXT, *_template.TEXT_FIELDS)
+
+#: Kinds that name no pair, so ``images=`` cannot picture them (``send_chart`` makes
+#: a picture for a text).
+_NO_PICTURE = frozenset({KIND_TEXT, KIND_START, KIND_STOP})
+
+#: How many candles a picture shows when nothing says otherwise.
+PICTURE_CANDLES = 100
 
 #: At most this many messages wait; past it the oldest are dropped.
 MAX_WAITING = 1_000
@@ -177,6 +192,23 @@ def check_kinds(names: Iterable[str]) -> None:
     for name in sorted(names):
         if name not in KINDS:
             raise ValueError(f"unknown kind {name!r} — known: {', '.join(KINDS)}")
+
+
+def _check_images(images: Any) -> frozenset[str]:
+    """``images={kind, …}``: known kinds, each one that names a pair."""
+    if images is None:
+        return frozenset()
+    if isinstance(images, str) or not isinstance(images, Iterable):
+        raise TypeError(f'images must be a set of kinds such as {{"open", "close"}}, '
+                        f"got {type(images).__name__}")
+    kinds = frozenset(images)
+    check_kinds(kinds)
+    for kind in sorted(kinds):
+        if kind in _NO_PICTURE:
+            allowed = ", ".join(k for k in KINDS if k not in _NO_PICTURE)
+            raise ValueError(f"images: {kind!r} names no pair — a picture shows one pair's "
+                             f"candles; pictures go on {allowed}")
+    return kinds
 
 
 def _check_templates(templates: Any) -> dict[str, str | None]:
@@ -337,6 +369,59 @@ class _Outcome:
         self.retry_after = retry_after
 
 
+class _Sent(NamedTuple):
+    """A message that went out, as ``on_done`` hears of it: the id of its first
+    message, its text as it went, and where that text can be edited — the same
+    message (``caption`` tells whether as a picture's caption), or the reply that
+    holds a caption too long for its picture."""
+
+    message_id: Any
+    text: str | None
+    text_id: Any = None
+    caption: bool = False
+
+
+class _Media:
+    """A picture or a file that a message carries (v1.2.0).
+
+    ``data`` is its bytes, or ``None`` until ``make()`` makes them, on the sender
+    thread just before the message is first tried — once, whatever the number of
+    destinations.  When it cannot be made, a ``fallback`` message goes as text,
+    with one line naming ``label``; any other is not sent."""
+
+    PHOTO = "photo"
+    DOCUMENT = "document"
+
+    __slots__ = ("kind", "data", "make", "filename", "fallback", "label", "error", "lock")
+
+    def __init__(
+        self, kind: str, *, data: bytes | None = None,
+        make: Callable[[], bytes] | None = None, filename: str = "", fallback: bool = False,
+        label: str = "",
+    ) -> None:
+        self.kind = kind
+        self.data = data
+        self.make = make
+        self.filename = filename or ("picture.png" if kind == _Media.PHOTO else "file")
+        self.fallback = fallback
+        self.label = label
+        self.error: str | None = None      # why it could not be made, once tried
+        self.lock = threading.Lock()
+
+    def resolve(self) -> bytes | None:
+        """The data, made now if need be; ``None`` (and ``error``) when it cannot be."""
+        with self.lock:
+            if self.data is None and self.error is None and self.make is not None:
+                try:
+                    self.data = self.make()
+                except Exception as exc:  # noqa: BLE001 — the message decides what to do
+                    said = str(exc).strip()
+                    self.error = said if said else type(exc).__name__
+                finally:
+                    self.make = None
+            return self.data
+
+
 class _Destination:
     """One named destination: the backend's address, its filters and its queue."""
 
@@ -405,13 +490,17 @@ class _Waiter:
 
 
 class _Message:
-    __slots__ = ("kind", "symbol", "body", "queued_at")
+    __slots__ = ("kind", "symbol", "body", "queued_at", "media")
 
-    def __init__(self, kind: str, symbol: str | None, body: str, queued_at: float) -> None:
+    def __init__(
+        self, kind: str, symbol: str | None, body: str, queued_at: float,
+        media: _Media | None = None,
+    ) -> None:
         self.kind = kind
         self.symbol = symbol
-        self.body = body
+        self.body = body                  # with a picture or a file: its caption
         self.queued_at = queued_at        # wall time, for the late marker
+        self.media = media
 
 
 class _Delivery:
@@ -426,13 +515,18 @@ class _Delivery:
       new message after all;
     * ``coalesce`` — a newer delivery with the same key, to the same destination,
       replaces this one while it waits;
-    * ``on_done(message_id, text)`` — called once it is done: with the id and the
-      text of its first part when it went out, with ``None`` and ``None`` when not.
+    * ``on_done(message_id, text, text_id, caption)`` — called once it is done,
+      with what a :class:`_Sent` holds when it went out, and with ``None, None,
+      None, False`` when not.
+
+    An ``edit()`` may also say ``(message id, text, True)``: the text is a
+    picture's caption.
     """
 
     __slots__ = (
         "seq", "message", "dest", "silent", "waiter", "parts", "next_part", "first_id", "done",
-        "reply", "edit", "coalesce", "on_done", "first_text", "editing",
+        "reply", "edit", "coalesce", "on_done", "first_text", "editing", "edit_caption",
+        "media", "caption", "text_id",
     )
 
     def __init__(
@@ -451,9 +545,13 @@ class _Delivery:
         self.reply: Callable[[], Any] | None = None
         self.edit: Callable[[], tuple[Any, str] | None] | None = None
         self.coalesce: Hashable | None = None
-        self.on_done: Callable[[Any, str | None], None] | None = None
+        self.on_done: Callable[..., None] | None = None
         self.first_text: str | None = None    # the first part as it went out
         self.editing: Any = None              # the message the attempt on its way edits
+        self.edit_caption = False             # … and whether that is a caption
+        self.media: _Media | None = message.media   # None once it goes as text
+        self.caption = False                  # the text rides as the picture's caption
+        self.text_id: Any = None              # the message holding the text
 
 
 class _Job:
@@ -464,6 +562,13 @@ class _Job:
         self.hour = hour
         self.minute = minute
         self.next_at = next_at
+
+
+def _png_size(data: bytes) -> tuple[int, int] | None:
+    """A PNG's width and height from its header; ``None`` for anything else."""
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
 
 
 # ---------------------------------------------------------------------------
@@ -534,17 +639,29 @@ class Notifier:
     _can_reply = False
     #: Can an earlier message be edited (:meth:`_edit`)?
     _can_edit = False
+    #: Can a message carry a picture or a file (:meth:`_deliver_media`)?  Without it,
+    #: a picture's text goes alone.
+    _can_send_media = False
+    #: The longest caption a picture may hold, as :meth:`_measure` counts it.
+    _max_caption = 1024
+    #: The largest picture and file the service takes, in bytes; a picture's width +
+    #: height, and its longer side over its shorter one.
+    _max_photo_bytes = 10 * 1024 * 1024
+    _max_photo_sides = 10_000
+    _max_photo_ratio = 20.0
+    _max_document_bytes = 50 * 1024 * 1024
     #: The clock; tests replace it.
     _clock = _SystemClock()
 
     def __init__(
         self, destinations: Mapping[str, _Destination], *, zone: tzinfo | None, rich: bool,
-        templates: Mapping[str, str | None] | None = None,
+        templates: Mapping[str, str | None] | None = None, images: Iterable[str] | None = None,
     ) -> None:
         self._destinations = dict(destinations)
         self._zone = zone
         self._rich = rich
         self._templates = _check_templates(templates)
+        self._images = _check_images(images)
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)       # wakes the sender
         self._finished = threading.Condition(self._lock)   # a delivery ended
@@ -567,7 +684,7 @@ class Notifier:
         self._probe_at = 0.0
         self._down_line_at: float | None = None
         self._inbox: deque[Callable[[], None]] = deque()   # work the sender runs
-        self._callbacks: list[tuple[Callable[[Any, str | None], None], Any, str | None]] = []
+        self._callbacks: list[tuple[Callable[..., None], tuple]] = []
         self._working = False                 # the sender is running work or callbacks
         self._local = threading.local()       # .generation: on a sender thread, its own
         self._jobs_lock = threading.Lock()
@@ -595,6 +712,19 @@ class Notifier:
         """Replace the text of message *message_id* in *dest* (a backend with
         :attr:`_can_edit`).  ``"sent"`` when done — an edit that changes nothing
         counts as done; ``"refused"`` makes it a new message instead."""
+        raise NotImplementedError
+
+    def _edit_caption(self, dest: _Destination, message_id: Any, text: str) -> _Outcome:
+        """Replace the caption of picture *message_id* in *dest*, as :meth:`_edit`
+        replaces a text."""
+        raise NotImplementedError
+
+    def _deliver_media(
+        self, dest: _Destination, media: _Media, data: bytes, caption: str | None, *,
+        silent: bool, reply_to: Any = None,
+    ) -> _Outcome:
+        """Send *data* — ``media.kind`` says a picture or a file — to *dest*, with
+        *caption* (a backend with :attr:`_can_send_media`).  Never raises."""
         raise NotImplementedError
 
     @staticmethod
@@ -652,9 +782,17 @@ class Notifier:
 
         Mistakes in the text raise ``ValueError`` here, before anything is queued.
         """
+        body = self._custom_text(text, symbol=symbol, broker=broker)
+        if body is None:
+            return {}   # templates={"text": None}: custom texts are not sent
+        return self._enqueue(KIND_TEXT, body, symbol=symbol, to=to, silent=silent, wait=wait)
+
+    def _custom_text(self, text: str, *, symbol: str | None, broker: Any) -> str | None:
+        """*text* with its placeholders filled in, inside the ``text`` wrapper when
+        there is one; ``None`` with ``templates={"text": None}``."""
         names = _template.fields_of(text, _template.TEXT_FIELDS)
         if KIND_TEXT in self._templates and self._templates[KIND_TEXT] is None:
-            return {}   # templates={"text": None}: custom texts are not sent
+            return None
         wrapper = self._templates.get(KIND_TEXT)
         if wrapper is not None:
             names += [
@@ -669,7 +807,121 @@ class Notifier:
             body = _template.render(
                 wrapper, {**values, KIND_TEXT: _template.Markup(body)}, escape=self._rich
             )
-        return self._enqueue(KIND_TEXT, body, symbol=symbol, to=to, silent=silent, wait=wait)
+        return body
+
+    # ------------------------------------------------------------------
+    # Pictures and files (v1.2.0)
+    # ------------------------------------------------------------------
+
+    def send_photo(
+        self,
+        png: bytes,
+        caption: str | None = None,
+        *,
+        to: str | int | list | tuple | set | None = None,
+        symbol: str | None = None,
+        broker: Any = None,
+        silent: bool | None = None,
+        wait: bool = True,
+    ) -> dict[str, Any]:
+        """Send a picture you made — its bytes, PNG or JPEG — to the chats it is for.
+
+        The caption takes the placeholders a text does (``symbol=`` and ``broker=``
+        serve ``{symbol}`` and ``{price}``), inside a ``templates={"text": …}``
+        wrapper when there is one.  A caption too long for one picture goes as a
+        reply to it.  ``to``, ``silent`` and ``wait`` and what comes back are as for
+        :meth:`send_text`: with ``wait=True``, ``{name: id of the picture}``."""
+        data = self._picture_bytes(png)
+        body = "" if caption is None else self._custom_text(caption, symbol=symbol, broker=broker)
+        if body is None:
+            return {}
+        media = _Media(_Media.PHOTO, data=data)
+        return self._enqueue(KIND_TEXT, body, symbol=symbol, to=to, silent=silent, wait=wait,
+                             media=media)
+
+    def send_chart(
+        self,
+        chart: Any = None,
+        start: Any = None,
+        end: Any = None,
+        *,
+        broker: Any = None,
+        symbol: str | None = None,
+        timeframe: str | None = None,
+        indicators: list[dict] | None = None,
+        caption: str | None = None,
+        to: str | int | list | tuple | set | None = None,
+        silent: bool | None = None,
+        wait: bool = True,
+    ) -> dict[str, Any]:
+        """Send a picture of a chart, from *start* to *end*, both inclusive.
+
+        * ``send_chart(chart, start, end)`` photographs a ``Chart`` you built, with
+          whatever it holds: indicators, drawings, trades.
+        * ``send_chart(broker=…, symbol="BTCUSDT", timeframe="15m", start=…,
+          end=…, indicators=[{"kind": "ema", "period": 20}])`` fetches the candles
+          now, on this thread — a wrong symbol raises here — and photographs them.
+          ``end=None`` is now and ``start=None`` 100 candles before it.
+
+        ``start`` and ``end`` take what a chart's ``candle_range`` takes.  The time
+        axis and the title line read in the notifier's zone.  The picture is made
+        on the notifier's thread; a picture that cannot be made is not sent, and
+        with ``wait=True`` that raises.  Needs the ``[notify]`` extra and its
+        browser: ``pip install "AlgoTradeKit[notify]"``, then ``playwright install
+        chromium``.  The rest is as :meth:`send_photo`."""
+        from . import _pictures
+
+        make = _pictures.chart_maker(
+            self, chart, start, end, broker=broker, symbol=symbol, timeframe=timeframe,
+            indicators=indicators,
+        )
+        body = "" if caption is None else self._custom_text(caption, symbol=symbol, broker=broker)
+        if body is None:
+            return {}
+        media = _Media(_Media.PHOTO, make=make)
+        return self._enqueue(KIND_TEXT, body, symbol=symbol, to=to, silent=silent, wait=wait,
+                             media=media)
+
+    def send_report(
+        self,
+        report: Any,
+        *,
+        title: str | None = None,
+        to: str | int | list | tuple | set | None = None,
+    ) -> dict[str, Any]:
+        """Send a backtest's ``SimulateReport`` as three messages: its figures as
+        text, its balance curve as a picture, and the HTML report as a file.
+
+        Waits until each is sent and returns ``{name: id of the text}``; raises as
+        :meth:`send_text` does.  Without a balance history there is no picture, and
+        a report file over the service's limit is left out, with one line."""
+        from . import _pictures
+
+        return _pictures.send_report(self, report, title=title, to=to)
+
+    def _picture_bytes(self, png: Any) -> bytes:
+        """*png* as bytes, checked against the service's limits for a picture."""
+        if isinstance(png, str):
+            raise TypeError("a picture is its bytes (PNG or JPEG), not a path: "
+                            "send_photo(open(path, 'rb').read())")
+        if not isinstance(png, (bytes, bytearray, memoryview)):
+            raise TypeError(f"a picture is its bytes (PNG or JPEG), got {type(png).__name__}")
+        data = bytes(png)
+        if not data:
+            raise ValueError("the picture is empty")
+        if len(data) > self._max_photo_bytes:
+            raise ValueError(f"the picture is {len(data) / 1e6:.1f} MB — {self._service} takes "
+                             f"at most {self._max_photo_bytes / 1024 / 1024:g} MB")
+        size = _png_size(data)
+        if size is not None:
+            width, height = size
+            if width + height > self._max_photo_sides:
+                raise ValueError(f"the picture is {width}×{height} — {self._service} takes a "
+                                 f"width + height of at most {self._max_photo_sides:,}")
+            if max(width, height) > self._max_photo_ratio * max(1, min(width, height)):
+                raise ValueError(f"the picture is {width}×{height} — {self._service} takes "
+                                 f"one side at most {self._max_photo_ratio:g} times the other")
+        return data
 
     def _select(self, kind: str, symbol: str | None, to: Any) -> list[_Destination]:
         if to is None:
@@ -688,16 +940,16 @@ class Notifier:
 
     def _enqueue(
         self, kind: str, body: str, *, symbol: str | None, to: Any, silent: bool | None,
-        wait: bool,
+        wait: bool, media: _Media | None = None,
     ) -> dict[str, Any]:
-        """Queue *body* for every destination it is for; with *wait*, block until each
-        has it."""
+        """Queue *body* — with *media*, its caption — for every destination it is for;
+        with *wait*, block until each has it."""
         dests = self._select(kind, symbol, to)
-        if not _visible(body, self._rich).strip():
+        if media is None and not _visible(body, self._rich).strip():
             raise ValueError("the text is empty")
         if not dests:
             return {}
-        message = _Message(kind, symbol, body, self._clock.time())
+        message = _Message(kind, symbol, body, self._clock.time(), media)
         waiter = _Waiter(len(dests), self._clock.monotonic()) if wait else None
         with self._lock:
             self._ensure_thread_locked()
@@ -761,12 +1013,14 @@ class Notifier:
         reply: Callable[[], Any] | None = None,
         edit: Callable[[], tuple[Any, str] | None] | None = None,
         coalesce: Hashable | None = None,
-        on_done: Callable[[Any, str | None], None] | None = None,
+        on_done: Callable[..., None] | None = None,
+        media: _Media | None = None,
     ) -> None:
         """Queue one message for one destination (see :class:`_Delivery` for
-        *reply*, *edit*, *coalesce* and *on_done*).  *queued_at* is the wall time the
-        late marker counts from: when the event was received."""
-        message = _Message(kind, symbol, body, queued_at)
+        *reply*, *edit*, *coalesce* and *on_done*; *media* is a picture the body is
+        the caption of).  *queued_at* is the wall time the late marker counts from:
+        when the event was received."""
+        message = _Message(kind, symbol, body, queued_at, media)
         with self._lock:
             stale = getattr(self._local, "generation", None)
             if stale is not None and stale != self._generation:
@@ -852,14 +1106,14 @@ class Notifier:
 
     def _run_work(
         self,
-        callbacks: list[tuple[Callable[[Any, str | None], None], Any, str | None]],
+        callbacks: list[tuple[Callable[..., None], tuple]],
         work: list[Callable[[], None]],
     ) -> None:
         """The adapter's callbacks, then its work, on the sender thread, outside the
         lock: a failure prints one line and never stops the sender."""
-        for callback, message_id, text in callbacks:
+        for callback, sent in callbacks:
             try:
-                callback(message_id, text)
+                callback(*sent)
             except Exception as exc:  # noqa: BLE001 — the sender must outlive any one message
                 self._say(f"could not keep track of a message ({type(exc).__name__}: {exc})")
         for item in work:
@@ -939,28 +1193,66 @@ class Notifier:
     def _attempt(self, delivery: _Delivery) -> _Outcome:
         """Send the delivery's next part.  The first part carries the late marker,
         and the split is worked out with it, so the marker never pushes a part past
-        the limit.  An edit, and the message a reply answers, are resolved here,
-        just before the first part goes."""
+        the limit.  An edit, the message a reply answers, and a picture are resolved
+        here, just before the first part goes."""
         reply_to = None
         if delivery.next_part == 0:
             delivery.editing = None
+            delivery.edit_caption = False
             if delivery.edit is not None and self._can_edit:
                 target = delivery.edit()
                 if target is not None:
-                    delivery.editing, delivery.first_text = target
-                    return self._edit(delivery.dest, delivery.editing, delivery.first_text)
+                    message_id, text, *how = target
+                    delivery.editing, delivery.first_text = message_id, text
+                    delivery.edit_caption = bool(how and how[0])
+                    if delivery.edit_caption:
+                        return self._edit_caption(delivery.dest, message_id, text)
+                    return self._edit(delivery.dest, message_id, text)
+            media = delivery.media
+            if media is not None and not self._can_send_media:
+                delivery.media = media = None            # the text goes alone
+            if media is not None and media.resolve() is None:
+                if not media.fallback:
+                    return _Outcome("refused", reason=f"could not make the picture ({media.error})")
+                self._say(f"no picture for {media.label} — {media.error}; sent as text")
+                delivery.media = media = None
             body = delivery.message.body
             late = self._clock.time() - delivery.message.queued_at
             if late >= _LATE_AFTER:
-                body = f"⏱ {int(late // 60)} min late\n{body}"
-            delivery.parts = split_text(
-                body, self._max_length, rich=self._rich, measure=self._measure
-            )
-            delivery.first_text = delivery.parts[0]
+                marker = f"⏱ {int(late // 60)} min late"
+                body = f"{marker}\n{body}" if body else marker
+            if media is not None:
+                if self._measure(body) <= self._max_caption:
+                    delivery.parts, delivery.caption = [body], bool(body)
+                    delivery.first_text = body
+                else:   # the picture alone, then its text as replies to it
+                    delivery.parts = ["", *split_text(
+                        body, self._max_length, rich=self._rich, measure=self._measure
+                    )]
+                    delivery.caption = False
+                    delivery.first_text = delivery.parts[1]
+            else:
+                if not _visible(body, self._rich).strip():
+                    return _Outcome("refused", reason=f"{self._service} takes no pictures here, "
+                                                      "and this one has no caption")
+                delivery.parts = split_text(
+                    body, self._max_length, rich=self._rich, measure=self._measure
+                )
+                delivery.first_text = delivery.parts[0]
             if delivery.reply is not None and self._can_reply:
                 reply_to = delivery.reply()
         assert delivery.parts is not None
         text = delivery.parts[delivery.next_part]
+        if delivery.media is not None:
+            if delivery.next_part == 0:
+                data = delivery.media.data
+                assert data is not None
+                return self._deliver_media(delivery.dest, delivery.media, data, text or None,
+                                           silent=delivery.silent, reply_to=reply_to)
+            if self._can_reply and delivery.first_id is not None:
+                return self._deliver(delivery.dest, text, silent=delivery.silent,
+                                     reply_to=delivery.first_id)
+            return self._deliver(delivery.dest, text, silent=delivery.silent)
         if reply_to is not None:
             return self._deliver(delivery.dest, text, silent=delivery.silent, reply_to=reply_to)
         return self._deliver(delivery.dest, text, silent=delivery.silent)
@@ -984,11 +1276,16 @@ class Notifier:
             pace.sent.append(now)
             dest.failures = 0
             if delivery.editing is not None:   # an edit: one request, and it is done
-                delivery.first_id = delivery.editing
+                delivery.first_id = delivery.text_id = delivery.editing
+                delivery.caption = delivery.edit_caption
                 self._finish_locked(delivery)
                 return
             if delivery.next_part == 0:
                 delivery.first_id = outcome.message_id
+                if delivery.media is None or delivery.caption:
+                    delivery.text_id = outcome.message_id
+            elif delivery.next_part == 1 and delivery.media is not None:
+                delivery.text_id = outcome.message_id   # the reply holding the caption
             delivery.next_part += 1
             assert delivery.parts is not None
             if delivery.next_part >= len(delivery.parts):
@@ -1002,6 +1299,7 @@ class Notifier:
             pace.sent.append(now)
             dest.failures = 0
             delivery.edit = delivery.editing = delivery.first_text = None
+            delivery.edit_caption = False
         elif outcome.status == "refused":
             pace.sent.append(now)
             dest.failures = 0
@@ -1070,9 +1368,11 @@ class Notifier:
         self._waited.discard(delivery)
         if delivery.on_done is not None:
             if reason is None:
-                self._callbacks.append((delivery.on_done, delivery.first_id, delivery.first_text))
+                sent = _Sent(delivery.first_id, delivery.first_text or "", delivery.text_id,
+                             delivery.caption)
             else:
-                self._callbacks.append((delivery.on_done, None, None))
+                sent = _Sent(None, None, None, False)
+            self._callbacks.append((delivery.on_done, tuple(sent)))
         waiter = delivery.waiter
         if waiter is not None:
             if reason is None:
