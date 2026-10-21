@@ -302,6 +302,7 @@ class LiveSimulation:
         self._slices: dict[int, list[ClosedTrade]] = {}   # partial closes per open trade
         self._sl_seen: dict[int, int] = {}                # sl_history entries already emitted
         self._live_drawings: dict[int, str] = {}          # trade_id -> chart drawing id
+        self._strategy_drawings: list[dict] = []          # the seed's, for pictures (v1.2.0)
         self._seeded = False
         self._lock = threading.Lock()
 
@@ -367,6 +368,7 @@ class LiveSimulation:
             df = self._fetch_seed_df()
             result = self.strategy.run({self._tf: df}, mode=StrategyMode.BACKTEST)
             self._data = result.data
+            self._strategy_drawings = list(result.drawings)
 
             stepper = SimulationStepper(self.config)
             self._stepper = stepper
@@ -699,7 +701,7 @@ class LiveSimulation:
         import time as _time
 
         from ..visual import Chart
-        from ..visual.indicator_renderer import add_strategy_drawings, draw_trade_group
+        from ..visual.indicator_renderer import populate_chart
 
         config = self.config
         tf = self._tf
@@ -710,31 +712,17 @@ class LiveSimulation:
             port=self._chart_port,
             candle_count_limit=self._candle_count_limit,
         )
-        chart.set_data(self._data[tf])
-
-        # Pre-load caller-requested indicators — seed-time computation, same
-        # as the batch chart (not recomputed per live candle; see module doc).
-        for spec in config.chart_indicators or []:
-            try:
-                chart.add_indicator_spec(dict(spec))
-            except Exception as exc:   # a bad spec must never abort the chart
-                warnings.warn(f"chart_indicators: skipped {spec!r} ({exc})")
-
-        if result.drawings:
-            add_strategy_drawings(chart, result)
-
-        # Completed trades get the standard posbox + SL/TP segments; trades
-        # still open at seed end are drawn as live positions instead.
-        open_ids = {p.trade_id for p in self._stepper.open_positions}
-        groups: dict[int, list[dict]] = {}
-        for marker in report.trade_markers:
-            groups.setdefault(marker["trade_id"], []).append(marker)
-        for tid, markers in groups.items():
-            if tid in open_ids:
-                continue
-            draw_trade_group(chart, markers, opacity=0.15, config=config)
-        for pos in self._stepper.open_positions:
-            self._add_live_drawing(chart, pos)
+        # The recipe the pictures of trade messages use too (v1.2.0). Indicators
+        # are a seed-time computation, as on the batch chart (not recomputed per
+        # live candle; see module doc).
+        self._live_drawings.update(populate_chart(
+            chart, self._data[tf],
+            indicators=config.chart_indicators,
+            drawings=result.drawings,
+            trade_markers=report.trade_markers,
+            open_positions=self._stepper.open_positions,
+            config=config,
+        ))
 
         chart.show(open_browser=self._open_browser, block=False)
         _time.sleep(0.4)   # let the server start before the report links it
@@ -789,16 +777,9 @@ class LiveSimulation:
 
     def _add_live_drawing(self, chart, pos) -> None:
         """Draw an open position as a live drawing (``LivePosition``)."""
-        next_tp = pos.sl_history[-1]["next_tp"] if pos.sl_history else pos.next_tp
-        drawing_id = chart.add_live_position(
-            open_time=pos.open_time // 1000,
-            entry_price=pos.entry_price,
-            stop_loss=pos.stop_loss,
-            direction=pos.direction,
-            next_tp=next_tp,
-            trade_id=pos.trade_id,
-        )
-        self._live_drawings[pos.trade_id] = drawing_id
+        from ..visual.indicator_renderer import add_open_position
+
+        self._live_drawings[pos.trade_id] = add_open_position(chart, pos)
 
     def _finalize_trade_drawing(self, trade_id: int) -> None:
         """A trade fully closed: drop its live drawing and draw the final
