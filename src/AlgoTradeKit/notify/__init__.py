@@ -21,6 +21,8 @@ Classes
                         (``thread_id``), no sound (``silent``), and filters — the
                         kinds it gets (``events``) and its ``symbols``.
     TelegramChatInfo    One chat as ``find_chats`` reports it.
+    Alert               A price alert, as ``watch()`` returns it: its condition, its
+                        state, how often it fired; ``cancel()`` ends it.
 
 Errors
     NotifyError         The base error of this module.
@@ -36,6 +38,7 @@ Constants
     KIND_START / KIND_STOP
                         A trading session's start and stop.
     KIND_DAILY_SUMMARY  The day's summary, at 00:00 in the notifier's zone.
+    KIND_ALERT          A price alert's message.
 
 A chat's ``events`` picks its kinds; by default it gets all of them but
 ``sl_move``, which edits the trade's first message instead where a chat asks for
@@ -48,6 +51,13 @@ a ``timezone``.  ``templates={kind: text}`` replaces a kind's default text.
 
 Trading events arrive through ``TraderConfig(notifiers=[bot])``, for ``run_live``
 and ``Trader`` alike.
+
+Price alerts (v1.2.0)
+    ``watch(broker, "BTCUSDT", above=65_000)`` sends «🔔 BTCUSDT crossed above 65,000 ·
+    now 65,012.5» when the last trade crosses the level, with no strategy and no trading;
+    ``below=``, ``move_pct=-3, window="1h"``, ``on_close="1h"``, ``repeat=True`` and
+    ``image=True`` shape it.  ``alerts()`` lists them, ``cancel()`` ends one, and
+    ``wait()`` keeps a script alive until none is armed.
 
 Pictures (v1.2.0)
     ``send_chart(chart, start, end)`` sends a picture of a ``Chart`` you built, or
@@ -67,6 +77,7 @@ chromium``).
 """
 
 from ._core import (
+    KIND_ALERT,
     KIND_CLOSE,
     KIND_DAILY_LOSS,
     KIND_DAILY_SUMMARY,
@@ -107,4 +118,16 @@ __all__ = [
     "KIND_START",
     "KIND_STOP",
     "KIND_DAILY_SUMMARY",
+    "KIND_ALERT",
+    "Alert",
 ]
+
+
+def __getattr__(name: str):
+    """``Alert`` lives in ``_alerts``, loaded with the first alert: importing the module
+    loads only what a text needs."""
+    if name == "Alert":
+        from ._alerts import Alert
+
+        return Alert
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
