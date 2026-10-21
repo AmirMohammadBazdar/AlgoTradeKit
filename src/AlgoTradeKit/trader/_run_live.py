@@ -111,7 +111,16 @@ from ._events import (
     TpLevelEvent,
     attach_terminal_printer,
 )
-from ._notify import NotifySession, OpenPosition, PairView, message_hook, wire_notifiers
+from ._notify import (
+    Capture,
+    NotifySession,
+    OpenPosition,
+    PairView,
+    candles_of,
+    drawn,
+    message_hook,
+    wire_notifiers,
+)
 from ._scheduler import timeframe_ms
 
 #: Cadence of the blocking wait loop's liveness check (seconds).
@@ -494,12 +503,21 @@ class _PaperView(PairView):
 
     def __init__(self, session: _PaperSession) -> None:
         self._session = session
-        self.symbol = session.pair.config.symbol
+        config = session.pair.config
+        self.symbol = config.symbol
         self.timeframe = session.pair.strategy.primary_timeframe
         try:
             self.timeframe_ms = timeframe_ms(self.timeframe)
         except ValueError:
             self.timeframe_ms = None   # "1M": months have no fixed length
+        self.chart_indicators = tuple(dict(spec) for spec in config.chart_indicators)
+        self.picture_config = config
+        self.warmup_candles = max(200, int(session.pair.strategy.warmup_period or 0))
+
+    @property
+    def drawings(self) -> tuple:   # the seed's, as the live chart draws them
+        sim = self._session.sim
+        return tuple(sim._strategy_drawings) if sim is not None else ()
 
     def _newest(self, column: str) -> Any:
         sim = self._session.sim
@@ -537,6 +555,24 @@ class _PaperView(PairView):
                          float(pos.size), float(pos.stop_loss))
             for pos in positions
         ]
+
+    def capture(self, rows: int, since: int | None = None) -> Capture | None:
+        """On the feed thread, inside the sim's step (which holds its lock)."""
+        sim = self._session.sim
+        if sim is None or not sim.seeded or sim.stepper is None:
+            return None
+        frame = sim.data.get(self.timeframe)
+        if frame is None or not len(frame):
+            return None
+        return Capture(candles_of(frame, rows, since),
+                       tuple(drawn(pos) for pos in sim.stepper.open_positions))
+
+    def capture_now(self, rows: int) -> Capture | None:
+        sim = self._session.sim
+        if sim is None:
+            return None
+        with sim._lock:
+            return self.capture(rows)
 
 
 def _build_session(pair: TraderPair, notify_session: NotifySession) -> _PaperSession:
