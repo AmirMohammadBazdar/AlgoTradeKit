@@ -49,9 +49,21 @@ a ``timezone``.  ``templates={kind: text}`` replaces a kind's default text.
 Trading events arrive through ``TraderConfig(notifiers=[bot])``, for ``run_live``
 and ``Trader`` alike.
 
-The module imports no other part of AlgoTradeKit: a broker arrives as an object.
-Text needs nothing beyond the core install; a SOCKS proxy needs
-``pip install "AlgoTradeKit[notify]"``.
+Pictures (v1.2.0)
+    ``send_chart(chart, start, end)`` sends a picture of a ``Chart`` you built, or
+    with ``broker=``, ``symbol=`` and ``timeframe=`` of a venue's candles between
+    two datetimes; ``send_photo(png)`` sends one you made; ``send_report(report)``
+    sends a backtest's figures, its balance curve and its HTML report.
+    ``TelegramNotifier(…, images={"open", "close"})`` puts a picture of the pair's
+    chart on those kinds of trade message, its text as the caption.  A headless
+    Chromium photographs the library's own chart page, on the notifier's thread.
+
+The module imports no other part of AlgoTradeKit when it is imported: a broker
+arrives as an object, and the chart and the report are loaded only to make a
+picture.  Text needs nothing beyond the core install; a SOCKS proxy and pictures
+need ``pip install "AlgoTradeKit[notify]"``, and pictures then, once,
+``playwright install chromium`` (on Linux ``playwright install --with-deps
+chromium``).
 """
 
 from ._core import (
