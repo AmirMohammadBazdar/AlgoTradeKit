@@ -37,6 +37,7 @@ from test_trader import (
 
 from AlgoTradeKit.broker import ConnectionFailed
 from AlgoTradeKit.notify import (
+    KIND_ALERT,
     KIND_CLOSE,
     KIND_DAILY_LOSS,
     KIND_DAILY_SUMMARY,
@@ -370,7 +371,7 @@ class TestKinds:
                  KIND_MESSAGE, KIND_START, KIND_STOP}
         assert kinds == ALL_EVENT_TYPES
         assert KIND_DAILY_SUMMARY == "daily_summary" and KIND_TEXT == "text"
-        assert set(_core.KINDS) == kinds | {KIND_TEXT, KIND_DAILY_SUMMARY}
+        assert set(_core.KINDS) == kinds | {KIND_TEXT, KIND_DAILY_SUMMARY, KIND_ALERT}
 
     def test_an_unknown_kind_is_refused(self, make):
         with pytest.raises(ValueError, match=r"unknown kind 'sginal' — known: text, signal, "):
