@@ -21,6 +21,7 @@ python examples/02_chart_timeframes_replay.py  # timeframe switching + bar repla
 python examples/03_multi_chart_page.py         # three synced charts on one page
 python examples/04_telegram_messages.py        # text to your Telegram (needs TELEGRAM_BOT_TOKEN)
 python examples/05_telegram_paper_alerts.py    # paper trading's signals to Telegram (same)
+python examples/06_telegram_chart_picture.py   # a chart picture to Telegram (same, and the [notify] extra)
 ```
 
 > ### 🚀 New in v1.1.0 — the chart grew up
