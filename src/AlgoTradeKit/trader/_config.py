@@ -232,6 +232,11 @@ class TraderConfig:
     candle_count_limit : int | None
         Rolling window: chart and report only ever contain the last M
         candles.  ``None`` — unbounded.
+    chart_indicators : list
+        Indicator specs, as ``SimulateConfig.chart_indicators`` takes them
+        (v1.2.0): ``[{"kind": "ema", "period": 20}, …]``.  The pictures of trade
+        messages draw them, over their own candles; with ``display=True`` the
+        live chart shows them too, computed once at seed time.
     max_daily_loss : float | str | None
         Per-pair daily-loss limit: a number = account-currency $, a
         string like ``"2%"`` = percent of the UTC-day-start balance.
@@ -321,6 +326,7 @@ class TraderConfig:
     display_candles: int | None = None
     display_start: Any = None
     candle_count_limit: int | None = None
+    chart_indicators: list = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Safety
@@ -474,6 +480,7 @@ class TraderConfig:
             "risk_free_enabled": self.risk_free_enabled,
             "risk_free_at_rr": self.risk_free_at_rr,
             "force_close_on_exit_signal": self.force_close_on_exit_signal,
+            "chart_indicators": self.chart_indicators,
         }
         if self.spread is not None:
             kwargs["spread"] = self.spread
@@ -559,6 +566,7 @@ class TraderConfig:
             primary_timeframe=primary_timeframe,
             show_chart=self.display,
             report_mode=REPORT_MODE_WEBPAGE if self.display else REPORT_MODE_NONE,
+            chart_indicators=[dict(spec) for spec in self.chart_indicators],
         )
 
     def __repr__(self) -> str:
