@@ -34,6 +34,8 @@ All _series_to_tv() calls divide by 1000 when values > 1e10 (ms range).
 from __future__ import annotations
 
 import math
+import warnings
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -778,3 +780,74 @@ def add_strategy_drawings(
         chart._add_drawing(wrapped)  # broadcasts + keeps the init replay fresh
 
     return chart
+
+
+# ---------------------------------------------------------------------------
+# A live session's chart (v1.2.0): one recipe for the live chart and pictures
+# ---------------------------------------------------------------------------
+
+def add_open_position(chart: Chart, position) -> str:
+    """
+    Draw one open position as a live position and return its drawing id.
+
+    *position* has ``open_time`` (UTC ms), ``entry_price``, ``stop_loss``,
+    ``direction``, ``trade_id``, ``next_tp`` and ``sl_history``: a simulation's
+    open position, or anything shaped like one.  The newest ``sl_history`` entry
+    gives the next TP when there is one.
+    """
+    history = getattr(position, "sl_history", None)
+    next_tp = history[-1]["next_tp"] if history else position.next_tp
+    return chart.add_live_position(
+        open_time=position.open_time // 1000,
+        entry_price=position.entry_price,
+        stop_loss=position.stop_loss,
+        direction=position.direction,
+        next_tp=next_tp,
+        trade_id=position.trade_id,
+    )
+
+
+def populate_chart(
+    chart: Chart,
+    data: pd.DataFrame,
+    *,
+    indicators=(),
+    drawings=(),
+    trade_markers=(),
+    open_positions=(),
+    config=None,
+) -> dict:
+    """
+    Fill *chart* the way a live session's chart is filled (v1.2.0): the candles,
+    the indicator specs, the strategy's drawings, every closed trade as a position
+    box with its SL/TP segments, and every open position as a live position.
+
+    ``LiveSimulation``'s chart and the pictures of trade messages both call it, so
+    a picture shows a trade exactly as the live chart does.  A spec that fails is
+    skipped with a warning and never stops the chart.  Returns
+    ``{trade_id: drawing id}`` of the live positions.
+    """
+    chart.set_data(data)
+
+    # Pre-load the requested indicators — computed once, over these candles.
+    for spec in indicators or []:
+        try:
+            chart.add_indicator_spec(dict(spec))
+        except Exception as exc:   # a bad spec must never abort the chart
+            warnings.warn(f"chart_indicators: skipped {spec!r} ({exc})")
+
+    if drawings:
+        add_strategy_drawings(chart, SimpleNamespace(drawings=list(drawings)))
+
+    # Completed trades get the standard posbox + SL/TP segments; trades still
+    # open are drawn as live positions instead.
+    open_ids = {position.trade_id for position in open_positions}
+    groups: dict[int, list[dict]] = {}
+    for marker in trade_markers:
+        groups.setdefault(marker["trade_id"], []).append(marker)
+    for trade_id, markers in groups.items():
+        if trade_id in open_ids:
+            continue
+        draw_trade_group(chart, markers, opacity=0.15, config=config)
+    return {position.trade_id: add_open_position(chart, position)
+            for position in open_positions}
