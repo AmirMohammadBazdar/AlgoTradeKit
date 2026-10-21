@@ -104,12 +104,14 @@ KIND_START = "start"
 KIND_STOP = "stop"
 #: The summary of a day, sent at 00:00 in the notifier's zone.
 KIND_DAILY_SUMMARY = "daily_summary"
+#: A price alert's message (``watch``).
+KIND_ALERT = "alert"
 
 #: Every kind, in the order an error lists them.
 KINDS = (
     KIND_TEXT, KIND_SIGNAL, KIND_EXIT_SIGNAL, KIND_OPEN, KIND_SL_MOVE, KIND_RISK_FREE,
     KIND_TP_LEVEL, KIND_CLOSE, KIND_DAILY_LOSS, KIND_RECONCILE, KIND_ERROR, KIND_MESSAGE,
-    KIND_START, KIND_STOP, KIND_DAILY_SUMMARY,
+    KIND_START, KIND_STOP, KIND_DAILY_SUMMARY, KIND_ALERT,
 )
 
 #: Kinds a destination with ``events=None`` does not get: a trailing stop moves too often.
@@ -204,8 +206,11 @@ def _check_images(images: Any) -> frozenset[str]:
     kinds = frozenset(images)
     check_kinds(kinds)
     for kind in sorted(kinds):
+        if kind == KIND_ALERT:
+            raise ValueError("images: 'alert' — an alert asks for its own picture: "
+                             "watch(…, image=True)")
         if kind in _NO_PICTURE:
-            allowed = ", ".join(k for k in KINDS if k not in _NO_PICTURE)
+            allowed = ", ".join(k for k in KINDS if k not in _NO_PICTURE and k != KIND_ALERT)
             raise ValueError(f"images: {kind!r} names no pair — a picture shows one pair's "
                              f"candles; pictures go on {allowed}")
     return kinds
@@ -694,6 +699,8 @@ class Notifier:
         self._jobs_generation = 0
         self._jobs_in_wait = False
         self._jobs_seen = 0.0
+        self._alerts: list[Any] = []                           # the price alerts (watch)
+        self._alerts_changed = threading.Condition()
 
     # ------------------------------------------------------------------
     # For the backend
@@ -1406,6 +1413,8 @@ class Notifier:
         self.close()
 
     def _begin_close(self) -> None:
+        for alert in list(self._alerts):   # alerts end first: nothing new is queued
+            alert.cancel()
         with self._lock:
             self._wake_locked()
 
@@ -1445,6 +1454,95 @@ class Notifier:
                 lines, self._lines = self._lines, []
             for line in lines:
                 self._say(line)
+
+    # ------------------------------------------------------------------
+    # Price alerts (v1.2.0)
+    # ------------------------------------------------------------------
+
+    def watch(
+        self,
+        broker: Any,
+        symbol: str,
+        *,
+        above: float | None = None,
+        below: float | None = None,
+        move_pct: float | None = None,
+        window: str | None = None,
+        on_close: str | None = None,
+        repeat: bool = False,
+        rearm: float = 0.1,
+        image: bool | str = False,
+        to: str | int | list | tuple | set | None = None,
+        silent: bool | None = None,
+    ) -> Any:
+        """Send a message when *symbol*'s price does something, with no strategy and no
+        trading; returns an :class:`Alert` at once.
+
+        * ``above=65_000`` fires when the price crosses up to 65,000, and ``below=`` when
+          it crosses down; both together fire on whichever comes first.  An alert set on
+          the wrong side waits for the price to come back and cross.
+        * ``move_pct=-3, window="1h"`` fires when the price is 3% below the price one hour
+          ago (``+3``: above).
+        * The price is the last trade, from the forming 1m candle; ``on_close="1h"``
+          watches closed 1h candles instead.
+        * Once, unless ``repeat=True``: then again after the price has gone back past the
+          level by ``rearm`` percent (a move: after a window, and back short of it by
+          ``rearm``).
+        * ``image=True`` adds a picture of the last 100 candles with the level (15m, or
+          ``on_close``'s timeframe; ``image="1h"`` picks one).
+        * ``to`` and ``silent`` as for :meth:`send_text`.  The kind is ``alert``.
+
+        The broker's stream runs on its own thread; :meth:`wait` keeps a script alive.
+        A wrong symbol, a broker that cannot stream, or a picture engine that is not
+        installed raises here."""
+        from . import _alerts
+
+        return _alerts.watch(
+            self, broker, symbol, above=above, below=below, move_pct=move_pct,
+            window=window, on_close=on_close, repeat=repeat, rearm=rearm, image=image,
+            to=to, silent=silent,
+        )
+
+    def alerts(self) -> list[Any]:
+        """The alerts of this notifier that are still armed."""
+        with self._alerts_changed:
+            return [alert for alert in self._alerts if alert.state == "armed"]
+
+    def cancel(self, alert: Any) -> None:
+        """End *alert*, as ``alert.cancel()`` does."""
+        if getattr(alert, "notifier", None) is not self:
+            raise ValueError(f"{alert!r} is not an alert of this notifier")
+        alert.cancel()
+
+    def wait(self) -> None:
+        """Block until no alert is left armed — each once-alert has fired, or been
+        cancelled — or until Ctrl+C, which cancels them.  Then the alerts' last messages
+        get up to 10 seconds to go out."""
+        from . import _alerts
+
+        _alerts.wait(self)
+
+    def _alert_added(self, alert: Any) -> None:
+        with self._alerts_changed:
+            self._alerts.append(alert)
+            self._alerts_changed.notify_all()
+
+    def _alert_ended(self, alert: Any) -> None:
+        with self._alerts_changed:
+            if alert in self._alerts:
+                self._alerts.remove(alert)
+            self._alerts_changed.notify_all()
+
+    def _drain(self, timeout: float) -> None:
+        """Until what is queued has gone out, or *timeout* seconds have passed."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._lock:
+            while (self._waiting or self._inbox or self._working or self._callbacks) and (
+                    self._thread is not None and self._thread.is_alive()):
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return
+                self._finished.wait(left)
 
     # ------------------------------------------------------------------
     # Daily jobs
