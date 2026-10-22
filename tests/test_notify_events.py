@@ -333,7 +333,7 @@ def paper_cfg(bots, symbol="BTCUSDT", **overrides) -> TraderConfig:
     return TraderConfig(**kwargs)
 
 
-#: QUESTIONS.md's example trade: long BTCUSDT 1h at 64,250, SL 63,800, TP 65,150,
+#: The example trade: long BTCUSDT 1h at 64,250, SL 63,800, TP 65,150,
 #: risking 1% of 10,000 — $100 over 450, so 0.2222 BTC, RR 2.00.  It opens on the
 #: 13:00 candle (raised at 14:00:01) and takes its profit on the 14:00 one.
 SEED = [candle(at(hour), 64_250, 64_260, 64_240, 64_250) for hour in range(3, 13)]
