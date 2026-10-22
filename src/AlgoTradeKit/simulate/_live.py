@@ -415,15 +415,19 @@ class LiveSimulation:
             return report
 
     def _fetch_seed_df(self) -> pd.DataFrame:
-        """Fetch the seed candles from the broker as a standard DataFrame."""
+        """Fetch the seed candles from the broker as a standard DataFrame —
+        closed ones only: the candle still forming comes from the feed."""
         from ..broker._timeutil import now_ms, parse_to_ms
+        from ..broker.base import drop_forming_candle, last_closed_candles
 
         symbol, tf = self.config.symbol, self._tf
         if self._display_candles is not None:
-            rows = self.broker.fetch_last_candles(symbol, tf, self._display_candles)
+            rows = last_closed_candles(self.broker, symbol, tf, self._display_candles)
         else:
             start_ms = parse_to_ms(self._display_start)
-            rows = self.broker.fetch_candles(symbol, tf, start_ms, now_ms())
+            rows = drop_forming_candle(
+                self.broker, self.broker.fetch_candles(symbol, tf, start_ms, now_ms()), tf
+            )
 
         if not rows:
             raise ValueError(
