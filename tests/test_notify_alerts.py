@@ -343,6 +343,17 @@ class TestMoves:
         push(venue, 66_400, bot=bot)
         assert tg.texts(ME)[0].startswith("<b>🔔 BTCUSDT rose 2.2% in 1h · now 66,400</b>")
 
+    def test_a_move_under_one_percent_has_two_decimals(self, make, tg, clock):
+        """One decimal would read every move from 0.05% to 0.15% as «0.1%», and a 0.04% one
+        as «0.0%»."""
+        clock.set(at(14, 0, 0))
+        venue = FakeVenue(start=65_000.0, history=minutes(at(12, 59), [65_000.0] * 61))
+        bot = make(templates={"alert": "{condition} · {move_pct}"})
+        bot.watch(venue, "BTCUSDT", move_pct=-0.05, window="1m")
+        clock.set(at(14, 0, 10))
+        push(venue, 64_941.5, bot=bot)
+        assert tg.texts(ME) == ["fell 0.09% in 1m · -0.09%"]
+
     def test_a_repeating_move_rearms_after_a_window_and_back(self, make, tg, clock):
         clock.set(at(14, 0, 0))
         venue = FakeVenue(start=65_000.0, history=minutes(at(12, 59), [65_000.0] * 61))
