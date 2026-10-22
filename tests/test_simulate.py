@@ -2339,6 +2339,27 @@ class TestLiveSimulationSeed:
         assert len(live.data["1h"]) == 40
         assert live.last_report is report
 
+    def test_seed_leaves_the_forming_candle_to_the_feed(self, monkeypatch):
+        """The venue's last row is still forming at the start: the seed ends before it, and
+        the feed's closed copy of it is the first candle stepped."""
+        rows = _df_rows(_random_walk_df(61, seed=41))
+        monkeypatch.setattr("AlgoTradeKit.broker.base.now_ms",
+                            lambda: rows[-1]["timestamp"] + 25 * 60_000)
+        first = rows[-1]["open"]
+        forming = {**rows[-1], "high": first, "low": first, "close": first}
+        broker = _FakeLiveBroker(rows[:-1] + [forming])
+        live = LiveSimulation(broker, _LiveSMAStrategy(), _headless_cfg(), display_candles=40)
+        live.seed()
+        assert broker.calls == [("last", "btcusdt", "1h", 40), ("last", "btcusdt", "1h", 41)]
+        assert len(live.data["1h"]) == 40
+        assert int(live.data["1h"]["timestamp"].iloc[-1]) == rows[-2]["timestamp"]
+        live.start()
+        broker.push(rows[-1], closed=True)               # its final copy, at its close
+        frame = live.data["1h"]
+        assert int(frame["timestamp"].iloc[-1]) == rows[-1]["timestamp"]
+        assert float(frame["close"].iloc[-1]) == rows[-1]["close"]
+        live.stop()
+
     def test_seed_fetches_from_display_start(self):
         rows = _df_rows(_random_walk_df(60, seed=42))
         start_ms = rows[10]["timestamp"]
