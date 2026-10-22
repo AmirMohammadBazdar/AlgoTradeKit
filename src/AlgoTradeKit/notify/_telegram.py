@@ -7,9 +7,11 @@ The Telegram backend (v1.2.0): :class:`TelegramNotifier`, :class:`TelegramChat`,
 It talks to the Bot API over HTTPS with ``requests``, a handful of calls
 (``getMe``, ``getChat``, ``getChatMember``, ``sendMessage``, ``editMessageText``,
 ``getUpdates``; for pictures and files ``sendPhoto``, ``sendDocument`` and
-``editMessageCaption``, uploaded as multipart), and no Telegram library.  A
-trade's messages reply to its first one (``reply_parameters``, which still sends
-when that message was deleted), and a trailing stop edits it.
+``editMessageCaption``, uploaded as multipart; for commands ``getWebhookInfo`` and
+``setMyCommands``), and no Telegram library.  A trade's messages reply to its first
+one (``reply_parameters``, which still sends when that message was deleted), and a
+trailing stop edits it.  With ``commanders=`` the bot also listens, on a thread of
+its own, and answers commands (``notify/_commands.py``).
 
 Telegram's limits shape it:
 
@@ -34,9 +36,11 @@ import importlib.util
 import json
 import mimetypes
 import re
-from collections.abc import Mapping
+import sys
+from collections.abc import Iterable, Mapping
 from dataclasses import KW_ONLY, dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -234,6 +238,34 @@ def _destination(name: str, chat: TelegramChat) -> _Destination:
         label=_label(name, address), pace_key=address,
         pace_rules=_CHAT_PACE if person else _GROUP_PACE,
     )
+
+
+def _commander_ids(value: Any) -> frozenset[int]:
+    """``commanders=`` (v1.2.0): people's Telegram ids — an int, digits in a string, or a
+    list of them."""
+    if value is None:
+        return frozenset()
+    items = [value] if isinstance(value, (int, str)) else value
+    if isinstance(items, (bool, Mapping)) or not isinstance(items, Iterable):
+        raise TypeError(f"commanders must be a list of Telegram user ids such as [123456789], "
+                        f"got {type(value).__name__}")
+    ids: set[int] = set()
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, (int, str)):
+            raise TypeError(f"commanders must hold Telegram user ids such as 123456789, "
+                            f"got {item!r}")
+        text = item.strip() if isinstance(item, str) else str(item)
+        if text.startswith("@"):
+            raise ValueError(f"commanders: {item!r} — give the person's numeric id; "
+                             "find_chats(token) lists it as the id of their private chat with "
+                             "the bot")
+        if not _NUMERIC.fullmatch(text) or int(text) == 0:
+            raise ValueError(f"commanders: {item!r} is not a Telegram user id such as 123456789")
+        if int(text) < 0:
+            raise ValueError(f"commanders: {int(text)} is a group or a channel — a commander is "
+                             "a person")
+        ids.add(int(text))
+    return frozenset(ids)
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +547,13 @@ class TelegramNotifier(Notifier):
         refused.  Needs the ``[notify]`` extra and its browser, checked now with
         ``check=True``: ``pip install "AlgoTradeKit[notify]"``, then ``playwright
         install chromium``.
+    commanders
+        The Telegram ids of the people who may command the bot (v1.2.0):
+        ``[123456789]``.  The bot then listens, on a thread of its own, and answers
+        /status, /positions, /chart, /stop and /help from them, in any chat they write
+        in; anyone else's command is refused.  /stop ends a trading session, after a
+        confirmation for live trading.  A person's id is the id of their private chat
+        with the bot, which :meth:`find_chats` lists.
 
     Pictures of your own: :meth:`send_chart` (a chart, or a broker's candles between
     two datetimes), :meth:`send_photo` (bytes you made) and :meth:`send_report` (a
@@ -551,10 +590,16 @@ class TelegramNotifier(Notifier):
         base_url: str = _API,
         templates: Mapping[str, str | None] | None = None,
         images: Any = None,
+        commanders: Any = None,
     ) -> None:
         self._token = _check_token(token)
         self._bot_id = int(self._token.partition(":")[0])
         self._bot_username: str | None = None
+        commander_ids = _commander_ids(commanders)
+        if commander_ids:
+            from . import _commands
+
+            _commands.check_free(self._token)   # one listener per bot in a program
         if parse_mode not in ("HTML", None):
             raise ValueError(f'parse_mode must be "HTML" or None, got {parse_mode!r}')
         self._parse_mode = parse_mode
@@ -576,6 +621,14 @@ class TelegramNotifier(Notifier):
                 from ..visual import _snapshot
 
                 _snapshot.check_engine()
+            if commander_ids and self._down_since is None:
+                self._check_webhook()
+        if commander_ids:
+            from . import _commands
+
+            self._listen_session = requests.Session()   # a long poll holds a connection
+            self._commands = _commands.Listener(self, commander_ids)
+            self._commands.resume()
 
     def __repr__(self) -> str:
         bot = f"@{self._bot_username}" if self._bot_username else f"bot {self._bot_id}"
@@ -593,8 +646,19 @@ class TelegramNotifier(Notifier):
 
         Telegram keeps a bot's updates for 24 hours; this reads them without
         acknowledging any, so running it never eats one.  A private channel has no
-        @name: the id printed here is its address."""
+        @name: the id printed here is its address.
+
+        A bot that takes commands (``commanders=``) reads and confirms its updates
+        itself.  While it listens in this program, this lists the chats its listener
+        has seen, without asking Telegram; a listener in another program leaves here
+        only what it has not read yet."""
         token = _check_token(token)
+        commands = sys.modules.get(f"{__package__}._commands")
+        listener = commands.listening(token) if commands is not None else None
+        if listener is not None:
+            seen = listener.seen()
+            _print_chats(seen, listener.username)
+            return seen
         base_url = _check_base_url(base_url)
         proxies = _proxies(proxy, base_url)
         with requests.Session() as session:
@@ -632,6 +696,47 @@ class TelegramNotifier(Notifier):
     def _call(self, method: str, params: Mapping[str, Any] | None = None) -> _Answer:
         return _api_call(self._session, self._base_url, self._token, method, params,
                          timeout=self._timeout, proxies=self._proxies)
+
+    # ---- commands (v1.2.0) ----------------------------------------------
+
+    def _poll(self, offset: int | None, wait: int) -> _Answer:
+        """One long poll for the bot's updates, on a session of its own.  Telegram's
+        default set of updates is asked for, so a later ``find_chats`` sees them all."""
+        params: dict[str, Any] = {"timeout": wait, "allowed_updates": []}
+        if offset is not None:
+            params["offset"] = offset   # confirms every update before it
+        return _api_call(self._listen_session, self._base_url, self._token, "getUpdates",
+                         params, timeout=wait + self._timeout, proxies=self._proxies)
+
+    def _answer_destination(self, chat: Mapping[str, Any], thread_id: Any) -> _Destination:
+        """Where an answer to a command in *chat* (a forum topic of it) goes: beside the
+        named chats, paced with them."""
+        chat_id = int(chat["id"])
+        key = (chat_id, thread_id)
+        with self._lock:
+            dest = self._extra_destinations.get(key)
+            if dest is None:
+                dest = _Destination(
+                    f"chat {chat_id}", TelegramChat(chat_id, thread_id=thread_id),
+                    events=frozenset(), symbols=None, silent=False,
+                    label=_label(str(chat_id), chat_id, _title_of(chat) or None),
+                    pace_key=chat_id, pace_rules=_CHAT_PACE if chat_id > 0 else _GROUP_PACE,
+                )
+                self._extra_destinations[key] = dest
+            return dest
+
+    def _check_webhook(self) -> None:
+        """``commanders=``: getUpdates cannot run beside a webhook.  Only the host is
+        said, because the address can hold a secret."""
+        hook = self._call("getWebhookInfo")
+        if self._carry_on(hook) or not hook.ok:
+            return
+        url = str(hook.fields.get("url") or "")
+        if url:
+            host = urlsplit(url).hostname or "an address"
+            raise TelegramError(f"this bot sends its updates to a webhook ({host}) — "
+                                "getUpdates cannot run beside it; remove the webhook, or "
+                                "leave commanders= out")
 
     def _deliver(
         self, dest: _Destination, text: str, *, silent: bool, reply_to: Any = None
