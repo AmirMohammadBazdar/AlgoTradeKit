@@ -3488,6 +3488,19 @@ class TestTraderSeeding:
         assert len(frame) == 10
         assert worker._last_committed_ts == _X0 + 9 * _XHOUR
 
+    def test_seed_leaves_the_forming_candle_to_the_scheduler(self, monkeypatch):
+        """The venue's last row is still forming: the seed ends on the candle before it, so
+        the scheduler's first boundary is the forming candle's close."""
+        candles = _x_candles(11)
+        monkeypatch.setattr("AlgoTradeKit.broker.base.now_ms",
+                            lambda: candles[-1]["timestamp"] + 25 * 60_000)
+        t = _t_trader(broker=_TFuturesBroker(candles, fill_price=110.0),
+                      cfg=_t_cfg(min_candles=10))
+        worker = _t_ready(t)
+        assert worker.broker.fetch_calls == [("BTCUSDT", "1h", 10), ("BTCUSDT", "1h", 11)]
+        assert len(worker.data["1h"]) == 10
+        assert worker._last_committed_ts == _X0 + 9 * _XHOUR
+
     def test_short_history_raises(self):
         broker = _TFuturesBroker(_x_candles(4))
         t = _t_trader(broker=broker)
