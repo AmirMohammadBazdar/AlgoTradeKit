@@ -64,6 +64,10 @@ Pictures and files (v1.2.0)
     reply to the picture.  A trade's picture that cannot be made lets its message
     go as text; a picture you asked for is not sent without it.  A backend that
     cannot send pictures sends the text alone.
+Answers (v1.2.0)
+    A backend that takes commands (Telegram's, ``notify/_commands.py``) answers in
+    the chat a command came from, through a destination made for that chat beside
+    the named ones: no filter, no ``to=`` and no ``send_text`` reaches it.
 
 Lines are printed from the notifier's own threads, never the caller's:
 ``[AlgoTradeKit] telegram: …``.
@@ -657,6 +661,10 @@ class Notifier:
     _max_document_bytes = 50 * 1024 * 1024
     #: The clock; tests replace it.
     _clock = _SystemClock()
+    #: The command listener of a backend that takes commands (v1.2.0), or ``None``.  It
+    #: listens from the notifier's creation until :meth:`close`, and again from the next
+    #: send, ``watch()`` or trading session.
+    _commands: Any = None
 
     def __init__(
         self, destinations: Mapping[str, _Destination], *, zone: tzinfo | None, rich: bool,
@@ -701,6 +709,8 @@ class Notifier:
         self._jobs_seen = 0.0
         self._alerts: list[Any] = []                           # the price alerts (watch)
         self._alerts_changed = threading.Condition()
+        #: Where answers to commands go, by the backend's key for a chat (v1.2.0).
+        self._extra_destinations: dict[Hashable, _Destination] = {}
 
     # ------------------------------------------------------------------
     # For the backend
@@ -1080,6 +1090,8 @@ class Notifier:
             name=f"atk-notify-{self._tag}", daemon=True,
         )
         self._thread.start()
+        if self._commands is not None:   # after a close(), listening starts again too
+            self._commands.resume()
 
     def _run(self, generation: int) -> None:
         self._local.generation = generation
@@ -1185,7 +1197,7 @@ class Notifier:
             return (oldest, None) if at <= now else (None, at)
         best: _Delivery | None = None
         soonest: float | None = None
-        for dest in self._destinations.values():
+        for dest in (*self._destinations.values(), *self._extra_destinations.values()):
             if not dest.waiting:
                 continue
             head = dest.waiting[0]
@@ -1402,7 +1414,8 @@ class Notifier:
 
         What is still queued then is given up, with one line: «closed with 2
         messages unsent»; a call still waiting for one of them raises.  Daily jobs
-        are cancelled.  The notifier stays usable: the next send starts it again."""
+        are cancelled, and commands are no longer listened to.  The notifier stays
+        usable: the next send starts it again."""
         self._begin_close()
         self._end_close(time.monotonic() + max(0.0, float(timeout)))
 
@@ -1415,6 +1428,8 @@ class Notifier:
     def _begin_close(self) -> None:
         for alert in list(self._alerts):   # alerts end first: nothing new is queued
             alert.cancel()
+        if self._commands is not None:      # nor does anything new come in
+            self._commands.pause()
         with self._lock:
             self._wake_locked()
 
@@ -1497,6 +1512,8 @@ class Notifier:
         installed raises here."""
         from . import _alerts
 
+        if self._commands is not None:   # after a close(), listening starts again
+            self._commands.resume()
         return _alerts.watch(
             self, broker, symbol, above=above, below=below, move_pct=move_pct,
             window=window, on_close=on_close, repeat=repeat, rearm=rearm, image=image,
