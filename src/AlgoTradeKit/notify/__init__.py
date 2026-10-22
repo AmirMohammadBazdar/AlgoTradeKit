@@ -68,6 +68,14 @@ Pictures (v1.2.0)
     chart on those kinds of trade message, its text as the caption.  A headless
     Chromium photographs the library's own chart page, on the notifier's thread.
 
+Commands (v1.2.0)
+    ``TelegramNotifier(…, commanders=[123456789])`` listens to the people it names, in
+    any chat they write in, and answers /status (what is trading, since when, today's
+    net, the open positions), /positions, /chart, /stop and /help, as replies.  /stop
+    ends the ``run_live`` session or the ``Trader`` it serves, as Ctrl+C does; live
+    trading asks for «/stop CONFIRM» first.  Commands sent while nothing listened are
+    skipped, and anyone else's are refused.
+
 The module imports no other part of AlgoTradeKit when it is imported: a broker
 arrives as an object, and the chart and the report are loaded only to make a
 picture.  Text needs nothing beyond the core install; a SOCKS proxy and pictures
