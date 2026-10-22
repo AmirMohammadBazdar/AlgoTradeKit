@@ -411,7 +411,7 @@ def test_metatrader_basic_flow():
     info = mt.get_account_info()
     assert info.equity == 1010.0 and info.currency == "USD"
 
-    assert "BTCUSD" in mt.list_symbols("*")   # symbol discovery (used by demo.py)
+    assert "BTCUSD" in mt.list_symbols("*")   # symbol discovery
 
 
 def test_metatrader_close_position_ticket_passthrough():
@@ -704,3 +704,76 @@ def test_my_trades_spot_url_and_minimal_params():
 def test_my_trades_requires_auth():
     with pytest.raises(AuthenticationError):
         BinanceBroker("futures").my_trades("BTCUSDT")
+
+
+# ---------------------------------------------------------------------------
+# last_closed_candles — a live seed ends on the newest closed candle
+# ---------------------------------------------------------------------------
+
+_MINUTE = 60_000
+_AT = 1_792_670_940_000 + 25_000          # 25 s into the 12:09 candle, 2026-10-22
+
+
+class _TailVenue(_StubBroker):
+    """Answers as Binance's REST does: every candle that opened in the range, the one
+    still forming included."""
+
+    def __init__(self, server_ahead_ms=0):
+        super().__init__(server_time_fn=lambda: broker_base.now_ms() + server_ahead_ms)
+
+    def fetch_candles(self, symbol, timeframe, start_ms, end_ms):
+        first = -(-start_ms // _MINUTE) * _MINUTE
+        return [{"timestamp": ts, "close": float(ts // _MINUTE % 1_000)}
+                for ts in range(first, end_ms + 1, _MINUTE)]
+
+
+def test_last_closed_candles_leaves_the_forming_candle_out(monkeypatch):
+    monkeypatch.setattr(broker_base, "now_ms", lambda: _AT)
+    venue = _TailVenue()
+    forming = _AT - 25_000
+    assert venue.fetch_last_candles("BTCUSDT", "1m", 3)[-1]["timestamp"] == forming
+    rows = broker_base.last_closed_candles(venue, "BTCUSDT", "1m", 10)
+    assert [row["timestamp"] for row in rows] == [forming - k * _MINUTE for k in range(10, 0, -1)]
+
+
+def test_last_closed_candles_asks_once_when_the_last_candle_is_closed():
+    class Closed:
+        def __init__(self):
+            self.counts = []
+
+        def fetch_last_candles(self, symbol, timeframe, count):
+            self.counts.append(count)
+            return [{"timestamp": 1_700_000_000_000 + k * _MINUTE} for k in range(count)]
+
+    venue = Closed()
+    assert len(broker_base.last_closed_candles(venue, "BTCUSDT", "1m", 5)) == 5
+    assert venue.counts == [5]
+
+
+def test_last_closed_candles_goes_by_the_venues_clock(monkeypatch):
+    """40 s ahead of this machine, the venue has closed the candle this machine sees forming."""
+    monkeypatch.setattr(broker_base, "now_ms", lambda: _AT)
+    venue = _TailVenue(server_ahead_ms=40_000)
+    rows = broker_base.last_closed_candles(venue, "BTCUSDT", "1m", 10)
+    assert rows[-1]["timestamp"] == _AT - 25_000 and len(rows) == 10
+
+
+def test_last_closed_candles_falls_back_to_this_machines_clock(monkeypatch):
+    monkeypatch.setattr(broker_base, "now_ms", lambda: _AT)
+
+    def unreadable():
+        raise ConnectionError("no server time")
+
+    venue = _TailVenue()
+    venue._server_time_fn = unreadable
+    rows = broker_base.last_closed_candles(venue, "BTCUSDT", "1m", 10)
+    assert rows[-1]["timestamp"] == _AT - 25_000 - _MINUTE
+
+
+def test_drop_forming_candle(monkeypatch):
+    monkeypatch.setattr(broker_base, "now_ms", lambda: _AT)
+    venue = _TailVenue()
+    rows = venue.fetch_candles("BTCUSDT", "1m", _AT - 3 * _MINUTE, _AT)
+    assert broker_base.drop_forming_candle(venue, rows, "1m") == rows[:-1]
+    assert broker_base.drop_forming_candle(venue, rows[:-1], "1m") == rows[:-1]
+    assert broker_base.drop_forming_candle(venue, [], "1m") == []
