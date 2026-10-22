@@ -118,6 +118,7 @@ from ._notify import (
     PairView,
     candles_of,
     drawn,
+    held,
     message_hook,
     wire_notifiers,
 )
@@ -476,6 +477,22 @@ def _combined_labels(entries: list[TraderPair]) -> list[str]:
     return labels
 
 
+class _StopFlag:
+    """A stop a command asked for (v1.2.0): its reason, once set — the first one wins."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self.reason: str | None = None
+
+    def request(self, reason: str) -> None:
+        if self.reason is None:
+            self.reason = reason
+        self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+
 @dataclass
 class _PaperSession:
     """One pair's wiring: LiveSimulation + event stream + bridge."""
@@ -486,6 +503,7 @@ class _PaperSession:
     sim: LiveSimulation | None = None
     combined: _CombinedLiveReport | None = None
     combined_label: str = ""
+    stop: _StopFlag | None = None   # every pair's, one flag: a command's stop
 
     def on_report(self, report) -> None:
         """``LiveSimulation.on_report`` — once per closed candle: bridge
@@ -505,6 +523,7 @@ class _PaperView(PairView):
         self._session = session
         config = session.pair.config
         self.symbol = config.symbol
+        self.broker = session.pair.broker
         self.timeframe = session.pair.strategy.primary_timeframe
         try:
             self.timeframe_ms = timeframe_ms(self.timeframe)
@@ -542,19 +561,14 @@ class _PaperView(PairView):
         except Exception:  # noqa: BLE001
             return None
 
-    def open_positions(self) -> list[OpenPosition]:
+    def open_positions(self, price: float | None = None) -> list[OpenPosition]:
         """A copy of the stepper's open positions, taken under the sim's own lock —
-        from the notifier's thread only: the sim holds that lock while it emits."""
+        from the notifier's threads only: the sim holds that lock while it emits."""
         sim = self._session.sim
         if sim is None or sim.stepper is None:
             return []
         with sim._lock:
-            positions = list(sim.stepper.open_positions)
-        return [
-            OpenPosition(pos.trade_id, pos.direction, float(pos.entry_price),
-                         float(pos.size), float(pos.stop_loss))
-            for pos in positions
-        ]
+            return [held(pos, price) for pos in sim.stepper.open_positions]
 
     def capture(self, rows: int, since: int | None = None) -> Capture | None:
         """On the feed thread, inside the sim's step (which holds its lock)."""
@@ -691,11 +705,16 @@ def _print_urls(session: _PaperSession) -> None:
         print(f"{_LOG_PREFIX} {symbol} report → {server.url}")
 
 
-def _wait(sessions: list[_PaperSession]) -> None:
-    """Block until every feed stream has ended (KeyboardInterrupt passes
-    through to the caller)."""
+def _wait(sessions: list[_PaperSession]) -> str | None:
+    """Block until every feed stream has ended (``None``), or until a command asks to
+    stop (its reason, v1.2.0).  KeyboardInterrupt passes through to the caller."""
     dead: set[int] = set()
     while True:
+        for session in sessions:
+            asked = session.stop
+            if asked is not None and asked.is_set():
+                print(f"{_LOG_PREFIX}: {asked.reason} — stopping.")
+                return asked.reason
         alive = 0
         for idx, session in enumerate(sessions):
             stream = session.sim.stream
@@ -706,7 +725,7 @@ def _wait(sessions: list[_PaperSession]) -> None:
                 print(f"{_LOG_PREFIX}: feed for {session.pair.config.symbol} ended.")
         if alive == 0:
             print(f"{_LOG_PREFIX}: all feeds ended — stopping.")
-            return
+            return None
         time.sleep(_WAIT_POLL_SECONDS)
 
 
@@ -766,10 +785,12 @@ def run_live(
     script finishes until one more Ctrl+C.
 
     Every pair's stream gets a ``START`` after the seed and a ``STOP`` when the
-    session ends (``"Ctrl+C"``, ``"feeds ended"``, or ``"crash"`` with the
-    error); the notifiers of ``config.notifiers`` are then closed, so the stop
-    message is out before this returns.  A strategy's ``self.notify(...)``
-    speaks for every closed candle after the seed.
+    session ends (``"Ctrl+C"``, ``"feeds ended"``, ``"/stop from Telegram"``, or
+    ``"crash"`` with the error); the notifiers of ``config.notifiers`` are then
+    closed, so the stop message is out before this returns.  A strategy's
+    ``self.notify(...)`` speaks for every closed candle after the seed.  A notifier
+    with ``commanders=`` answers /status, /positions and /chart about the session from
+    its start on, and /stop ends it.
     """
     if pairs is not None:
         if strategy is not None or broker is not None or config is not None:
@@ -801,9 +822,14 @@ def run_live(
     notify_session = NotifySession(_MODE_PAPER)
     sessions = [_build_session(pair, notify_session) for pair in entries]
     symbols = tuple(session.pair.config.symbol for session in sessions)
+    stop = _StopFlag()
+    for session in sessions:
+        session.stop = stop
     started = False
     reason, error = "feeds ended", None
     try:
+        # Commands answer from here, the seed included; /stop acts once trading runs.
+        notify_session.listen(stop=stop.request)
         for session in sessions:
             _attach_sim(session, initial_balance)
         for session in sessions:
@@ -835,7 +861,9 @@ def run_live(
         print(f"{_LOG_PREFIX}: paper trading {', '.join(symbols)} — Ctrl+C to stop.")
 
         try:
-            _wait(sessions)
+            asked = _wait(sessions)
+            if asked is not None:
+                reason = asked
         except KeyboardInterrupt:
             print(f"{_LOG_PREFIX}: Ctrl+C — stopping.")
             reason = "Ctrl+C"
@@ -852,14 +880,15 @@ def run_live(
             session.pair.strategy._notify_hook = None
         for session in sessions:
             sim = session.sim
-            held = None   # a session that never started has read no positions
+            left = None   # a session that never started has read no positions
             if started and sim is not None and sim.stepper is not None:
-                held = len(sim.stepper.open_positions)
+                left = len(sim.stepper.open_positions)
             session.events.emit(StopEvent(
                 time=now_ms(), symbol="", source=SOURCE_SIM, mode=_MODE_PAPER,
-                reason=reason, open_positions=held, error=error,
+                reason=reason, open_positions=left, error=error,
                 session_id=notify_session.id,
             ))
+        notify_session.unlisten()
         notify_session.close()
 
     reports = [session.sim.last_report for session in sessions]
