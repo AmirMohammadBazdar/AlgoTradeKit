@@ -155,6 +155,8 @@ applied, a crash or a failed start included; the notifiers are then closed, so
 the stop message is out before ``run()`` returns.  A strategy's
 ``self.notify(...)`` speaks only on a closed candle: the hook is set around
 each closed-candle step, muted on forming evaluations and in the display's copy.
+A notifier with ``commanders=`` answers /status, /positions and /chart about the
+run from its start on; /stop, once confirmed, stops it the way Ctrl+C does.
 
 Threading: one consumer loop per pair drains that pair's queue — the calling
 thread itself in the single-pair form, one ``atk-trader-pair-<symbol>``
@@ -228,6 +230,7 @@ from ._notify import (
     PairView,
     candles_of,
     drawn,
+    held,
     message_hook,
     mute_hook,
     wire_notifiers,
@@ -1159,6 +1162,8 @@ class _LiveView(PairView):
     def __init__(self, worker: _PairWorker) -> None:
         self._worker = worker
         self.symbol = worker.config.symbol
+        self.broker = worker.broker
+        self.realtime = worker.config.execution != EXEC_CANDLE_CLOSE
         self.timeframe = worker.tf
         self.timeframe_ms = worker.tf_ms
         self.chart_indicators = tuple(dict(spec) for spec in worker.config.chart_indicators)
@@ -1175,15 +1180,10 @@ class _LiveView(PairView):
     def candle_anchor(self) -> int | None:
         return self._worker._last_committed_ts or None
 
-    def open_positions(self) -> list[OpenPosition]:
+    def open_positions(self, price: float | None = None) -> list[OpenPosition]:
         """A copy of the engine's tracked trades (the engine has no lock: its
         ``open_trades`` is a tuple copy, as the display bridge reads it)."""
-        return [
-            OpenPosition(trade.pos.trade_id, trade.pos.direction,
-                         float(trade.pos.entry_price), float(trade.pos.size),
-                         float(trade.pos.stop_loss))
-            for trade in self._worker.engine.open_trades
-        ]
+        return [held(trade.pos, price) for trade in self._worker.engine.open_trades]
 
     def capture(self, rows: int, since: int | None = None) -> Capture | None:
         """On the trading thread.  The frame is re-bound as candles arrive, and the
@@ -1464,9 +1464,9 @@ class Trader:
 
         Every pair's stream gets a ``START`` after the seeds and a ``STOP``
         after the shutdown (``"Ctrl+C"``, ``"SIGTERM"``, ``"kill switch"``,
-        ``"stop()"``, or ``"crash"`` with the error) — a failed start sends its
-        ``STOP`` too.  The notifiers of ``config.notifiers`` are closed after it,
-        so the stop message is out before this returns.
+        ``"stop()"``, ``"/stop from Telegram"``, or ``"crash"`` with the error) — a
+        failed start sends its ``STOP`` too.  The notifiers of ``config.notifiers``
+        are closed after it, so the stop message is out before this returns.
         """
         if self._ran:
             raise RuntimeError("Trader.run() may only run once per instance.")
@@ -1482,6 +1482,8 @@ class Trader:
         # before _ran is set) — fix or remove the file, then run again.
         self._prepare_journal()
         self._ran = True
+        # Commands answer from here, the seeds included; /stop acts once trading runs.
+        self._notify_session.listen(stop=self._stop_from)
         started: list[_PairWorker] = []
         try:
             for worker in self._workers:
@@ -1563,6 +1565,11 @@ class Trader:
         a subscriber)."""
         self._request_stop("stop()")
 
+    def _stop_from(self, reason: str) -> None:
+        """A command's stop (v1.2.0), from the listener's thread: Ctrl+C's path."""
+        print(f"{_LOG_PREFIX}: {reason} — stopping.")
+        self._request_stop(reason)
+
     def _request_stop(self, reason: str) -> None:
         """Stop every pair; the first reason given is the one the STOP event says."""
         if self._stop_reason is None:
@@ -1582,6 +1589,7 @@ class Trader:
                 open_positions=len(worker.engine.open_trades) if count_positions else None,
                 error=error, session_id=self._notify_session.id,
             ))
+        self._notify_session.unlisten()
         self._notify_session.close()
 
     def _describe_pairs(self) -> str:
