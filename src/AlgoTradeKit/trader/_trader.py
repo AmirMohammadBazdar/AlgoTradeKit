@@ -192,6 +192,7 @@ from ..broker import (
     OrderError,
 )
 from ..broker._timeutil import now_ms
+from ..broker.base import last_closed_candles
 from ..simulate import CLOSE_REASON_TP, TP_MODE_MULTI_RR, ClosedTrade
 from ..simulate._position_math import sl_reason
 from ..strategy import BaseStrategy, Signal, StrategyMode
@@ -498,14 +499,16 @@ class _PairWorker:
     # ------------------------------------------------------------------
 
     def seed(self) -> None:
-        """Fetch the last ``min_candles`` and run the strategy over them.
+        """Fetch the last ``min_candles`` closed candles and run the strategy over
+        them.
 
         Builds the indicator columns and the strategy's ``setup()`` state —
-        the live loop then advances it O(1) per candle.  Seed signals
-        are history: discarded, never traded, no events.
+        the live loop then advances it O(1) per candle, starting with the one
+        still forming now.  Seed signals are history: discarded, never traded,
+        no events.
         """
         symbol, count = self.config.symbol, self.config.min_candles
-        rows = self.broker.fetch_last_candles(symbol, self.tf, count)
+        rows = last_closed_candles(self.broker, symbol, self.tf, count)
         if len(rows) < count:
             raise ValueError(
                 f"Trader: {symbol} {self.tf} returned {len(rows)} candles — "
