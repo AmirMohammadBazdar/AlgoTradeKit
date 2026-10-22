@@ -68,6 +68,11 @@ Answers (v1.2.0)
     A backend that takes commands (Telegram's, ``notify/_commands.py``) answers in
     the chat a command came from, through a destination made for that chat beside
     the named ones: no filter, no ``to=`` and no ``send_text`` reaches it.
+Digests (v1.2.0)
+    A destination can gather some kinds into a digest (e-mail's trade messages): they
+    wait until the oldest has waited ``digest_seconds``, then go as one request
+    (:meth:`Notifier._deliver_digest`); the other kinds go in their turn.  A notifier
+    that closes, the exit flush included, sends a held digest at once.
 
 Lines are printed from the notifier's own threads, never the caller's:
 ``[AlgoTradeKit] telegram: …``.
@@ -76,10 +81,12 @@ Lines are printed from the notifier's own threads, never the caller's:
 from __future__ import annotations
 
 import atexit
+import html
 import itertools
 import re
 import threading
 import time
+import uuid
 import weakref
 from collections import deque
 from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -310,6 +317,12 @@ def _visible(text: str, rich: bool) -> str:
     return _TAG.sub("", text) if rich else text
 
 
+def plain_text(text: str, rich: bool = True) -> str:
+    """*text* as plain text: its tags taken out and its entities read (v1.2.0) — what an
+    e-mail's text part, a subject and a webhook's ``text`` hold."""
+    return html.unescape(_TAG.sub("", text)) if rich else text
+
+
 def split_text(text: str, limit: int, *, rich: bool, measure: Callable[[str], int]) -> list[str]:
     """Cut *text* into parts of at most *limit* units, as *measure* counts them.
 
@@ -458,6 +471,8 @@ class _Destination:
         self.retry_at = 0.0               # monotonic; a server error holds it until then
         self.failures = 0                 # server errors in a row
         self.line_at: float | None = None
+        self.digest_seconds = 0.0         # > 0: these kinds wait to go as one (v1.2.0)
+        self.digest_kinds: frozenset[str] = frozenset()
 
     def accepts(self, kind: str, symbol: str | None) -> bool:
         """Does a message of *kind* about *symbol* pass this destination's filters?"""
@@ -499,17 +514,19 @@ class _Waiter:
 
 
 class _Message:
-    __slots__ = ("kind", "symbol", "body", "queued_at", "media")
+    __slots__ = ("kind", "symbol", "body", "queued_at", "media", "fields", "uid")
 
     def __init__(
         self, kind: str, symbol: str | None, body: str, queued_at: float,
-        media: _Media | None = None,
+        media: _Media | None = None, fields: Mapping[str, Any] | None = None,
     ) -> None:
         self.kind = kind
         self.symbol = symbol
         self.body = body                  # with a picture or a file: its caption
         self.queued_at = queued_at        # wall time, for the late marker
         self.media = media
+        self.fields = fields              # its raw values, for a backend that asks (v1.2.0)
+        self.uid = uuid.uuid4().hex       # the same on every try: a receiver drops a repeat
 
 
 class _Delivery:
@@ -535,7 +552,7 @@ class _Delivery:
     __slots__ = (
         "seq", "message", "dest", "silent", "waiter", "parts", "next_part", "first_id", "done",
         "reply", "edit", "coalesce", "on_done", "first_text", "editing", "edit_caption",
-        "media", "caption", "text_id",
+        "media", "caption", "text_id", "born", "batch",
     )
 
     def __init__(
@@ -561,6 +578,8 @@ class _Delivery:
         self.media: _Media | None = message.media   # None once it goes as text
         self.caption = False                  # the text rides as the picture's caption
         self.text_id: Any = None              # the message holding the text
+        self.born = 0.0                       # monotonic, when it was queued
+        self.batch: list[_Delivery] | None = None   # a digest it leads, on its way
 
 
 class _Job:
@@ -665,6 +684,9 @@ class Notifier:
     #: listens from the notifier's creation until :meth:`close`, and again from the next
     #: send, ``watch()`` or trading session.
     _commands: Any = None
+    #: Does the backend want each message itself — its kind, symbol and raw fields — as
+    #: ``message=`` beside the text (v1.2.0)?  Only one that sets this gets the keyword.
+    _wants_message = False
 
     def __init__(
         self, destinations: Mapping[str, _Destination], *, zone: tzinfo | None, rich: bool,
@@ -711,6 +733,8 @@ class Notifier:
         self._alerts_changed = threading.Condition()
         #: Where answers to commands go, by the backend's key for a chat (v1.2.0).
         self._extra_destinations: dict[Hashable, _Destination] = {}
+        self._digesting = any(dest.digest_seconds > 0 for dest in self._destinations.values())
+        self._flushing = False                # closing: a held digest goes now
 
     # ------------------------------------------------------------------
     # For the backend
@@ -742,6 +766,15 @@ class Notifier:
     ) -> _Outcome:
         """Send *data* — ``media.kind`` says a picture or a file — to *dest*, with
         *caption* (a backend with :attr:`_can_send_media`).  Never raises."""
+        raise NotImplementedError
+
+    def _deliver_digest(
+        self, dest: _Destination, parts: list[tuple[_Message, str, _Media | None]], *,
+        silent: bool,
+    ) -> _Outcome:
+        """Send a held digest as one message: *parts* are ``(message, its text, its
+        picture or None)``, oldest first (a backend whose destinations gather a digest,
+        v1.2.0).  Never raises."""
         raise NotImplementedError
 
     @staticmethod
@@ -975,6 +1008,7 @@ class Notifier:
                     next(self._seq), message, dest,
                     dest.silent if silent is None else bool(silent), waiter,
                 )
+                delivery.born = self._clock.monotonic()
                 dest.waiting.append(delivery)
                 self._order.append(delivery)
                 self._waiting += 1
@@ -1032,12 +1066,14 @@ class Notifier:
         coalesce: Hashable | None = None,
         on_done: Callable[..., None] | None = None,
         media: _Media | None = None,
+        fields: Mapping[str, Any] | None = None,
     ) -> None:
         """Queue one message for one destination (see :class:`_Delivery` for
         *reply*, *edit*, *coalesce* and *on_done*; *media* is a picture the body is
-        the caption of).  *queued_at* is the wall time the late marker counts from:
-        when the event was received."""
-        message = _Message(kind, symbol, body, queued_at, media)
+        the caption of; *fields* are its raw values, for a backend that asks).
+        *queued_at* is the wall time the late marker counts from: when the event was
+        received."""
+        message = _Message(kind, symbol, body, queued_at, media, fields)
         with self._lock:
             stale = getattr(self._local, "generation", None)
             if stale is not None and stale != self._generation:
@@ -1049,6 +1085,7 @@ class Notifier:
                             and older.next_part == 0):
                         self._finish_locked(older, reason=_SUPERSEDED)
             delivery = _Delivery(next(self._seq), message, dest, silent, None)
+            delivery.born = self._clock.monotonic()
             delivery.reply, delivery.edit = reply, edit
             delivery.coalesce, delivery.on_done = coalesce, on_done
             dest.waiting.append(delivery)
@@ -1189,6 +1226,8 @@ class Notifier:
 
     def _choose_locked(self, now: float) -> tuple[_Delivery | None, float | None]:
         """The due delivery to send next, or the time the next one will be due."""
+        if self._digesting:
+            return self._choose_digest_locked(now)
         if self._down_since is not None:
             oldest = self._oldest_locked()
             if oldest is None:
@@ -1209,11 +1248,86 @@ class Notifier:
                 soonest = at
         return (best, None) if best is not None else (None, soonest)
 
+    def _ready_locked(
+        self, dest: _Destination, now: float
+    ) -> tuple[_Delivery | None, float | None]:
+        """A digest destination's next delivery, or when its held digest comes due: a
+        kind it does not gather goes in its turn; the gathered ones wait until the oldest
+        has waited ``digest_seconds``, or the notifier closes, and then go together."""
+        held: list[_Delivery] = []
+        for delivery in dest.waiting:
+            if delivery.message.kind not in dest.digest_kinds or delivery.next_part:
+                return delivery, None
+            held.append(delivery)
+        if not held:
+            return None, None
+        due = held[0].born + dest.digest_seconds
+        if due > now and not self._flushing:
+            return None, due
+        held[0].batch = held
+        return held[0], None
+
+    def _choose_digest_locked(self, now: float) -> tuple[_Delivery | None, float | None]:
+        """:meth:`_choose_locked` for a notifier with a digest destination (v1.2.0): the
+        same rules, over what each destination has ready."""
+        ready: list[tuple[_Delivery, float]] = []
+        soonest: float | None = None
+        for dest in (*self._destinations.values(), *self._extra_destinations.values()):
+            if not dest.waiting:
+                continue
+            head, due = (self._ready_locked(dest, now) if dest.digest_seconds > 0
+                         else (dest.waiting[0], None))
+            if head is None:
+                if due is not None and (soonest is None or due < soonest):
+                    soonest = due
+                continue
+            ready.append((head, max(dest.retry_at, self._pace_of(dest).next_at())))
+        if self._down_since is not None:   # an outage: only the oldest ready one is tried
+            if not ready:
+                return None, soonest
+            head, at = min(ready, key=lambda item: item[0].seq)
+            at = max(at, self._probe_at)
+            if at <= now:
+                return head, None
+            return None, at if soonest is None else min(at, soonest)
+        best: _Delivery | None = None
+        for head, at in ready:
+            if at <= now:
+                if best is None or head.seq < best.seq:
+                    best = head
+            elif soonest is None or at < soonest:
+                soonest = at
+        return (best, None) if best is not None else (None, soonest)
+
+    def _attempt_digest(self, leader: _Delivery) -> _Outcome:
+        """One request for a held digest: each message with its picture, and a late
+        marker only past the digest's own wait."""
+        assert leader.batch is not None
+        parts: list[tuple[_Message, str, _Media | None]] = []
+        now = self._clock.time()
+        for member in leader.batch:
+            media = member.media
+            if media is not None and not self._can_send_media:
+                member.media = media = None
+            if media is not None and media.resolve() is None:
+                self._say(f"no picture for {media.label} — {media.error}; sent as text")
+                member.media = media = None
+            body = member.message.body
+            late = now - member.message.queued_at - leader.dest.digest_seconds
+            if late >= _LATE_AFTER:
+                marker = f"⏱ {int(late // 60)} min late"
+                body = f"{marker}\n{body}" if body else marker
+            member.first_text = body
+            parts.append((member.message, body, media))
+        return self._deliver_digest(leader.dest, parts, silent=leader.silent)
+
     def _attempt(self, delivery: _Delivery) -> _Outcome:
         """Send the delivery's next part.  The first part carries the late marker,
         and the split is worked out with it, so the marker never pushes a part past
         the limit.  An edit, the message a reply answers, and a picture are resolved
         here, just before the first part goes."""
+        if delivery.batch is not None and delivery.next_part == 0:
+            return self._attempt_digest(delivery)
         reply_to = None
         if delivery.next_part == 0:
             delivery.editing = None
@@ -1262,19 +1376,23 @@ class Notifier:
                 reply_to = delivery.reply()
         assert delivery.parts is not None
         text = delivery.parts[delivery.next_part]
+        # The message itself only for a backend that asks: a test of Part 1 replaces
+        # Telegram's _deliver with a function that takes no other keyword.
+        extra = {"message": delivery.message} if self._wants_message else {}
         if delivery.media is not None:
             if delivery.next_part == 0:
                 data = delivery.media.data
                 assert data is not None
                 return self._deliver_media(delivery.dest, delivery.media, data, text or None,
-                                           silent=delivery.silent, reply_to=reply_to)
+                                           silent=delivery.silent, reply_to=reply_to, **extra)
             if self._can_reply and delivery.first_id is not None:
                 return self._deliver(delivery.dest, text, silent=delivery.silent,
-                                     reply_to=delivery.first_id)
-            return self._deliver(delivery.dest, text, silent=delivery.silent)
+                                     reply_to=delivery.first_id, **extra)
+            return self._deliver(delivery.dest, text, silent=delivery.silent, **extra)
         if reply_to is not None:
-            return self._deliver(delivery.dest, text, silent=delivery.silent, reply_to=reply_to)
-        return self._deliver(delivery.dest, text, silent=delivery.silent)
+            return self._deliver(delivery.dest, text, silent=delivery.silent, reply_to=reply_to,
+                                 **extra)
+        return self._deliver(delivery.dest, text, silent=delivery.silent, **extra)
 
     def _settle_locked(self, delivery: _Delivery, outcome: _Outcome) -> None:
         if self._in_flight is delivery:
@@ -1291,6 +1409,19 @@ class Notifier:
             )
             self._down_since = None
             self._down_failures = 0
+        batch, delivery.batch = delivery.batch, None
+        if batch is not None and outcome.status in ("sent", "refused"):   # a digest
+            pace.sent.append(now)
+            dest.failures = 0
+            for member in batch:
+                if outcome.status == "sent":
+                    member.first_id = member.text_id = outcome.message_id
+                    self._finish_locked(member)
+                else:
+                    self._finish_locked(member, reason=outcome.reason)
+            if outcome.status == "refused":
+                self._failure_line_locked(dest, outcome.reason, now)
+            return
         if outcome.status == "sent":
             pace.sent.append(now)
             dest.failures = 0
@@ -1431,6 +1562,7 @@ class Notifier:
         if self._commands is not None:      # nor does anything new come in
             self._commands.pause()
         with self._lock:
+            self._flushing = True           # a held digest goes now
             self._wake_locked()
 
     def _end_close(self, deadline: float) -> None:
@@ -1438,6 +1570,7 @@ class Notifier:
         with self._lock:
             thread = self._thread
             if thread is None:
+                self._flushing = False
                 return
             if thread is not threading.current_thread():
                 while (
@@ -1459,6 +1592,7 @@ class Notifier:
             on_request = self._in_flight is not None
             self._generation += 1
             self._thread = None
+            self._flushing = False
             self._wake_locked()
         _open_notifiers.discard(self)
         if thread is threading.current_thread():
