@@ -23,11 +23,22 @@ Classes
     TelegramChatInfo    One chat as ``find_chats`` reports it.
     Alert               A price alert, as ``watch()`` returns it: its condition, its
                         state, how often it fired; ``cancel()`` ends it.
+    DiscordNotifier     Discord channels, through their webhooks (v1.2.0): the same
+                        messages, in Discord's Markdown; a trailing stop edits.
+    DiscordWebhook      One webhook, with a thread, no sound, and filters.
+    EmailNotifier       E-mail through your SMTP server (v1.2.0): HTML with pictures
+                        inline, trade messages in a digest every 15 minutes.
+    EmailRecipient      One address, with filters.
+    WebhookNotifier     JSON posted to your URLs (v1.2.0): the text and the event's raw
+                        fields, signed with ``secret=``.
+    WebhookTarget       One URL, with filters and headers.
 
 Errors
     NotifyError         The base error of this module.
     TelegramError       Telegram refused, or could not be reached for a call that
                         waited.
+    DiscordError / EmailError / WebhookError
+                        The same, for Discord, the SMTP server and a webhook.
 
 Constants
     KIND_TEXT           The kind of a ``send_text`` message.
@@ -75,6 +86,13 @@ Commands (v1.2.0)
     ends the ``run_live`` session or the ``Trader`` it serves, as Ctrl+C does; live
     trading asks for «/stop CONFIRM» first.  Commands sent while nothing listened are
     skipped, and anyone else's are refused.
+
+Other backends (v1.2.0)
+    ``DiscordNotifier``, ``EmailNotifier`` and ``WebhookNotifier`` take the same kinds,
+    filters, templates, pictures and queue, and work wherever a ``TelegramNotifier`` does:
+    ``TraderConfig(notifiers=[…])``, ``send_text``, ``send_chart``, ``send_report`` and
+    ``watch``.  What a service cannot do degrades: Discord cannot reply, e-mail cannot
+    edit, a webhook does neither.  Commands stay Telegram's.
 
 The module imports no other part of AlgoTradeKit when it is imported: a broker
 arrives as an object, and the chart and the report are loaded only to make a
@@ -128,14 +146,32 @@ __all__ = [
     "KIND_DAILY_SUMMARY",
     "KIND_ALERT",
     "Alert",
+    "DiscordNotifier",
+    "DiscordWebhook",
+    "DiscordError",
+    "EmailNotifier",
+    "EmailRecipient",
+    "EmailError",
+    "WebhookNotifier",
+    "WebhookTarget",
+    "WebhookError",
 ]
+
+#: The names that live in a module of their own, loaded with their first use.
+_LAZY = {
+    "Alert": "_alerts",
+    "DiscordNotifier": "_discord", "DiscordWebhook": "_discord", "DiscordError": "_discord",
+    "EmailNotifier": "_email", "EmailRecipient": "_email", "EmailError": "_email",
+    "WebhookNotifier": "_webhook", "WebhookTarget": "_webhook", "WebhookError": "_webhook",
+}
 
 
 def __getattr__(name: str):
-    """``Alert`` lives in ``_alerts``, loaded with the first alert: importing the module
-    loads only what a text needs."""
-    if name == "Alert":
-        from ._alerts import Alert
+    """``Alert`` and the other backends live in modules of their own, loaded with their
+    first use: importing the module loads only what a text to Telegram needs."""
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
 
-        return Alert
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(import_module(f".{module}", __name__), name)
