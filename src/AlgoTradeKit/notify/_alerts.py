@@ -338,10 +338,15 @@ def _send(alert: Alert, what: dict[str, Any], received: float) -> None:
     if alert.image_tf is not None:
         media = _Media(_Media.PHOTO, make=lambda: _picture(alert, what), fallback=True,
                        label=f"alert {alert.symbol}", filename="alert.png")
+    raw = None
+    if notifier._wants_message:   # the webhook posts what fired, raw (v1.2.0)
+        raw = {"source": alert.source, "condition": what["condition"], "level": what["level"],
+               "side": what["side"], "move_pct": what["move_pct"], "window": alert.window,
+               "price": what["price"]}
     for dest in dests:
         silent = dest.silent if alert.silent is None else bool(alert.silent)
         notifier._queue_event(dest, KIND_ALERT, alert.symbol, body, queued_at=received,
-                              silent=silent, media=media)
+                              silent=silent, media=media, fields=raw)
 
 
 def _picture(alert: Alert, what: dict[str, Any]) -> bytes:
