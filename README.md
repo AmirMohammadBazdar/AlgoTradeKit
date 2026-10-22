@@ -23,6 +23,7 @@ python examples/04_telegram_messages.py        # text to your Telegram (needs TE
 python examples/05_telegram_paper_alerts.py    # paper trading's signals to Telegram (same)
 python examples/06_telegram_chart_picture.py   # a chart picture to Telegram (same, and the [notify] extra)
 python examples/07_price_alerts.py             # price alerts to Telegram (same)
+python examples/08_telegram_commands.py        # /status, /positions, /stop from Telegram (same)
 ```
 
 > ### 🚀 New in v1.1.0 — the chart grew up
