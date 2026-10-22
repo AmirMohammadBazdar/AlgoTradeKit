@@ -81,6 +81,13 @@ def _span(seconds: float) -> str:
     return f"{seconds / 3_600:g}h"
 
 
+def _percent(change: float, *, sign: bool = False) -> str:
+    """A move in percent: «0.09» under 1%, «3.0» from 1% — one decimal would
+    show a 0.04% move as «0.0»."""
+    decimals = 2 if abs(change) < 1 else 1
+    return f"{change:+.{decimals}f}" if sign else f"{abs(change):.{decimals}f}"
+
+
 def _wait_for(condition: threading.Condition, timeout: float) -> None:
     """``wait()``'s pause; tests replace it to press Ctrl+C."""
     condition.wait(timeout)
@@ -268,7 +275,7 @@ class Alert:
             verb = "fell" if change < 0 else "rose"
             closes = f" on {self.on_close} closes" if self.on_close else ""
             return {"price": price, "level": reference, "side": side, "move_pct": change,
-                    "condition": f"{verb} {abs(change):.1f}% in {self.window}{closes}",
+                    "condition": f"{verb} {_percent(change)}% in {self.window}{closes}",
                     "lines": [reference]}
         crossed = None
         for edge in self._edges:
@@ -304,7 +311,7 @@ def _values(alert: Alert, what: dict[str, Any], received: float) -> dict[str, An
         "header": f"🕑 {time} · {alert.symbol} {price}",
         "level": _template.Number(what["level"]),
         "side": what["side"],
-        "move_pct": None if change is None else f"{change:+.1f}%",
+        "move_pct": None if change is None else f"{_percent(change, sign=True)}%",
         "window": alert.window,
         "condition": what["condition"],
         "source": alert.source,
