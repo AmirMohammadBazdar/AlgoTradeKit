@@ -52,6 +52,12 @@ Times
     ``{candle_time}`` is the opening of the candle the event belongs to: an
     OPEN's signal's, any other event's own, rounded down to the pair's
     timeframe (Q2.8 b).
+Commands (v1.2.0)
+    A notifier with ``commanders=`` answers for the sessions it serves: a session
+    registers as its runner starts (:meth:`NotifySession.listen`) and leaves at
+    STOP.  It tells a command its pairs' markets, today's counts and open
+    positions — valued by the position's own maths at a price the command asked
+    for — and a picture of a pair; /stop calls the runner's stop.
 
 A new event type needs a default here, beside its printer branch and its
 ``ALL_EVENT_TYPES`` entry.
@@ -227,13 +233,27 @@ def _check_templates(notifier: Notifier) -> None:
 # ---------------------------------------------------------------------------
 
 class OpenPosition(NamedTuple):
-    """One open position, as a notifier reads it: a plain copy."""
+    """One open position, as a notifier reads it: a plain copy.  A command's copy also
+    has its P&L at the price it was read at, by the position's own maths, and what the
+    position risks (v1.2.0)."""
 
     trade_id: Any
     direction: str
     entry_price: float
     size: float
     stop_loss: float | None
+    next_tp: float | None = None
+    pnl: float | None = None
+    risk: float | None = None
+
+
+def held(position: Any, price: float | None = None) -> OpenPosition:
+    """A plain copy of an open ``_InternalPosition``; with *price*, its P&L there."""
+    tp = position.next_tp
+    pnl = None if price is None else float(position.unrealised_pnl(price))
+    return OpenPosition(position.trade_id, position.direction, float(position.entry_price),
+                        float(position.size), float(position.stop_loss),
+                        None if tp is None else float(tp), pnl, float(position.risk_amount))
 
 
 class _Drawn(NamedTuple):
@@ -294,6 +314,11 @@ class PairView:
     timeframe = ""
     mode = ""                     # "paper" (run_live) / "live" (Trader)
     timeframe_ms: int | None = None
+    #: The pair's broker, which a command asks for a price (v1.2.0).
+    broker: Any = None
+    #: Is the newest price a forming candle's — a Trader in a realtime mode — rather
+    #: than a close?
+    realtime = False
 
     def last_price(self) -> float | None:
         """The newest price the runner has: the last closed candle's close, or
@@ -304,8 +329,8 @@ class PairView:
         """The opening of a candle of this pair (UTC ms), to round times from."""
         return None
 
-    def open_positions(self) -> list[OpenPosition]:
-        """The pair's open positions now."""
+    def open_positions(self, price: float | None = None) -> list[OpenPosition]:
+        """The pair's open positions now; with *price*, each with its P&L there."""
         return []
 
     # ---- pictures (v1.2.0) -------------------------------------------------
@@ -329,15 +354,43 @@ class PairView:
         return None
 
 
+class Market(NamedTuple):
+    """One pair, as a command asks its broker about it (v1.2.0)."""
+
+    symbol: str
+    timeframe: str
+    broker: Any
+
+
+class PairNow(NamedTuple):
+    """One pair, as a command answers about it (v1.2.0): today's trades and net as the
+    day's summary counts them, and the open positions valued at ``price``."""
+
+    symbol: str
+    timeframe: str
+    trades: int
+    won: int
+    lost: int
+    net: float
+    realized: bool
+    positions: tuple[OpenPosition, ...]
+    price: float | None
+    price_note: str | None   # None: the broker's price now; else what this price is
+
+
 class NotifySession:
     """One run of ``run_live`` or ``Trader``, as its notifiers announce it: a new
-    random id, its mode, and the adapters wired for it."""
+    random id, its mode, and the adapters wired for it.  For a notifier that takes
+    commands it is also what /status, /positions, /chart and /stop read (v1.2.0)."""
 
     def __init__(self, mode: str, *, on_stop: str | None = None) -> None:
         self.id = secrets.token_hex(4)
         self.mode = mode
         self.on_stop = on_stop
         self.adapters: list[_Adapter] = []
+        self.started_at: float | None = None   # when START went, by the notifier's clock
+        self._stop: Callable[[str], None] | None = None
+        self._listened: list[Notifier] = []
 
     @property
     def notifiers(self) -> list[Notifier]:
@@ -351,6 +404,50 @@ class NotifySession:
         """Deliver what the notifiers hold — the stop message last of all — sharing
         one *timeout*."""
         close_notifiers(self.notifiers, timeout)
+
+    # ---- commands (v1.2.0) ---------------------------------------------
+
+    def listen(self, stop: Callable[[str], None]) -> None:
+        """From now on, the notifiers that take commands answer for this session, and
+        /stop calls *stop* with its reason — from the listener's thread."""
+        self._stop = stop
+        for notifier in self.notifiers:
+            if notifier._commands is not None:
+                notifier._commands.add(self)
+                self._listened.append(notifier)
+
+    def unlisten(self) -> None:
+        for notifier in self._listened:
+            notifier._commands.remove(self)
+        self._listened = []
+
+    def stop(self, reason: str) -> None:
+        if self._stop is not None:
+            self._stop(reason)
+
+    def _views(self, notifier: Notifier) -> list[_Adapter]:
+        return [adapter for adapter in self.adapters_of(notifier) if adapter.view is not None]
+
+    def markets(self, notifier: Notifier) -> list[Market]:
+        """The pairs wired to *notifier*, with their brokers — read on any thread."""
+        return [Market(adapter.view.symbol, adapter.view.timeframe, adapter.view.broker)
+                for adapter in self._views(notifier)]
+
+    def now(self, notifier: Notifier, prices: list[float | None]) -> list[PairNow]:
+        """Each pair of :meth:`markets`, valued at its price in *prices* (``None``: the
+        runner's own newest) — on the notifier's thread, where the day's counts live."""
+        views = self._views(notifier)
+        return [adapter.now(prices[index] if index < len(prices) else None)
+                for index, adapter in enumerate(views)]
+
+    def chart(self, notifier: Notifier, symbol: str, timeframe: str) -> _Media | None:
+        """/chart of one of the session's pairs: its candles and open positions, copied
+        now, on the notifier's thread."""
+        for adapter in self._views(notifier):
+            view = adapter.view
+            if view.symbol.upper() == symbol.upper() and view.timeframe == timeframe:
+                return adapter.chart_media()
+        return None
 
 
 def wire_notifiers(
@@ -501,7 +598,7 @@ def _with_sl_line(text: str, line: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The default texts — QUESTIONS.md Part 2, word for word, with Q2.6 (c)
+# The default texts — as decided for Part 2, word for word, with Q2.6 (c)
 # ---------------------------------------------------------------------------
 
 def _default_signal(t: _Text) -> list[str | None]:
@@ -1194,6 +1291,8 @@ class _Adapter:
 
     def _on_start(self, event: StartEvent, received: float, values: dict[str, Any]) -> None:
         self._days.clear()   # the day counts from the later of 00:00 and the start
+        if self.session is not None and self.session.started_at is None:
+            self.session.started_at = received   # /status counts its uptime from here
         if self.view is not None and self.session is not None and self._cancel_job is None:
             self._cancel_job = self.notifier.add_daily_job(self._at_midnight)
         hub = self.hub
@@ -1300,6 +1399,49 @@ class _Adapter:
             media = self._media(KIND_DAILY_SUMMARY, None, values)
         for dest in dests:
             self._queue(dest, KIND_DAILY_SUMMARY, symbol, body, now, media=media)
+
+    # ---- commands (v1.2.0) ---------------------------------------------
+
+    def now(self, price: float | None) -> PairNow:
+        """This pair as a command answers about it, on the notifier's thread: today's
+        counts, and the open positions at *price* — or at the runner's newest price,
+        with what it is, when *price* is ``None``."""
+        view = self.view
+        assert view is not None
+        notifier = self.notifier
+        today = datetime.fromtimestamp(notifier._clock.time(),
+                                       tz=notifier._zone or timezone.utc).date()
+        day = self._days.get(today) or _Day()
+        note = None
+        if price is None:
+            price = view.last_price()
+            if price is not None:
+                note = self._price_note()
+        return PairNow(view.symbol, view.timeframe, day.trades, day.won, day.lost, day.net,
+                       day.realized, tuple(view.open_positions(price)), price, note)
+
+    def _price_note(self) -> str:
+        """What the runner's newest price is: a close («14:00 close»), or in a realtime
+        Trader the forming candle's."""
+        view = self.view
+        assert view is not None
+        anchor = view.candle_anchor()
+        if view.realtime or anchor is None or not view.timeframe_ms:
+            return "the runner's last price"
+        closed = (int(anchor) + view.timeframe_ms) / 1000
+        return f"{_template.Moment(closed, self.notifier._zone):%H:%M} close"
+
+    def chart_media(self) -> _Media | None:
+        """/chart of this pair: the last 100 candles and the open positions, copied now
+        and drawn as a trade's picture is."""
+        view = self.view
+        if view is None:
+            return None
+        scene = view.capture_now(PICTURE_CANDLES + max(0, view.warmup_candles))
+        if scene is None:
+            return None
+        return _Media(_Media.PHOTO, make=lambda: self._draw("chart", None, scene, []),
+                      fallback=True, label="/chart", filename="chart.png")
 
     # ---- pictures ------------------------------------------------------
 
