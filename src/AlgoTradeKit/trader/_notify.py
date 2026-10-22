@@ -906,17 +906,42 @@ class _Adapter:
         zone = self.notifier._zone
         view = self.view
         timeframe = getattr(event, "timeframe", "") or (view.timeframe if view else "")
+        candle = self._candle_ms(event, anchor)
         values: dict[str, Any] = {
             "time": _template.Moment(received, zone),
             "date": _template.Day(received, zone),
-            "candle_time": _template.Moment(self._candle_ms(event, anchor) / 1000, zone),
+            "candle_time": _template.Moment(candle / 1000, zone),
             "symbol": event.symbol or None,
             "source": event.source.upper(),
             "timeframe": timeframe or None,
             "price": _num(price),
+            "_candle_ms": candle,
         }
         values["header"] = self._header(values)
         return values
+
+    def _raw(self, event: TraderEvent, values: dict[str, Any]) -> dict[str, Any] | None:
+        """The event's own values, raw, for a backend that posts them (the webhook, v1.2.0):
+        numbers as numbers — a close's are the whole trade's, as its text says — times in
+        UTC ms, the objects left out, and the candle the event belongs to."""
+        if not self.notifier._wants_message:
+            return None
+        raw: dict[str, Any] = {"source": event.source.upper()}
+        for item in fields(type(event)):
+            name = item.name
+            if name in ("time", "symbol", "source") or name in _OBJECT_FIELDS:
+                continue
+            shown = values.get(name)
+            raw[name] = float(shown) if isinstance(shown, _template.Number) else getattr(
+                event, name)
+        if isinstance(event, CloseEvent):
+            raw["direction"] = values.get("direction")
+        if isinstance(event, (StartEvent, StopEvent)):
+            raw["symbols"] = list(values.get("_symbols") or event.symbols or ())
+        if isinstance(event, StopEvent):
+            raw["open_positions"] = values.get("open_positions")
+        raw["candle_time"] = values.get("_candle_ms")
+        return raw
 
     def _candle_ms(self, event: TraderEvent, anchor: Any) -> int:
         """The opening of the candle *event* belongs to (Q2.8 b)."""
@@ -975,12 +1000,14 @@ class _Adapter:
         coalesce: Any = None,
         on_done: Callable[..., None] | None = None,
         media: _Media | None = None,
+        fields: dict[str, Any] | None = None,
     ) -> None:
         self.notifier._queue_event(
             dest, kind, symbol, body,
             queued_at=received,
             silent=dest.silent or kind in SILENT_KINDS or silent,
             reply=reply, edit=edit, coalesce=coalesce, on_done=on_done, media=media,
+            fields=fields,
         )
 
     def _send(self, kind: str, event: TraderEvent, received: float,
@@ -996,8 +1023,10 @@ class _Adapter:
         if body is None:
             return
         media = self._media(kind, event, values)
+        raw = self._raw(event, values)
         for dest in dests:
-            self._queue(dest, kind, symbol, body, received, silent=silent, media=media)
+            self._queue(dest, kind, symbol, body, received, silent=silent, media=media,
+                        fields=raw)
 
     # ---- roots ---------------------------------------------------------
 
@@ -1079,11 +1108,13 @@ class _Adapter:
         # The OPEN this signal leads to names it by its timestamp (signal_time).
         stamp = int(event.signal.timestamp) if event.signal is not None else int(event.time)
         media = self._media(KIND_SIGNAL, event, values)
+        raw = self._raw(event, values)
         for dest in dests:
             on_done = None
             if not self._gets(dest, KIND_OPEN, symbol):
                 on_done = self._keep_root(dest, ("signal", self, stamp, event.direction))
-            self._queue(dest, KIND_SIGNAL, symbol, body, received, on_done=on_done, media=media)
+            self._queue(dest, KIND_SIGNAL, symbol, body, received, on_done=on_done, media=media,
+                        fields=raw)
 
     def _on_open(self, event: OpenEvent, received: float, values: dict[str, Any]) -> None:
         trade = self._trades[event.trade_id] = _Trade()
@@ -1110,8 +1141,9 @@ class _Adapter:
         if body is None:
             return
         media = self._media(KIND_OPEN, event, values)
+        raw = self._raw(event, values)
         for dest in dests:
-            self._queue(dest, KIND_OPEN, symbol, body, received, media=media,
+            self._queue(dest, KIND_OPEN, symbol, body, received, media=media, fields=raw,
                         on_done=self._keep_root(dest, ("open", self, event.trade_id)))
 
     def _on_sl_move(self, event: SlMoveEvent, received: float, values: dict[str, Any]) -> None:
@@ -1136,13 +1168,15 @@ class _Adapter:
             line = (f"SL {_template.Number(trade.first_sl)} → {_template.Number(event.new_sl)} "
                     f"({cause}) · {moved}")
         media = self._media(KIND_SL_MOVE, event, values)
+        raw = self._raw(event, values)
         for dest in dests:
             edit = None
             if line is not None:
                 edit = self._edit_for(dest, symbol, event.trade_id, trade, line)
             self._queue(dest, KIND_SL_MOVE, symbol, body, received,
                         reply=self._reply_for(dest, symbol, event.trade_id, trade),
-                        edit=edit, coalesce=("sl_move", self, event.trade_id), media=media)
+                        edit=edit, coalesce=("sl_move", self, event.trade_id), media=media,
+                        fields=raw)
 
     def _edit_for(self, dest: _Destination, symbol: str | None, trade_id: Any,
                   trade: _Trade, line: str) -> Callable[[], tuple[Any, str, bool] | None]:
@@ -1231,12 +1265,13 @@ class _Adapter:
         if body is None:
             return
         media = self._media(kind, event, values)
+        raw = self._raw(event, values)
         for dest in dests:
             self._queue(
                 dest, kind, symbol, body, received,
                 reply=self._reply_for(dest, symbol, event.trade_id, trade),
                 on_done=self._forget_root(dest, event.trade_id, trade) if final else None,
-                media=media,
+                media=media, fields=raw,
             )
 
     def _on_plain(self, event: Any, received: float, values: dict[str, Any]) -> None:
@@ -1303,8 +1338,9 @@ class _Adapter:
         if session_id in hub.started:
             return   # one start message per notifier per session
         hub.started.add(session_id)
-        values.update(mode=event.mode, symbols=_words(self._session_symbols(event)),
-                      session_id=session_id)
+        symbols = self._session_symbols(event)
+        values.update(mode=event.mode, symbols=_words(symbols), session_id=session_id,
+                      _symbols=symbols)
         self._send(KIND_START, event, received, values)
 
     def _on_stop(self, event: StopEvent, received: float, values: dict[str, Any]) -> None:
@@ -1332,6 +1368,7 @@ class _Adapter:
             mode=event.mode, reason=stops[0].reason, open_positions=total, error=error,
             session_id=session_id, symbols=_words(self._session_symbols(event)),
             _left=_left_open(event.mode, total, close_all),
+            _symbols=self._session_symbols(event),
         )
         hub.symbols.pop(session_id, None)
         self._send(KIND_STOP, event, received, values)
@@ -1397,8 +1434,13 @@ class _Adapter:
             except Exception:  # noqa: BLE001 — the summary goes without its picture
                 values["_scene"] = None
             media = self._media(KIND_DAILY_SUMMARY, None, values)
+        raw = None
+        if notifier._wants_message:   # the webhook posts the day's figures raw (v1.2.0)
+            raw = {"source": source, "day": day.isoformat(), "trades": stats.trades,
+                   "won": stats.won, "lost": stats.lost, "net": stats.net,
+                   "open_positions": len(positions)}
         for dest in dests:
-            self._queue(dest, KIND_DAILY_SUMMARY, symbol, body, now, media=media)
+            self._queue(dest, KIND_DAILY_SUMMARY, symbol, body, now, media=media, fields=raw)
 
     # ---- commands (v1.2.0) ---------------------------------------------
 
