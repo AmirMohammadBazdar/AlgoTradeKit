@@ -7,6 +7,90 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.2.0] — 2026-10-23
+
+Notifications. A trading session's events, chart pictures, price alerts and a
+backtest's report go to Telegram, Discord, e-mail or a webhook, and Telegram
+takes commands back. Trading never waits for a message, and nothing changes for
+code that asks for none.
+
+### Added
+
+- **`notify` module and `TelegramNotifier`** — one bot and its named chats:
+  people, groups, channels and forum topics. `TelegramChat(chat_id, thread_id=,
+  silent=, events=, symbols=)` gives a chat its own topic, sound and filters. The
+  token and every chat are checked when the notifier is created, with a sentence
+  saying what to fix, and `TelegramNotifier.find_chats(token)` lists the chats
+  that wrote to the bot. `send_text()` fills `{time}`, `{date}`, `{symbol}`,
+  `{price}` and `{header}`; `timezone=`, `proxy=` (HTTP, or SOCKS with the
+  `[notify]` extra) and `templates=` shape what goes out. `KIND_*` names every
+  kind of message.
+- **A queue per notifier** — every send waits its turn on the notifier's own
+  thread: paced to the service's limits, retried after an error, held through an
+  outage, and marked «⏱ N min late» when it arrives late.
+- **Trading events to your chats** — `TraderConfig(notifiers=[...])`, for
+  `run_live` and `Trader` alike: signals, opens, risk-free moves, TP levels,
+  closes, exit signals, the daily loss limit, reconciles, errors, the start and
+  the stop, and a summary of the day at midnight in the notifier's time zone. A
+  trade's later messages reply to its open. A chat that takes `sl_move` sees each
+  move of the stop as an edit of the open message; by default a chat takes every
+  kind but that one.
+- **`StartEvent`, `StopEvent` and `MessageEvent`** on the event stream, printed
+  by the terminal log too, and **`BaseStrategy.notify(text)`**: a strategy's own
+  message, sent on a newly closed live candle, and never in a backtest, during
+  the seed or on a forming candle.
+- **Chart pictures** — `images={"open", "close"}` puts a picture of the pair's
+  chart on those trade messages. `send_chart(chart, start, end)` sends one of a
+  `Chart` you built, or with `broker=`, `symbol=` and `timeframe=` of a venue's
+  candles; `send_photo(png)` sends your own; `send_report(report)` sends a
+  backtest's figures, its balance curve and its HTML report.
+  `Chart.screenshot(start, end, width=, height=, timezone=)` makes them: a
+  headless Chromium photographs the chart's own page.
+  `TraderConfig.chart_indicators` puts indicators on a session's chart and its
+  pictures.
+- **Price alerts** — `bot.watch(broker, symbol, above=, below=, move_pct= with
+  window=, on_close=, repeat=, rearm=, image=)` returns an `Alert`: «🔔 BTCUSDT
+  crossed above 65,000 · now 65,012.5», with no strategy and no trading.
+  `bot.alerts()` lists them, `alert.cancel()` ends one, and `bot.wait()` keeps a
+  script alive until none is armed.
+- **Commands from Telegram** — `TelegramNotifier(..., commanders=[id])` answers
+  `/status`, `/positions`, `/chart`, `/stop` and `/help`. `/stop` ends the
+  session as Ctrl+C does; live trading first asks for `/stop CONFIRM`, within
+  60 s. Commands sent while nothing listened are skipped, not run late, and
+  anyone not in `commanders` is refused.
+- **Discord, e-mail and webhooks** — `DiscordNotifier` with `DiscordWebhook`,
+  `EmailNotifier` with `EmailRecipient`, and `WebhookNotifier` with
+  `WebhookTarget`, each with its error (`DiscordError`, `EmailError`,
+  `WebhookError`). They take the same kinds, filters, templates, pictures and
+  queue, and work wherever a Telegram bot does. E-mail goes over SMTP with
+  STARTTLS or SSL and gathers a trade's messages into one e-mail every 15 minutes
+  (`digest_minutes=0` sends each at once). A webhook gets JSON with the text and
+  the event's raw fields, signed with HMAC-SHA256 when given `secret=`. Discord
+  cannot reply, e-mail cannot edit, and commands stay Telegram's.
+- **`[notify]` extra** (also as `[telegram]`) — PySocks for a SOCKS proxy and
+  Playwright for pictures, then, once, `playwright install chromium`. Text needs
+  nothing beyond the core install.
+- **Runnable examples 04–09** — messages, paper trading's events, a chart
+  picture, price alerts and commands on Telegram, then Discord, e-mail and a
+  webhook. Each prints what to set when its variables are missing.
+
+### Changed
+
+- **`Chart.set_data` is faster**: it reads the frame by columns instead of
+  `iterrows`. A 300-candle chart took 0.29 s of CPU and now takes 7 ms.
+- The README's Event Log sample shows the lines the printer really prints, the
+  new events included.
+
+### Fixed
+
+- **Live trading skipped the first candle to close after a start.** The seed
+  kept the candle that was still forming, so the feed's closed copy of it was
+  skipped as a repeat: that candle never reached the strategy, and its row kept
+  the values it had at the start. `run_live`, `Trader` and the Trader's
+  real-fills chart now seed with closed candles only, judged by the venue's
+  clock.
+- `examples/01_backtest_report.py` named the wrong file in its docstring.
+
 ## [1.1.1] — 2026-09-03
 
 Bar replay: shapes that outlive the cursor.

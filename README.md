@@ -28,31 +28,37 @@ python examples/08_telegram_commands.py        # /status, /positions, /stop from
 python examples/09_other_backends.py           # Discord, e-mail, a webhook (their own variables)
 ```
 
-> ### 🚀 New in v1.1.0 — the chart grew up
+> ### 🔔 New in v1.2.0 — notifications
 >
-> Give the chart your finest candles once and look at them any way you like:
+> Your strategy's trades, a picture of the chart with each, price alerts and a
+> backtest's report, sent to Telegram, and commands back from your phone:
 >
 > ```python
-> from AlgoTradeKit.visual import Chart, ChartPage
+> from AlgoTradeKit import run_live
+> from AlgoTradeKit.broker import Broker
+> from AlgoTradeKit.notify import TelegramNotifier
+> from AlgoTradeKit.trader import TraderConfig
 >
-> fast = Chart(title="BTC 3m", display_timeframe="3m"); fast.set_data(df_1m)
-> slow = Chart(title="BTC 5m", display_timeframe="5m"); slow.set_data(df_1m)
->
-> page = ChartPage(title="BTC desk")
-> page.add(fast)          # row 0
-> page.add(slow)          # row 1 — stacked; row=0 would put it alongside
-> page.show(block=True)
+> bot = TelegramNotifier(token, {"me": 123456789},   # your private chat with the bot
+>                        images={"open", "close"},   # chart pictures: the [notify] extra
+>                        commanders=[123456789])     # /status, /chart, /stop from your phone
+> config = TraderConfig(symbol="BTCUSDT", min_candles=200, notifiers=[bot])
+> run_live(strategy=MyStrategy(), broker=Broker("binance-spot"), config=config)
 > ```
 >
-> * **Timeframe switching** — feed 1m candles, display any multiple, and change
->   it from the toolbar. Resampling and indicator maths happen in Python.
-> * **Several charts on one page**, scrolling and crosshairing together by
->   *time*, so different timeframes stay aligned. One port, one SSH tunnel.
-> * **Bar replay** — step history a candle at a time, watching the higher
->   timeframe candle build out of the lower ones. Across a whole page, every
->   chart replays from the same instant.
+> * **Trading events** — signals, opens, closes, the start, the stop and the day,
+>   from `run_live` and `Trader` alike. A trade's messages reply to its first one,
+>   and trading never waits for a message.
+> * **Chart pictures** on trade messages, or on demand with `send_chart` and
+>   `send_report`.
+> * **Price alerts** with no strategy: `bot.watch(broker, "BTCUSDT", above=65_000)`.
+> * **Commands**: `/status`, `/positions`, `/chart`, `/stop` and `/help`.
+> * **Discord, e-mail and webhooks** get the same messages.
 >
-> See [`visual`](#visual--interactive-chart).
+> See [`notify`](#notify--notifications-v120).
+>
+> **v1.1.0** grew the chart: timeframe switching, several synced charts on one
+> page, and bar replay. See [`visual`](#visual--interactive-chart).
 >
 > **v1.0.0** brought live trading: `Trader` for real orders, `run_live()` for
 > paper trading on live data, both sharing the backtest's own position maths.
@@ -877,7 +883,7 @@ mail = EmailNotifier("smtp.gmail.com", {"me": "you@gmail.com"},
                      username="you@gmail.com", password=os.environ["SMTP_PASSWORD"])
 hook = WebhookNotifier({"mine": "https://example.com/hook"},
                        secret=os.environ["WEBHOOK_SECRET"])
-config = TraderConfig(symbol="BTCUSDT", notifiers=[bot, discord, mail, hook])
+config = TraderConfig(symbol="BTCUSDT", min_candles=200, notifiers=[bot, discord, mail, hook])
 ```
 
 They take the same kinds, filters, templates and pictures, and work wherever a Telegram bot
