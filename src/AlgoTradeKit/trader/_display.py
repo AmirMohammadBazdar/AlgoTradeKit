@@ -93,6 +93,7 @@ import pandas as pd
 
 from ..broker import MARKET_FOREX, BrokerError
 from ..broker._timeutil import now_ms, parse_to_ms
+from ..broker.base import drop_forming_candle, last_closed_candles
 from ..simulate import REPORT_MODE_NONE, TP_MODE_MULTI_RR, ClosedTrade, SimulateReport
 from ..simulate._live import LiveSimulation
 from ..simulate._report import _build_trade_markers, build_report
@@ -671,15 +672,15 @@ class _DisplayBridge:
 
     def _fetch_seed_df(self) -> pd.DataFrame:
         """Seed candles for the real-mode chart (``display_candles`` XOR
-        ``display_start``, ≥ ``min_candles`` — the seed rules)."""
+        ``display_start``, ≥ ``min_candles`` — the seed rules), closed ones only."""
         config = self.config
         symbol, tf = config.symbol, self.tf
         if config.display_candles is not None:
-            rows = self.broker.fetch_last_candles(symbol, tf, config.display_candles)
+            rows = last_closed_candles(self.broker, symbol, tf, config.display_candles)
         else:
-            rows = self.broker.fetch_candles(
+            rows = drop_forming_candle(self.broker, self.broker.fetch_candles(
                 symbol, tf, parse_to_ms(config.display_start), now_ms()
-            )
+            ), tf)
         if len(rows) < config.min_candles:
             raise ValueError(
                 f"display: the seed returned {len(rows)} candles for {symbol!r} "

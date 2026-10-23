@@ -51,6 +51,15 @@ dev = [
 # runs under Wine and is reached through the bridge — see MT5_WINE_SETUP.md.
 mt5 = ['MetaTrader5; platform_system == "Windows"']
 
+# Notifications (AlgoTradeKit.notify).  Text needs nothing beyond the core
+# install; PySocks lets requests reach Telegram through a SOCKS proxy
+# (socks5h://…), and Playwright photographs the chart page for pictures — then,
+# once, `playwright install chromium`.  1.39.0 is the oldest release that installs
+# on Python 3.12 (its greenlet has wheels there).  `telegram` is the same list
+# under the backend's name.
+notify = ["PySocks>=1.7.1", "playwright>=1.39.0"]
+telegram = ["PySocks>=1.7.1", "playwright>=1.39.0"]
+
 [project.urls]
 Homepage   = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
 Repository = "https://github.com/AmirMohammadBazdar/AlgoTradeKit"

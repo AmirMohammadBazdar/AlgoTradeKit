@@ -1,7 +1,7 @@
 """
 Backtest a strategy and look at the result — chart + report.
 
-    python examples/03_backtest_report.py [path/to/1m.csv]
+    python examples/01_backtest_report.py [path/to/1m.csv]
 
 Opens two browser tabs: the candle chart with every trade drawn on it, and the
 report page with the stats and the balance curve.

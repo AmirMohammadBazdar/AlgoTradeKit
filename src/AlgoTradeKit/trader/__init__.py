@@ -63,11 +63,15 @@ Classes
 ; the same (broker, symbol) never appears twice.
     TraderEvent + SignalEvent / OpenEvent / SlMoveEvent / RiskFreeEvent /
     TpLevelEvent / CloseEvent / ExitSignalEvent / DailyLossEvent /
-    ReconcileEvent / ErrorEvent
+    ReconcileEvent / ErrorEvent / StartEvent / StopEvent / MessageEvent
                     Typed events — one frozen dataclass per
-                    meaningful live-trading moment.
+                    meaningful live-trading moment; v1.2.0 adds a session's
+                    start and stop and a strategy's own message
+                    (``self.notify``).
     EventStream     Publish/subscribe backbone; subscribers are the
-                    extension point (notification backends in v1.1).
+                    extension point.  ``TraderConfig(notifiers=[…])`` sends
+                    the events as messages (``AlgoTradeKit.notify``), and
+                    ``stream.subscribe(notifier)`` works too.
     TerminalEventPrinter
                     The v1.0.0 subscriber — one timestamped, grep-able line
                     per event; ``attach_terminal_printer(stream, config)``
@@ -82,8 +86,9 @@ Constants
         Shutdown policy for open positions.
     EVENT_SIGNAL / EVENT_EXIT_SIGNAL / EVENT_OPEN / EVENT_SL_MOVE /
     EVENT_RISK_FREE / EVENT_TP_LEVEL / EVENT_CLOSE / EVENT_DAILY_LOSS /
-    EVENT_RECONCILE / EVENT_ERROR — event types (``ALL_EVENT_TYPES`` is
-        the full set, the ``log_event_types`` domain).
+    EVENT_RECONCILE / EVENT_ERROR / EVENT_START / EVENT_STOP /
+    EVENT_MESSAGE — event types (``ALL_EVENT_TYPES`` is the full set, the
+        ``log_event_types`` domain).
     SOURCE_SIM / SOURCE_LIVE — event source tags (``[SIM]`` / ``[LIVE]``).
     CLOSE_REASON_MANUAL
         Close reason of a venue-side close the trader did not order (
@@ -109,11 +114,14 @@ from ._events import (
     EVENT_DAILY_LOSS,
     EVENT_ERROR,
     EVENT_EXIT_SIGNAL,
+    EVENT_MESSAGE,
     EVENT_OPEN,
     EVENT_RECONCILE,
     EVENT_RISK_FREE,
     EVENT_SIGNAL,
     EVENT_SL_MOVE,
+    EVENT_START,
+    EVENT_STOP,
     EVENT_TP_LEVEL,
     SOURCE_LIVE,
     SOURCE_SIM,
@@ -122,11 +130,14 @@ from ._events import (
     ErrorEvent,
     EventStream,
     ExitSignalEvent,
+    MessageEvent,
     OpenEvent,
     ReconcileEvent,
     RiskFreeEvent,
     SignalEvent,
     SlMoveEvent,
+    StartEvent,
+    StopEvent,
     TerminalEventPrinter,
     TpLevelEvent,
     TraderEvent,
@@ -161,6 +172,9 @@ __all__ = [
     "DailyLossEvent",
     "ReconcileEvent",
     "ErrorEvent",
+    "StartEvent",
+    "StopEvent",
+    "MessageEvent",
     "EventStream",
     "TerminalEventPrinter",
     "attach_terminal_printer",
@@ -174,6 +188,9 @@ __all__ = [
     "EVENT_DAILY_LOSS",
     "EVENT_RECONCILE",
     "EVENT_ERROR",
+    "EVENT_START",
+    "EVENT_STOP",
+    "EVENT_MESSAGE",
     "ALL_EVENT_TYPES",
     "SOURCE_SIM",
     "SOURCE_LIVE",

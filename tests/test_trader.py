@@ -157,11 +157,14 @@ from AlgoTradeKit.trader import (
     EVENT_DAILY_LOSS,
     EVENT_ERROR,
     EVENT_EXIT_SIGNAL,
+    EVENT_MESSAGE,
     EVENT_OPEN,
     EVENT_RECONCILE,
     EVENT_RISK_FREE,
     EVENT_SIGNAL,
     EVENT_SL_MOVE,
+    EVENT_START,
+    EVENT_STOP,
     EVENT_TP_LEVEL,
     EXEC_CANDLE_CLOSE,
     EXEC_CANDLE_UPDATE,
@@ -175,11 +178,14 @@ from AlgoTradeKit.trader import (
     ErrorEvent,
     EventStream,
     ExitSignalEvent,
+    MessageEvent,
     OpenEvent,
     ReconcileEvent,
     RiskFreeEvent,
     SignalEvent,
     SlMoveEvent,
+    StartEvent,
+    StopEvent,
     TerminalEventPrinter,
     TpLevelEvent,
     Trader,
@@ -746,6 +752,9 @@ class TestExports:
             "DailyLossEvent",
             "ReconcileEvent",
             "ErrorEvent",
+            "StartEvent",
+            "StopEvent",
+            "MessageEvent",
             "EventStream",
             "TerminalEventPrinter",
             "attach_terminal_printer",
@@ -759,6 +768,9 @@ class TestExports:
             "EVENT_DAILY_LOSS",
             "EVENT_RECONCILE",
             "EVENT_ERROR",
+            "EVENT_START",
+            "EVENT_STOP",
+            "EVENT_MESSAGE",
             "ALL_EVENT_TYPES",
             "SOURCE_SIM",
             "SOURCE_LIVE",
@@ -810,6 +822,7 @@ class TestEventTypesAndConstants:
         assert ALL_EVENT_TYPES == frozenset({
             "signal", "exit_signal", "open", "sl_move", "risk_free",
             "tp_level", "close", "daily_loss", "reconcile", "error",
+            "start", "stop", "message",
         })
         assert isinstance(ALL_EVENT_TYPES, frozenset)
 
@@ -825,6 +838,9 @@ class TestEventTypesAndConstants:
             DailyLossEvent: EVENT_DAILY_LOSS,
             ReconcileEvent: EVENT_RECONCILE,
             ErrorEvent: EVENT_ERROR,
+            StartEvent: EVENT_START,
+            StopEvent: EVENT_STOP,
+            MessageEvent: EVENT_MESSAGE,
         }
         for cls, etype in expected.items():
             assert cls.event_type == etype, cls
@@ -1129,6 +1145,11 @@ class TestTerminalPrinterLines:
             DailyLossEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, limit=1.0, loss=2.0),
             ReconcileEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE),
             ErrorEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, where="w", message="m"),
+            StartEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, mode="live",
+                       symbols=("BTCUSDT",)),
+            StopEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, mode="live",
+                      reason="stop()", open_positions=0),
+            MessageEvent(time=TS, symbol="BTCUSDT", source=SOURCE_LIVE, text="t"),
         ]
         assert {e.event_type for e in events} == ALL_EVENT_TYPES
         for event in events:
@@ -3465,6 +3486,19 @@ class TestTraderSeeding:
         assert worker.broker.fetch_calls == [("BTCUSDT", "1h", 10)]
         frame = worker.data["1h"]
         assert len(frame) == 10
+        assert worker._last_committed_ts == _X0 + 9 * _XHOUR
+
+    def test_seed_leaves_the_forming_candle_to_the_scheduler(self, monkeypatch):
+        """The venue's last row is still forming: the seed ends on the candle before it, so
+        the scheduler's first boundary is the forming candle's close."""
+        candles = _x_candles(11)
+        monkeypatch.setattr("AlgoTradeKit.broker.base.now_ms",
+                            lambda: candles[-1]["timestamp"] + 25 * 60_000)
+        t = _t_trader(broker=_TFuturesBroker(candles, fill_price=110.0),
+                      cfg=_t_cfg(min_candles=10))
+        worker = _t_ready(t)
+        assert worker.broker.fetch_calls == [("BTCUSDT", "1h", 10), ("BTCUSDT", "1h", 11)]
+        assert len(worker.data["1h"]) == 10
         assert worker._last_committed_ts == _X0 + 9 * _XHOUR
 
     def test_short_history_raises(self):

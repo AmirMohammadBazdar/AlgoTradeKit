@@ -126,9 +126,12 @@ class BaseBroker(ABC):
         self, symbol: str, timeframe: str, count: int
     ) -> list[dict[str, Any]]:
         """
-        The most recent *count* closed candles.  Generic default: derive a start
-        time from ``count`` and slice; connectors with a native "last N" call
-        (e.g. MetaTrader ``copy_rates_from_pos``) override this.
+        The most recent *count* candles.  The newest may still be forming:
+        Binance's REST and MetaTrader's bar 0 both include it, and the trader's
+        scheduler counts on that row.  A live seed wants closed candles only:
+        :func:`last_closed_candles`.  Generic default: derive a start time from
+        ``count`` and slice; connectors with a native "last N" call (e.g.
+        MetaTrader ``copy_rates_from_pos``) override this.
         """
         tf = normalize_timeframe(timeframe)
         if tf not in TIMEFRAME_MS:
@@ -313,3 +316,52 @@ class BaseBroker(ABC):
     def __repr__(self) -> str:
         auth = "auth" if self._authenticated else "public"
         return f"<{self.__class__.__name__} name={self.name!r} {auth}>"
+
+
+# ======================================================================
+# Closed candles only — for a live seed
+# ======================================================================
+
+def last_closed_candles(
+    broker: Any, symbol: str, timeframe: str, count: int
+) -> list[dict[str, Any]]:
+    """
+    The most recent *count* **closed** candles, for a live seed.
+
+    A seed that kept the forming candle would hold it as it was at the start,
+    and the feed's closed copy of it would then be skipped as a repeat: the
+    first candle to close after a start never reached the strategy.  So a
+    forming last row is left out, and one candle more is fetched to keep
+    *count*.  *broker* needs only ``fetch_last_candles``; its
+    ``clock_offset_ms``, when it has one, puts the test on the venue's clock.
+    """
+    rows = broker.fetch_last_candles(symbol, timeframe, count)
+    if rows and _is_forming(broker, rows[-1], timeframe):
+        rows = broker.fetch_last_candles(symbol, timeframe, count + 1)
+        rows = drop_forming_candle(broker, rows, timeframe)[-count:]
+    return rows
+
+
+def drop_forming_candle(
+    broker: Any, rows: list[dict[str, Any]], timeframe: str
+) -> list[dict[str, Any]]:
+    """*rows* without its last candle while that one is still forming."""
+    if rows and _is_forming(broker, rows[-1], timeframe):
+        return rows[:-1]
+    return rows
+
+
+def _is_forming(broker: Any, candle: dict[str, Any], timeframe: str) -> bool:
+    """A candle opening at ``T`` is final once the venue's clock reaches
+    ``T + timeframe`` — the trader scheduler's arithmetic (D2)."""
+    tf_ms = TIMEFRAME_MS.get(normalize_timeframe(timeframe))
+    if tf_ms is None:
+        return False
+    offset = 0
+    clock = getattr(broker, "clock_offset_ms", None)
+    if clock is not None:
+        try:
+            offset = int(clock())
+        except Exception:  # the local clock, when the venue's cannot be read
+            offset = 0
+    return int(candle["timestamp"]) + tf_ms > now_ms() + offset

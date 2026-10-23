@@ -61,6 +61,11 @@ body.compact #logo{display:none}
 body.compact #chart-title{font-size:11px;font-weight:600;color:var(--text)}
 body.compact #ohlcv{font-size:10px}
 
+/* ── Screenshot mode (v1.2.0) ─────────────────────────────────── */
+/* A picture has no pointer: the legend keeps its names and values, not the
+   buttons that act on them. The page's own controls are hidden by the script. */
+body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:none!important}
+
 /* ── Timeframe selector (v1.1.0) ─────────────────────────────── */
 #tf-wrap{position:relative;flex-shrink:0}
 #tf-btn{font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em}
@@ -667,6 +672,10 @@ let sourceTimeframe=null, displayTimeframe=null, timeframeList=[], tfPending=nul
 const _q = new URLSearchParams(location.search);
 const viewId   = _q.get('view');
 const embedded = viewId !== null && window.parent !== window;
+// Screenshot mode (v1.2.0): ?snapshot=1&from=<s>&to=<s>&tz=<IANA>&title=… is the
+// page a headless browser photographs for a chart picture. It only reads: it
+// sends the server nothing.
+const snapshot = _q.get('snapshot') === '1';
 // Only the chart the pointer is over may drive the others.
 //
 // Comparing values is not enough to stop an echo: each chart snaps a range to
@@ -927,6 +936,130 @@ if(embedded){
       case 'navigate':        scrollToTime(msg.time);                  break;
     }
   });
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SCREENSHOT MODE (v1.2.0)
+//  What a headless browser photographs for a chart picture: no controls,
+//  the title line in the header, the visible range [from, to], and the time
+//  axis and the crosshair label in the zone `tz` (the interactive chart stays
+//  UTC). window.__atkSnapshotReady says when candles, indicators and drawings
+//  are painted.
+// ═══════════════════════════════════════════════════════════════
+const SNAP_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+// The labels the time axis asked for, newest last: what a test reads back.
+const snapTicks = [];
+let snapFormat = null;
+
+function snapParts(sec){
+  if(!snapFormat){
+    const opts = {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit',
+                  minute:'2-digit', second:'2-digit', hourCycle:'h23'};
+    try{ snapFormat = new Intl.DateTimeFormat('en-GB', {...opts, timeZone:_q.get('tz') || 'UTC'}); }
+    catch{ snapFormat = new Intl.DateTimeFormat('en-GB', {...opts, timeZone:'UTC'}); }
+  }
+  const parts = {};
+  snapFormat.formatToParts(new Date(sec * 1000)).forEach(p => { parts[p.type] = p.value; });
+  return parts;
+}
+
+// lightweight-charts' tickMarkFormatter: the tick's type picks the unit, the zone
+// its value. A tick stays where the library put it; only its label moves.
+function snapTickLabel(time, type){
+  if(typeof time !== 'number') return null;         // a business day: the default
+  const p = snapParts(time);
+  const label = type === 0 ? p.year
+              : type === 1 ? SNAP_MONTHS[Number(p.month) - 1]
+              : type === 2 ? p.day
+              : type === 4 ? `${p.hour}:${p.minute}:${p.second}`
+              : `${p.hour}:${p.minute}`;
+  snapTicks.push([time, type, label]);
+  if(snapTicks.length > 500) snapTicks.shift();
+  return label;
+}
+
+// localization.timeFormatter: the crosshair's time label
+function snapTimeLabel(time){
+  if(typeof time !== 'number') return String(time);
+  const p = snapParts(time);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+}
+
+function snapshotHideControls(){
+  document.body.classList.add('snapshot');
+  ['tbar','sb','rp-hint','ctx-menu','ind-overlay','settings-overlay'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el) el.style.display = 'none';
+  });
+}
+
+// An open position starts at its entry, which in a trade's picture is the last
+// candle: leave room after it, an eighth of the candles shown (at least 8), so its
+// entry, SL and TP lines show.
+function roomForPositions(range){
+  if(!range || !mainChart) return;
+  if(!Object.values(drawings).some(d => d.type === 'live_position')) return;
+  const shown = mainChart.timeScale().getVisibleLogicalRange();
+  if(!shown) return;
+  const room = Math.max(8, Math.round((shown.to - shown.from) / 8));
+  const wider = {from:shown.from, to:shown.to + room};
+  Object.values(panes).forEach(p => { try{ p.chart.timeScale().setVisibleLogicalRange(wider); }catch{} });
+}
+
+// After an init: the title line, the zone on every pane, the range, and the flag
+// two frames later, once lightweight-charts has painted and the overlay with it.
+function snapshotApply(){
+  const title = _q.get('title');
+  if(title) document.getElementById('chart-title').textContent = title;
+  const zoned = {localization:{timeFormatter:snapTimeLabel},
+                 timeScale:{tickMarkFormatter:snapTickLabel}};
+  Object.values(panes).forEach(p => { try{ p.chart.applyOptions(zoned); }catch{} });
+  // A sub-pane holds only its indicator's points, which start after the warm-up.
+  // Every candle's time, as whitespace, gives it the main pane's time scale, so
+  // the panes line up under the candles.
+  const times = allBars.map(b => ({time:b.time}));
+  Object.entries(panes).forEach(([id, p]) => {
+    if(id === 'main') return;
+    try{
+      p.chart.addLineSeries({visible:false, lastValueVisible:false, priceLineVisible:false,
+                             crosshairMarkerVisible:false}).setData(times);
+    }catch{}
+  });
+  const from = _q.get('from'), to = _q.get('to');
+  const range = allBars.length && from !== null && to !== null
+    ? {from:Number(from), to:Number(to)} : null;
+  const applyRange = () => {
+    if(range) Object.values(panes).forEach(p => {
+      try{ p.chart.timeScale().setVisibleRange(range); }catch{}
+    });
+  };
+  applyRange();
+  window.__atkSnapshotReady = false;
+  requestAnimationFrame(() => {
+    // A price scale is as wide as its own labels: give every pane the widest, so
+    // the plot areas line up as well as the times do. The narrower plot keeps
+    // its right edge, so the range is set again.
+    let widest = 0;
+    Object.values(panes).forEach(p => {
+      try{ widest = Math.max(widest, p.chart.priceScale('right').width()); }catch{}
+    });
+    if(widest){
+      Object.values(panes).forEach(p => {
+        try{ p.chart.applyOptions({rightPriceScale:{minimumWidth:widest}}); }catch{}
+      });
+    }
+    applyRange();
+    roomForPositions(range);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      redrawAll();
+      window.__atkSnapshotReady = true;
+    }));
+  });
+}
+
+if(snapshot){
+  window.__atkSnapshotReady = false;
+  snapshotHideControls();
 }
 
 // A click while picking chooses the start bar; the crosshair already tracks
@@ -2186,7 +2319,8 @@ function renderOne(d,ctx,W,H){
     // open_time may have been window-trimmed / scrolled out → clamp to left edge
     const openPt = toXY(d.open_time, d.entry_price);
     const x1 = openPt ? openPt.x : 0;
-    const x2 = Math.min(pEntry.x + 8, W);   // a touch past the newest bar
+    // A touch past the newest bar; in a picture, to the edge of the room left for it
+    const x2 = snapshot ? W : Math.min(pEntry.x + 8, W);
 
     // Entry line (dashed, like the posbox entry line)
     ctx.beginPath(); ctx.strokeStyle='#ffffff66';
@@ -3188,6 +3322,7 @@ function handleMsg(msg){
       enforceCandleLimit();   // server already trims; belt-and-braces
       redrawAll(); fitAll();
       setCanvasInteractive(false);
+      if(snapshot) snapshotApply();
       // A timeframe switch mid-replay arrives as a fresh init: re-cut the new
       // candles at the cursor instead of quietly showing the whole history.
       if(replay.active && replay.cursor != null){
@@ -3229,7 +3364,8 @@ function handleMsg(msg){
       break;
     case 'navigate_to_candle':
       // The report asked for a trade. Take the whole page there, not just the
-      // chart the report happens to be linked to.
+      // chart the report happens to be linked to. A picture keeps its own range.
+      if(snapshot) break;
       scrollToTime(msg.timestamp, {announce: true});
       break;
   }

@@ -12,13 +12,20 @@ pip install AlgoTradeKit
 > Requires Python 3.10+
 
 **Runnable examples** live in [`examples/`](examples). Each one downloads a
-little public Binance data (or falls back to synthetic candles offline) and
-needs no API key:
+little public Binance data and needs no exchange key; 01–03 fall back to
+synthetic candles offline. 04–08 send to your own Telegram bot and 09 to
+Discord, e-mail or a webhook, and each says what to set when it needs it:
 
 ```bash
 python examples/01_backtest_report.py          # backtest → chart + report
 python examples/02_chart_timeframes_replay.py  # timeframe switching + bar replay
 python examples/03_multi_chart_page.py         # three synced charts on one page
+python examples/04_telegram_messages.py        # text to your Telegram (needs TELEGRAM_BOT_TOKEN)
+python examples/05_telegram_paper_alerts.py    # paper trading's signals to Telegram (same)
+python examples/06_telegram_chart_picture.py   # a chart picture to Telegram (same, and the [notify] extra)
+python examples/07_price_alerts.py             # price alerts to Telegram (same)
+python examples/08_telegram_commands.py        # /status, /positions, /stop from Telegram (same)
+python examples/09_other_backends.py           # Discord, e-mail, a webhook (their own variables)
 ```
 
 > ### 🚀 New in v1.1.0 — the chart grew up
@@ -62,10 +69,11 @@ python examples/03_multi_chart_page.py         # three synced charts on one page
 5. [strategy — Signal Generation](#strategy--signal-generation)
 6. [simulate — Backtesting Engine](#simulate--backtesting-engine)
 7. [trader — Live Trading](#trader--live-trading-v100)
-8. [visual — Interactive Chart](#visual--interactive-chart)
-9. [report — Simulation Report](#report--simulation-report-v070)
-10. [Built-in MACD Strategy Demo](#built-in-macd-strategy-demo)
-11. [Configuration Reference](#configuration-reference)
+8. [notify — Notifications](#notify--notifications-v120)
+9. [visual — Interactive Chart](#visual--interactive-chart)
+10. [report — Simulation Report](#report--simulation-report-v070)
+11. [Built-in MACD Strategy Demo](#built-in-macd-strategy-demo)
+12. [Configuration Reference](#configuration-reference)
 
 ---
 
@@ -78,7 +86,8 @@ AlgoTradeKit/
 ├── indicator/      RSI, MACD, EMA, SMA, ATR, Ichimoku — all with O(1) streaming updates
 ├── strategy/       BaseStrategy, Signal, StrategyResult, built-in strategies
 ├── simulate/       Backtesting engine, position management, SimulateReport
-├── trader/         Live trading — real orders and run_live paper trading  ← new in v1.0.0
+├── trader/         Live trading — real orders and run_live paper trading  ← v1.0.0
+├── notify/         Telegram, Discord, e-mail and webhook notifications  ← new in v1.2.0
 ├── visual/         Interactive candlestick chart served in your browser
 └── report/         Interactive simulation report web page  ← v0.7.0
 ```
@@ -89,11 +98,14 @@ Data flows in one direction:
 broker ──► data ──► indicator ──► strategy ──► simulate ──► report
                                        │           └──────► visual
                                        └──────► trader ◄────┘
+                                                  └──────► notify
 ```
 
 `trader` is a leaf: it consumes `broker`, `strategy` and `simulate`, and nothing
 imports from it. That is what keeps the backtest engine free of live-trading
-concerns while both share the same position maths.
+concerns while both share the same position maths. `trader` hands its events to
+`notify`, which imports no other module when it is imported: a broker reaches it
+as an object, and the chart and the report load only to make a picture.
 
 ---
 
@@ -652,14 +664,20 @@ Every meaningful moment is a typed event on a stream, printed as one grep-able
 line (`log_events=True`, filter with `log_event_types`):
 
 ```
-[LIVE][BTCUSDT] SIGNAL long @ 64250.0 sl=63800.0 tp=65150.0 rr=2.00 risk=$100.00
-[LIVE][BTCUSDT] OPEN    long 0.015 @ 64251.5 margin=$96.38 order=8412…
-[LIVE][BTCUSDT] SL_MOVE 63800.0 -> 64251.5 (risk-free, rr=1.00)
-[LIVE][BTCUSDT] CLOSE   @ 65150.0 reason=tp net=$+198.40 R=+1.98 held=4h12m
+2026-10-14 12:41:07 [LIVE] START live BTCUSDT
+2026-10-14 12:00:00 [LIVE][BTCUSDT] SIGNAL long @ 64250 sl=63800 tp=65150 risk=$100 rr=2.00 tf=1h
+2026-10-14 12:00:00 [LIVE][BTCUSDT] OPEN #12 long filled @ 64251.5 size=0.2222 margin=$1427.8 risk=$100 sl=63800 next_tp=65150 order=8412739921
+2026-10-14 13:00:00 [LIVE][BTCUSDT] SL_MOVE #12 sl 63800 -> 63950 (trailing) next_tp=65150
+2026-10-14 14:00:00 [LIVE][BTCUSDT] RISK_FREE #12 rr=1.00 touched, sl 63950 -> 64251.5 (break-even)
+2026-10-14 15:00:00 [LIVE][BTCUSDT] MESSAGE RSI back under 70
+2026-10-14 15:00:00 [LIVE][BTCUSDT] CLOSE #12 @ 65150 reason=tp gross=$199.66 net=$185.37 r=1.85 duration=3h 41m
+2026-10-14 18:07:44 [LIVE] STOP Ctrl+C open=0
 ```
 
-`[SIM]` tags paper trades, `[LIVE]` real ones. Subscribers are the extension
-point for notification backends.
+`[SIM]` tags paper trades, `[LIVE]` real ones. A candle's events carry the
+candle's opening time; START and STOP carry the moment they happened. The same
+stream feeds the notifiers in `TraderConfig(notifiers=[…])`: see
+[`notify`](#notify--notifications-v120).
 
 ### Multi-Pair / Multi-Venue
 
@@ -696,6 +714,213 @@ TraderConfig(
 
 `"sim"` shows theoretical strategy performance, `"real"` shows your actual
 fills, `"both"` overlays them.
+
+---
+
+## notify — Notifications *(v1.2.0)*
+
+Send text, chart pictures, a trading session's events, price alerts and a backtest's report
+to **Telegram**, and to **Discord**, **e-mail** or a **webhook** of your own. Each notifier
+keeps its own queue on its own thread, so trading never waits for a message. It paces
+itself to the service's limits, retries after an error, waits out an outage, and marks
+what arrives late.
+
+```bash
+pip install AlgoTradeKit               # text needs nothing more
+pip install "AlgoTradeKit[notify]"     # chart pictures (Playwright) and a SOCKS proxy
+playwright install chromium            # once, for pictures; on Linux: --with-deps, as root
+```
+
+### Telegram in five minutes
+
+1. In Telegram, open **@BotFather**, send `/newbot`, and copy the token it gives you. The
+   token is a password: keep it in the environment (`read -rs TELEGRAM_BOT_TOKEN && export
+   TELEGRAM_BOT_TOKEN`), never in a file.
+2. Open your bot (`t.me/<its username>`) and press **Start**: a bot cannot write to someone
+   who never did. For a group, add the bot to it. For a channel, make the bot an
+   **administrator** with «Post messages».
+3. Write something in each chat, list the chats the bot has seen, and send:
+
+```python
+import os
+from AlgoTradeKit.broker import Broker
+from AlgoTradeKit.notify import TelegramChat, TelegramNotifier
+
+token = os.environ["TELEGRAM_BOT_TOKEN"]
+for chat in TelegramNotifier.find_chats(token):
+    print(chat.id, chat.kind, chat.title)       # 123456789 private Ann, -1001234567890 channel …
+
+bot = TelegramNotifier(token, {
+    "me": 123456789,                                        # your private chat with the bot
+    "signals": TelegramChat(-1001234567890, silent=True),   # a channel, without sound
+})
+bot.send_text("Hello from AlgoTradeKit")                    # to every chat
+bot.send_text("{header}\nwatching the 64k level", to="me",
+              symbol="BTCUSDT", broker=Broker("binance-spot"))
+# → «🕑 2026-10-14 14:03 UTC · BTCUSDT 64,312.5» and «watching the 64k level»
+```
+
+The bot checks its token and every chat when it is created, and says what to fix. A text
+may use `{time}`, `{date}`, `{symbol}`, `{price}` (the last price, from `broker.get_ticker`)
+and `{header}`, the ready-made first line above. Times are UTC unless the notifier gets
+`timezone="Asia/Tehran"`, and HTML is on (`<b>…</b>`). Besides `silent=`, a `TelegramChat`
+takes a forum topic (`thread_id=`) and two filters: the kinds of message it gets (`events=`)
+and its `symbols=`. Where Telegram is blocked, pass `proxy="http://127.0.0.1:10809"`, or
+`"socks5h://127.0.0.1:10808"` with the `[notify]` extra.
+
+### Trading events
+
+```python
+config = TraderConfig(symbol="BTCUSDT", min_candles=200, notifiers=[bot])
+run_live(strategy=MyStrategy(), broker=Broker("binance-spot"), config=config)   # or Trader
+```
+
+`run_live` and `Trader` send the same messages, tagged `SIM` or `LIVE` on their 🕑 line:
+
+| Kind | Sent when | First line |
+|---|---|---|
+| `start`, `stop` | the session starts; it stops (Ctrl+C, `/stop`, the kill switch, a crash) | «▶️ Paper trading started · BTCUSDT», «⏹ Paper trading stopped · BTCUSDT · Ctrl+C · …» |
+| `signal` | the strategy gives one | «🟢 LONG BTCUSDT · 1h», then entry, SL, TP and RR |
+| `open` | a trade opens | «✅ OPENED #12 · LONG BTCUSDT @ 64,251.5», then size, risk, SL, next TP |
+| `sl_move` | the stop moves — **not sent unless a chat asks for it** | an edit of the open message |
+| `risk_free`, `tp_level` | the stop goes to break-even; a take-profit level fills | «🛡 RISK-FREE #12 …», «🎯 TP 1 R #12 …» |
+| `close` | the trade ends | «🏁 CLOSED #12 · LONG BTCUSDT @ 65,150 — take profit», then net, R, how long |
+| `exit_signal`, `daily_loss`, `reconcile`, `error` | as their events in the log | «🚪 EXIT SIGNAL …», «⛔ DAILY LOSS LIMIT …», «🔄 RESTART RECONCILED …», «⚠️ ERROR …» |
+| `message` | the strategy calls `self.notify("RSI back under 70")` on a live candle | «💬 BTCUSDT · 1h» |
+| `daily_summary` | 00:00 in the notifier's zone | «📊 DAY 2026-10-14 · BTCUSDT», trades, won, lost, net |
+
+A trade's messages form a thread: its risk-free move, its TP levels and its close reply to
+its open. In a chat that takes `sl_move`, each move of the stop edits the open message, whose
+line «SL 63,800 → 63,950 (trailing) · 14:00» changes, instead of sending a new one. A chat
+picks its kinds with `events=`:
+
+```python
+bot = TelegramNotifier(token, {
+    "me": TelegramChat(123456789, events={"signal", "open", "sl_move", "close", "stop"}),
+    "followers": TelegramChat("@my_signals", events={"signal", "close"}),
+})
+```
+
+A channel that takes no opens gets each close as a reply to its signal. A signal goes out as
+the strategy gives it, whether or not it opens a trade: with `max_positions=1`, a signal that
+comes while a trade is open opens nothing. A channel that should show only what was traded
+takes `events={"open", "close"}`. `templates={"close": "…"}` replaces a kind's default text,
+with the event's own fields as placeholders, and `{"close": None}` sends none. A price the
+simulation works out, such as a trailing stop or a take profit from the RR, keeps all its
+decimals in a paper session («81,821.078995»).
+
+`self.notify(text)` speaks only from a live run, and only on a newly closed candle. In a
+backtest, during the seed and on a forming candle it does nothing.
+
+### Pictures
+
+```python
+bot = TelegramNotifier(token, chats, images={"open", "close"})   # a chart on those messages
+bot.send_chart(broker=Broker("binance-spot"), symbol="BTCUSDT", timeframe="15m",
+               start="2026-10-14 08:00", end="2026-10-14 14:00",
+               indicators=[{"kind": "ema", "period": 20}], caption="<b>BTCUSDT · 15m</b>")
+bot.send_chart(chart, start, end)    # a Chart you built, its indicators and drawings included
+bot.send_photo(png_bytes, caption="my own picture")
+bot.send_report(report)              # a backtest: its figures, the balance curve, report.html
+```
+
+A picture of the open shows the last 100 candles with the entry, the SL and the next TP; the
+close shows the whole trade with its position box. A caption longer than Telegram's 1,024
+characters goes on in a reply. Pictures need the `[notify]` extra and its Chromium. A
+headless Chromium photographs the library's own chart page, on the notifier's thread, and
+stays open while the notifier lives: about 450 MB idle.
+
+### Price alerts
+
+```python
+binance = Broker("binance-spot")
+alert = bot.watch(binance, "BTCUSDT", above=65_000)             # once
+bot.watch(binance, "BTCUSDT", below=60_000, image=True)          # with a picture of the levels
+bot.watch(binance, "BTCUSDT", move_pct=-3, window="1h")          # a 3% fall within the hour
+bot.watch(binance, "BTCUSDT", above=66_000, on_close="1h")       # on a closed 1h candle
+bot.watch(binance, "ETHUSDT", above=2_500, repeat=True, rearm=0.2)   # each time, once 0.2% back
+bot.wait()                                                       # until none is armed, or Ctrl+C
+```
+
+«🔔 BTCUSDT crossed above 65,000 · now 65,012.5», with no strategy and no trading.
+`bot.alerts()` lists them, with each one's `condition`, `state` and `fired` count, and
+`alert.cancel()` ends one. An alert follows the last trade: the forming candle's close. On
+Binance, `stream_ticker` gives the order book's middle instead, and `get_ticker` the last
+trade.
+
+### Commands
+
+```python
+bot = TelegramNotifier(token, {"me": 123456789}, commanders=[123456789])
+```
+
+The people in `commanders=` can ask for `/status` (what is trading, since when, today's net,
+the open positions), `/positions`, `/chart [SYMBOL] [TF]`, `/stop` and `/help`, in any chat
+they write in, and get replies. Anyone else is refused. A person's id is the id of their
+private chat with the bot.
+
+- `/stop` ends the `run_live` session or the `Trader` the bot serves, as Ctrl+C does. Live
+  trading first asks for `/stop CONFIRM`, within 60 s.
+- In a group, Telegram's privacy mode passes on only commands that name the bot:
+  `/status@your_bot`.
+- Commands sent while nothing listened are skipped, not run late.
+- One program listens per bot. A second one gets Telegram's 409 Conflict and says so, and
+  `find_chats` beside a listener lists what that listener saw.
+
+### Discord, e-mail and webhooks
+
+```python
+from AlgoTradeKit.notify import DiscordNotifier, EmailNotifier, WebhookNotifier
+
+discord = DiscordNotifier({"desk": os.environ["DISCORD_WEBHOOK_URL"]})
+mail = EmailNotifier("smtp.gmail.com", {"me": "you@gmail.com"},
+                     username="you@gmail.com", password=os.environ["SMTP_PASSWORD"])
+hook = WebhookNotifier({"mine": "https://example.com/hook"},
+                       secret=os.environ["WEBHOOK_SECRET"])
+config = TraderConfig(symbol="BTCUSDT", notifiers=[bot, discord, mail, hook])
+```
+
+They take the same kinds, filters, templates and pictures, and work wherever a Telegram bot
+does: `notifiers=[…]`, `send_text`, `send_chart`, `send_report` and `watch`. What a service
+cannot do degrades. Discord cannot reply, so a close is a plain message. E-mail cannot edit,
+so a stop's move, for a recipient who takes it, is a message of its own. A webhook does
+neither. Commands stay Telegram's.
+
+- **Discord**: a channel's webhook URL, from the channel's settings: Integrations, Webhooks,
+  New Webhook, Copy Webhook URL. The URL holds the webhook's token, so keep it as a password.
+  Messages use Discord's Markdown.
+- **E-mail**: any SMTP server: port 587 takes STARTTLS (the default) and 465 SSL. Gmail needs
+  an app password, made in your Google account once 2-Step Verification is on, and sends about
+  500 e-mails a day. Each e-mail is HTML with a plain-text part, its subject the message's
+  first line, pictures inline. A recipient's trade messages wait for a digest, one e-mail
+  every 15 minutes (`digest_minutes=`; `0` sends each on its own). The start, the stop, texts
+  and alerts go at once.
+- **A webhook**: each message is a POST of JSON to your URL:
+
+  ```json
+  {"id": "8f3c…", "kind": "close", "symbol": "BTCUSDT", "time": 1792001700123,
+   "source": "SIM", "text": "🏁 CLOSED #12 · …", "html": "<b>🏁 CLOSED #12 · …</b>…",
+   "silent": false, "fields": {"trade_id": 12, "net_pnl": 200.0, "pnl_r": 2.0, …},
+   "late_seconds": 0}
+  ```
+
+  `fields` holds the event's raw values: numbers as numbers, times in UTC ms. `id` is the same
+  on every try, so a receiver can drop a repeat. With a picture the body is
+  `multipart/form-data`: this JSON as `payload_json`, and the PNG as `file`. With `secret=`,
+  each request carries `X-AlgoTradeKit-Timestamp` (Unix seconds) and
+  `X-AlgoTradeKit-Signature`, which a receiver checks:
+
+  ```python
+  import hashlib, hmac
+
+  def signed(secret: bytes, timestamp: str, payload: bytes, signature: str) -> bool:
+      """payload: the body, or with a picture the payload_json field."""
+      expected = hmac.new(secret, timestamp.encode() + b"." + payload, hashlib.sha256)
+      return hmac.compare_digest(signature, "sha256=" + expected.hexdigest())
+  ```
+
+  Refuse a timestamp more than a few minutes old as well: a signature alone does not stop a
+  request from being sent again.
 
 ---
 

@@ -8,7 +8,7 @@ validation used by the multi-pair ``Trader``.
 ``TraderConfig`` deliberately uses the **same field names as
 ``SimulateConfig``**, so a tuned backtest config copy-pastes into live
 trading, plus trader-only groups: cost overrides, execution mode, data/feed,
-event logging, display and safety.  The display ``SimulateConfig`` is derived
+event logging, notifications, display and safety.  The display ``SimulateConfig`` is derived
 automatically via :meth:`TraderConfig.to_simulate_config` — same-name fields
 copied, costs filled from ``broker.get_trading_costs()`` unless
 overridden.
@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..broker import MetaTraderBroker
+from ..notify._core import Notifier
 from ..simulate import (
     EXCHANGE_TYPE_EXCHANGE,
     EXCHANGE_TYPE_METATRADER,
@@ -109,6 +110,24 @@ def parse_max_daily_loss(value: float | str) -> tuple[str, float]:
     )
 
 
+def _check_notifiers(value: Any) -> list:
+    """``TraderConfig.notifiers``: a list (or tuple) of distinct notifiers."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            "TraderConfig.notifiers must be a list of notifiers (TelegramNotifier, …), "
+            f"got {type(value).__name__!r}"
+        )
+    for index, notifier in enumerate(value):
+        if not isinstance(notifier, Notifier):
+            raise ValueError(
+                f"TraderConfig.notifiers[{index}] must be a notifier (TelegramNotifier, …), "
+                f"got {type(notifier).__name__!r}"
+            )
+    if len({id(notifier) for notifier in value}) != len(value):
+        raise ValueError("TraderConfig.notifiers names the same notifier twice")
+    return list(value)
+
+
 # ---------------------------------------------------------------------------
 # TraderConfig
 # ---------------------------------------------------------------------------
@@ -180,6 +199,12 @@ class TraderConfig:
         ``EVENT_*`` constants — log only those.  Stored as a ``frozenset``;
         membership is validated against the event types in
         ``trader._events``.
+    notifiers : list
+        Where this pair's events are sent (v1.2.0):
+        ``[TelegramNotifier(...)]``.  Each chat gets the kinds its own filter
+        lets through; a trade reads as one thread, a session announces its start
+        and stop, and each day ends with a summary.  ``[]`` (default) sends
+        nothing.  One notifier may serve many pairs; a tuple is stored as a list.
     display : bool
         ``True`` → live chart + live report for this pair.  Off by
         default — display never slows trading.
@@ -207,6 +232,11 @@ class TraderConfig:
     candle_count_limit : int | None
         Rolling window: chart and report only ever contain the last M
         candles.  ``None`` — unbounded.
+    chart_indicators : list
+        Indicator specs, as ``SimulateConfig.chart_indicators`` takes them
+        (v1.2.0): ``[{"kind": "ema", "period": 20}, …]``.  The pictures of trade
+        messages draw them, over their own candles; with ``display=True`` the
+        live chart shows them too, computed once at seed time.
     max_daily_loss : float | str | None
         Per-pair daily-loss limit: a number = account-currency $, a
         string like ``"2%"`` = percent of the UTC-day-start balance.
@@ -280,6 +310,11 @@ class TraderConfig:
     log_event_types: frozenset[str] | None = None
 
     # ------------------------------------------------------------------
+    # Notifications
+    # ------------------------------------------------------------------
+    notifiers: list = field(default_factory=list)
+
+    # ------------------------------------------------------------------
     # Display
     # ------------------------------------------------------------------
     display: bool = False
@@ -291,6 +326,7 @@ class TraderConfig:
     display_candles: int | None = None
     display_start: Any = None
     candle_count_limit: int | None = None
+    chart_indicators: list = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Safety
@@ -354,6 +390,9 @@ class TraderConfig:
                     f"{sorted(unknown)}; valid types are {sorted(ALL_EVENT_TYPES)}."
                 )
             self.log_event_types = frozenset(types)
+
+        # Notifications.
+        self.notifiers = _check_notifiers(self.notifiers)
 
         # Display.
         if self.display_trades not in (
@@ -441,6 +480,7 @@ class TraderConfig:
             "risk_free_enabled": self.risk_free_enabled,
             "risk_free_at_rr": self.risk_free_at_rr,
             "force_close_on_exit_signal": self.force_close_on_exit_signal,
+            "chart_indicators": self.chart_indicators,
         }
         if self.spread is not None:
             kwargs["spread"] = self.spread
@@ -526,6 +566,7 @@ class TraderConfig:
             primary_timeframe=primary_timeframe,
             show_chart=self.display,
             report_mode=REPORT_MODE_WEBPAGE if self.display else REPORT_MODE_NONE,
+            chart_indicators=[dict(spec) for spec in self.chart_indicators],
         )
 
     def __repr__(self) -> str:

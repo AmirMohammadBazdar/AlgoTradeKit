@@ -35,6 +35,7 @@ Quick start
 from __future__ import annotations
 
 import json
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -58,6 +59,16 @@ from .server import ChartServer
 # Sentinel for "argument not passed" where None is a meaningful value
 # (e.g. update_live_position(next_tp=None) clears the TP line).
 _UNSET = object()
+
+#: One picture at a time (v1.2.0): the browser takes them one by one anyway, and a
+#: chart that is not shown is served only while it is photographed.
+_SCREENSHOT_LOCK = threading.Lock()
+
+#: The ``kind`` values :meth:`Chart.add_indicator_spec` computes (v1.2.0).
+INDICATOR_KINDS = (
+    "sma", "ema", "wma", "smma", "dema", "tema", "hma", "vwma", "vwap",
+    "rsi", "macd", "atr", "ichimoku",
+)
 
 
 class Chart:
@@ -374,16 +385,23 @@ class Chart:
             df = self._apply_candle_range(df, self._candle_range)
         # ─────────────────────────────────────────────────────────────────
 
+        # Column arrays, not iterrows: the same bars, a hundred times faster, which a
+        # chart built on a notifier's thread for a picture needs (v1.2.0) — that
+        # thread shares the interpreter with trading.
+        volume = df["volume"].tolist() if "volume" in df.columns else [0] * len(df)
         return [
             {
-                "time":   int(row["time"]),
-                "open":   float(row["open"]),
-                "high":   float(row["high"]),
-                "low":    float(row["low"]),
-                "close":  float(row["close"]),
-                "volume": float(row.get("volume", 0)),
+                "time":   int(t),
+                "open":   float(o),
+                "high":   float(h),
+                "low":    float(lo),
+                "close":  float(c),
+                "volume": float(v),
             }
-            for _, row in df.iterrows()
+            for t, o, h, lo, c, v in zip(
+                df["time"].tolist(), df["open"].tolist(), df["high"].tolist(),
+                df["low"].tolist(), df["close"].tolist(), volume,
+            )
         ]
 
     # -----------------------------------------------------------------------
@@ -1980,6 +1998,78 @@ class Chart:
         """Stop the server and close the browser connection."""
         self._server.stop()
 
+    def _snapshot_query(self, start=None, end=None, timezone=None) -> str:
+        """The screenshot page's query for *start*–*end*: the candles' range, the
+        zone and the title line."""
+        from urllib.parse import urlencode
+
+        if not self._bars:
+            raise ValueError("the chart has no candles to photograph")
+        zone_name, zone = _snapshot_zone(timezone)
+        first = self._bars[0]["time"] if start is None else self._parse_range_time(start)
+        last = self._bars[-1]["time"] if end is None else self._parse_range_time(end)
+        inside = [bar["time"] for bar in self._bars if first <= bar["time"] <= last]
+        if not inside:
+            raise ValueError(
+                f"no candle between {_span_moment(first, zone)} and {_span_moment(last, zone)}"
+            )
+        tf = self._display_tf or self._source_tf
+        title = " · ".join(
+            part for part in (self.title, tf, _span_text(inside[0], inside[-1], zone)) if part
+        )
+        return urlencode({"snapshot": 1, "from": inside[0], "to": inside[-1],
+                          "tz": zone_name, "title": title})
+
+    # -----------------------------------------------------------------------
+    # Pictures (v1.2.0)
+    # -----------------------------------------------------------------------
+
+    def screenshot(
+        self,
+        start=None,
+        end=None,
+        *,
+        width:    int = 1280,
+        height:   int = 720,
+        timezone=None,
+    ) -> bytes:
+        """
+        A PNG of this chart from *start* to *end*, photographed by a headless
+        Chromium (v1.2.0).
+
+        ``start`` and ``end`` take what ``candle_range`` takes — ``"YYYY-MM-DD
+        HH:MM"``, a ``datetime`` (naive = UTC), Unix seconds or ms — and both ends
+        are inclusive; ``None`` is the first or the last candle.  The picture is the
+        chart page itself, with its theme, its displayed timeframe, indicators and
+        drawings, and without the toolbar, the status bar and the replay controls.
+        A title line names it: «BTCUSDT · 15m · 2026-10-14 08:00 – 14:00 UTC».
+
+        ``timezone`` — an IANA name such as ``"Asia/Tehran"``, or a ``ZoneInfo`` —
+        changes the time axis, the crosshair label and the title line; the
+        interactive chart stays UTC.
+
+        A chart that is not shown is served for the picture, with no browser tab,
+        and stopped after it; a shown one stays as it is.  Needs the ``[notify]``
+        extra and its browser: ``pip install "AlgoTradeKit[notify]"``, then
+        ``playwright install chromium``.
+        """
+        from ._snapshot import snapshot
+
+        query = self._snapshot_query(start, end, timezone)
+        with _SCREENSHOT_LOCK:
+            started_here = not self._shown
+            if started_here:
+                self._server.start(open_browser=False)
+                self._shown = True
+            # The page asks for the chart as it is now; an open tab is not told.
+            self._server._last_init = self._build_init_payload()
+            try:
+                return snapshot(f"{self.url}/?{query}", width, height)
+            finally:
+                if started_here:
+                    self._server.stop()
+                    self._shown = False
+
     # -----------------------------------------------------------------------
     # Internal helpers
     # -----------------------------------------------------------------------
@@ -2063,3 +2153,59 @@ class Chart:
             f"indicators={len(self._indicators)} "
             f"drawings={len(self._drawings)}>"
         )
+
+
+# ---------------------------------------------------------------------------
+# Pictures: zones and the title line (v1.2.0)
+# ---------------------------------------------------------------------------
+
+def _snapshot_zone(timezone) -> tuple[str, object | None]:
+    """``(the IANA name the page takes, the tzinfo for the title)``; ``None`` is UTC."""
+    import datetime as _dt
+
+    if timezone is None or timezone is _dt.timezone.utc:
+        return "UTC", None
+    if isinstance(timezone, str):
+        name = timezone.strip()
+        if name.upper() == "UTC":
+            return "UTC", None
+        from zoneinfo import ZoneInfo
+
+        try:
+            return name, ZoneInfo(name)
+        except Exception:
+            raise ValueError(f"unknown time zone {timezone!r}") from None
+    key = getattr(timezone, "key", None)       # a ZoneInfo knows its name
+    if isinstance(key, str) and key:
+        return key, timezone
+    raise TypeError(
+        f"timezone must be an IANA name such as 'Asia/Tehran', or a ZoneInfo; "
+        f"got {type(timezone).__name__}"
+    )
+
+
+def _local(seconds: int, zone):
+    import datetime as _dt
+
+    return _dt.datetime.fromtimestamp(int(seconds), tz=zone or _dt.timezone.utc)
+
+
+def _zone_label(moment, zone) -> str:
+    """«UTC», or the moment's own offset: «(UTC+03:30)»."""
+    if zone is None:
+        return "UTC"
+    offset = int(moment.utcoffset().total_seconds() // 60)
+    sign = "+" if offset >= 0 else "-"
+    return f"(UTC{sign}{abs(offset) // 60:02d}:{abs(offset) % 60:02d})"
+
+
+def _span_moment(seconds: int, zone) -> str:
+    moment = _local(seconds, zone)
+    return f"{moment:%Y-%m-%d %H:%M} {_zone_label(moment, zone)}"
+
+
+def _span_text(first: int, last: int, zone) -> str:
+    """«2026-10-14 08:00 – 14:00 UTC»; a span over two dates writes both."""
+    start, end = _local(first, zone), _local(last, zone)
+    tail = f"{end:%H:%M}" if start.date() == end.date() else f"{end:%Y-%m-%d %H:%M}"
+    return f"{start:%Y-%m-%d %H:%M} – {tail} {_zone_label(start, zone)}"

@@ -6,15 +6,17 @@ Event stream + terminal log for the v1.0.0 live-trading module.
 Every meaningful live-trading moment — signal, open, trailing SL move,
 risk-free touch, multi-RR level, close, daily-loss halt, restart
 reconciliation, error — produces a **typed event** (one frozen dataclass per
-type).  Events are published on an :class:`EventStream`; subscribers consume
-them.  v1.0.0 ships one subscriber — the :class:`TerminalEventPrinter` —
-printing one timestamped, grep-able line per event::
+type).  v1.2.0 adds a session's start and stop and a strategy's own message
+(``self.notify``).  Events are published on an :class:`EventStream`;
+subscribers consume them.  The :class:`TerminalEventPrinter` prints one
+timestamped, grep-able line per event::
 
     2026-07-11 14:00:00 [LIVE][BTCUSDT] SIGNAL long @ 64250 sl=63800 tp=65000 rr=1.67 tf=1h
 
 The printer is a subscriber, not inlined: anything the terminal log can
-print, a v1.1 notification backend (Telegram bot, webhook, …) can send by
-subscribing to the same stream.
+print, a notifier of ``AlgoTradeKit.notify`` (v1.2.0) sends from the same
+stream — ``TraderConfig.notifiers`` wires it, and ``stream.subscribe(notifier)``
+works too (``trader/_notify.py``).
 
 Producers land in later sections: ``run_live`` bridges the
 ``LiveSimulation`` event dicts onto these types tagged ``SOURCE_SIM``;
@@ -25,7 +27,7 @@ set of the ``EVENT_*`` constants) — wired via :func:`attach_terminal_printer`.
 
 The six event types the sim engine already knows are **imported from**
 ``AlgoTradeKit.simulate`` (values shared by construction — same precedent as
-``_config`` importing ``TP_MODE_SIGNAL``); the four trader-only types are
+``_config`` importing ``TP_MODE_SIGNAL``); the seven trader-only types are
 defined here.  All constants are re-exported from ``trader/__init__.py``
 (library convention).
 
@@ -47,6 +49,7 @@ from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any, ClassVar
 
+from ..notify._core import Notifier
 from ..simulate import (
     EVENT_CLOSE,
     EVENT_EXIT_SIGNAL,
@@ -69,6 +72,9 @@ EVENT_RISK_FREE = "risk_free"    # SL jumped to break-even at risk_free_at_rr
 EVENT_DAILY_LOSS = "daily_loss"  # max_daily_loss tripped — trading halted
 EVENT_RECONCILE = "reconcile"    # restart reconciliation results
 EVENT_ERROR = "error"            # failed order / retry / stream drop
+EVENT_START = "start"            # a trading session started (after the seed)
+EVENT_STOP = "stop"              # a trading session stopped, a crash included
+EVENT_MESSAGE = "message"        # a strategy's own message (BaseStrategy.notify)
 
 #: Source tag — who produced the event (printed as ``[SIM]`` / ``[LIVE]``).
 SOURCE_SIM = "sim"    # run_live paper trading / the Trader's display sim
@@ -86,6 +92,9 @@ ALL_EVENT_TYPES = frozenset({
     EVENT_DAILY_LOSS,
     EVENT_RECONCILE,
     EVENT_ERROR,
+    EVENT_START,
+    EVENT_STOP,
+    EVENT_MESSAGE,
 })
 
 _SOURCES = (SOURCE_SIM, SOURCE_LIVE)
@@ -150,7 +159,11 @@ class SignalEvent(TraderEvent):
 
 @dataclass(frozen=True, kw_only=True)
 class OpenEvent(TraderEvent):
-    """A position was opened — sim fill or real fill (``order_id`` set)."""
+    """A position was opened — sim fill or real fill (``order_id`` set).
+
+    ``signal_time`` is the timestamp of the signal that opened it (its candle's
+    opening, UTC ms) — what ties a trade's messages to its signal's (v1.2.0);
+    ``None`` when unknown.  The terminal line does not print it."""
 
     event_type: ClassVar[str] = EVENT_OPEN
 
@@ -163,6 +176,12 @@ class OpenEvent(TraderEvent):
     stop_loss: float | None = None
     next_tp: float | None = None
     order_id: str | None = None   # venue order id; None for sim fills
+    signal_time: int | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.signal_time is not None:
+            object.__setattr__(self, "signal_time", int(self.signal_time))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -278,6 +297,56 @@ class ErrorEvent(TraderEvent):
     details: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True, kw_only=True)
+class StartEvent(TraderEvent):
+    """A trading session started (v1.2.0): ``run_live`` after the seed, before the
+    first feed; ``Trader.run()`` after every pair's seed, before the first pair
+    starts.  Emitted on every pair's stream; ``symbol`` is ``""`` (pair-less) and
+    ``symbols`` names every pair of the session.  ``mode`` is ``"paper"`` or
+    ``"live"``; ``session_id`` is new for each run."""
+
+    event_type: ClassVar[str] = EVENT_START
+
+    mode: str
+    symbols: tuple[str, ...] = ()
+    session_id: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "symbols", tuple(self.symbols))
+
+
+@dataclass(frozen=True, kw_only=True)
+class StopEvent(TraderEvent):
+    """A trading session stopped (v1.2.0), a crash included — on every pair's
+    stream, after the feeds stopped and ``on_stop`` was applied.
+
+    ``reason``: ``"Ctrl+C"``, ``"SIGTERM"``, ``"kill switch"``, ``"stop()"``,
+    ``"feeds ended"`` or ``"crash"``, with ``error`` holding the exception's text.
+    ``open_positions`` is what this pair still holds; ``None`` when the session
+    failed before its positions were read."""
+
+    event_type: ClassVar[str] = EVENT_STOP
+
+    mode: str
+    reason: str
+    open_positions: int | None = None
+    error: str | None = None
+    session_id: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class MessageEvent(TraderEvent):
+    """A strategy's own message (v1.2.0): ``self.notify(text)`` on a newly closed
+    live candle, stamped with that candle's opening.  ``text`` is as written —
+    each notifier fills its placeholders when it sends."""
+
+    event_type: ClassVar[str] = EVENT_MESSAGE
+
+    text: str
+    silent: bool = False
+
+
 # ---------------------------------------------------------------------------
 # EventStream — the pub/sub backbone
 # ---------------------------------------------------------------------------
@@ -299,7 +368,18 @@ class EventStream:
         self._subscribers: list[Callable[[TraderEvent], None]] = []
 
     def subscribe(self, callback: Callable[[TraderEvent], None]) -> Callable[[], None]:
-        """Register ``callback(event)``; returns an unsubscribe callable."""
+        """Register ``callback(event)``; returns an unsubscribe callable.
+
+        A notifier (``TelegramNotifier``) is a subscriber too: its templates are
+        checked here, then the events go out as messages — threads, edits, start
+        and stop included.  A stream carries no prices and no positions, so
+        ``{price}`` prints «—» and there is no daily summary: those need
+        ``TraderConfig.notifiers``."""
+        if isinstance(callback, Notifier):
+            # Imported here: _notify imports this module.
+            from ._notify import stream_adapter
+
+            callback = stream_adapter(callback)
         if not callable(callback):
             raise TypeError(f"EventStream.subscribe needs a callable, got {callback!r}.")
         self._subscribers.append(callback)
@@ -462,6 +542,23 @@ def _body_error(e: ErrorEvent) -> str:
     return line
 
 
+def _body_start(e: StartEvent) -> str:
+    return " ".join(["START", e.mode, ", ".join(e.symbols)]).rstrip()
+
+
+def _body_stop(e: StopEvent) -> str:
+    parts = [f"STOP {e.reason}"]
+    if e.open_positions is not None:
+        parts.append(f"open={e.open_positions}")
+    if e.error:
+        parts.append(f"error={e.error}")
+    return " ".join(parts)
+
+
+def _body_message(e: MessageEvent) -> str:
+    return f"MESSAGE {e.text}"
+
+
 def _body_generic(e: TraderEvent) -> str:
     """Fallback for unknown/future event types: ``TYPE k=v k=v``."""
     parts = [(e.event_type or type(e).__name__).upper()]
@@ -486,6 +583,9 @@ _BODY_BUILDERS: dict[str, Callable[[Any], str]] = {
     EVENT_DAILY_LOSS: _body_daily_loss,
     EVENT_RECONCILE: _body_reconcile,
     EVENT_ERROR: _body_error,
+    EVENT_START: _body_start,
+    EVENT_STOP: _body_stop,
+    EVENT_MESSAGE: _body_message,
 }
 
 

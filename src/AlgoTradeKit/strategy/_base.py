@@ -14,6 +14,10 @@ Live stepping (v1.0.0): the optional ``update_indicators(data, new_index)``
 hook enables O(1) per-candle updates — driven by the helpers in
 ``AlgoTradeKit.strategy._incremental``, never by ``run()``.
 
+A strategy's own message (v1.2.0): ``self.notify("RSI above 70")`` is sent
+only by a live runner, for a newly closed candle — never from a backtest or
+the seed history.  It is not a lifecycle step.
+
 Run modes
 ---------
 BACKTEST  Every candle is processed; all signals are returned.
@@ -32,7 +36,9 @@ instance is reused across multiple runs.
 
 from __future__ import annotations
 
+import string
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -40,6 +46,50 @@ from ._types import ExitSignal, Signal, StrategyMode, StrategyResult
 
 # Required columns that every OHLCV DataFrame must have
 _REQUIRED_COLS = frozenset({"timestamp", "open", "high", "low", "close", "volume"})
+
+#: The placeholders a strategy's message may use (``notify``), filled by each
+#: notifier when it sends: the fields every trade-event message has.
+_NOTIFY_FIELDS = (
+    "time", "date", "candle_time", "symbol", "source", "timeframe", "price", "header",
+)
+
+_FORMATTER = string.Formatter()
+
+
+def _check_notify_text(text: str) -> None:
+    """Raise for a mistake in a strategy's message, worded as the notifier's own
+    templates are: «unknown field {symbl} — known: time, date, …».
+
+    The same rules as ``AlgoTradeKit.notify``'s templates — named fields only, no
+    attribute or index access, no conversions — kept here because ``strategy``
+    imports no other part of the library."""
+    if not isinstance(text, str):
+        raise TypeError(f"the text must be a string, got {type(text).__name__}")
+    if not text.strip():
+        raise ValueError("the text is empty")
+    try:
+        pieces = list(_FORMATTER.parse(text))
+    except ValueError:
+        raise ValueError(
+            "the text has a single { or } — write {{ or }} for a literal brace"
+        ) from None
+    for _literal, name, spec, conversion in pieces:
+        if name is None:
+            continue
+        shown = "{" + name + "}"
+        if name == "" or name.isdigit():
+            raise ValueError(f"positional field {shown} — name the field, such as {{time}}")
+        if not name.isidentifier():
+            raise ValueError(
+                f"{shown} is not allowed — a template is data, not code: "
+                "use a plain field such as {price}"
+            )
+        if conversion is not None:
+            raise ValueError(f"{{{name}!{conversion}}} — conversions are not allowed")
+        if spec and ("{" in spec or "}" in spec):
+            raise ValueError(f"{{{name}:{spec}}} — a field inside a format spec is not allowed")
+        if name not in _NOTIFY_FIELDS:
+            raise ValueError(f"unknown field {shown} — known: {', '.join(_NOTIFY_FIELDS)}")
 
 
 class BaseStrategy(ABC):
@@ -87,6 +137,10 @@ class BaseStrategy(ABC):
     #: calling ``generate_signals``.  The strategy is still responsible for
     #: checking NaN values in indicator columns; this is a convenience guard.
     warmup_period: int = 0
+
+    #: Set by a live runner while it processes a newly closed candle; ``notify``
+    #: hands its message over through it.  ``None`` everywhere else.
+    _notify_hook: Callable[[str, bool], None] | None = None
 
     # ------------------------------------------------------------------
     # Abstract interface — MUST implement
@@ -230,6 +284,33 @@ class BaseStrategy(ABC):
         ever advances on final values.  ``run()`` (BACKTEST/LIVE) never
         calls this hook either; it is driven by the live stepping helpers.
         """
+
+    def notify(self, text: str, *, silent: bool = False) -> None:
+        """
+        Say something of the strategy's own — ``self.notify("RSI above 70")`` —
+        without trading (v1.2.0).
+
+        Delivered only by ``run_live`` and ``Trader``, only for a **newly closed
+        live candle**: the call does nothing in a backtest, during the seed
+        history a live runner replays at start-up, and on a forming-candle
+        evaluation.  On a live candle it becomes a ``MESSAGE`` event on the
+        pair's stream: the terminal log prints it, and every notifier in
+        ``TraderConfig.notifiers`` sends it to the chats that take kind
+        ``message``.
+
+        The text may use the placeholders every trade message has: ``{time}``,
+        ``{date}``, ``{candle_time}``, ``{symbol}``, ``{source}``,
+        ``{timeframe}``, ``{price}`` (the candle's close) and ``{header}``.  It
+        is checked at **every** call, so a backtest finds a mistake first:
+        outside a live candle a misspelt ``{symbl}`` raises ``ValueError``;
+        inside one it never raises — an ``ERROR`` event says what is wrong,
+        and the candle goes on.  ``silent=True`` sends it without sound.
+        """
+        hook = self._notify_hook
+        if hook is None:
+            _check_notify_text(text)
+            return
+        hook(text, bool(silent))
 
     # ------------------------------------------------------------------
     # Framework entry point — do NOT override

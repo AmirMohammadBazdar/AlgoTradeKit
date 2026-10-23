@@ -1343,3 +1343,187 @@ out.zoneWhole = ev('replayVisibleDrawings().find(d => d.id === "zone").time2');
     # leaving replay restores every shape in full
     assert result["afterExit"] == ["ahead", "level", "line", "past", "trade", "zone"]
     assert result["zoneWhole"] == result["storedZoneEnd"]
+
+
+# ---------------------------------------------------------------------------
+# index.html — the screenshot mode (v1.2.0)
+# ---------------------------------------------------------------------------
+# BTCUSDT 15m from 2026-10-14 08:00 to 14:00 UTC, shown in Asia/Tehran (+03:30):
+# what a chart picture's headless browser opens.
+
+_T0800, _T1400 = 1791964800, 1791986400
+
+# Every chart the page builds records the options applied to it, and its line series.
+_RECORD_OPTIONS = """
+ctx.__applied = [];
+ctx.__lines = [];
+ctx.LightweightCharts = autoStub('LightweightCharts', {createChart: () => {
+  const chart = makeChartStub();
+  const seen = [];
+  ctx.__applied.push(seen);
+  chart.applyOptions = o => { seen.push(o); };
+  chart.addLineSeries = opts => {
+    const series = autoStub('line');
+    ctx.__lines.push({opts: opts || {}, series});
+    return series;
+  };
+  return chart;
+}});
+"""
+
+_SNAPSHOT = _RECORD_OPTIONS + f"""
+ctx.location.search = '?snapshot=1&from={_T0800}&to={_T1400}&tz=Asia%2FTehran'
+  + '&title=BTCUSDT%20%C2%B7%2015m%20%C2%B7%202026-10-14%2011%3A30%20%E2%80%93%2017%3A30';
+"""
+
+_SNAPSHOT_INIT = f"""
+const bars = [];
+for (let t = {_T0800} - 20 * 900; t <= {_T1400}; t += 900)
+  bars.push({{time: t, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1}});
+ctx.__init = {{type: 'init', title: 'BTCUSDT', bars,
+  indicators: [{{name: 'RSI(14)', color: '#7b1fa2', overlay: false, pane: 1, lineWidth: 1,
+                 seriesType: 'line',
+                 data: bars.slice(14).map(b => ({{time: b.time, value: 50}}))}}],
+  drawings: [], sourceTimeframe: '15m', timeframes: ['15m']}};
+ev('ws = {{readyState: 1, send: m => globalThis.__sent.push(JSON.parse(m))}}');
+const frames = () => new Promise(r => setTimeout(r, 30));
+"""
+
+
+@pytest.fixture(scope="module")
+def snapshot_result() -> dict:
+    return _run(CHART_HTML, _SNAPSHOT_INIT + f"""
+out.snapshot = ev('snapshot');
+out.bodyClass = document.body._cls.has('snapshot');
+out.hidden = ['tbar', 'sb', 'rp-hint', 'ctx-menu', 'ind-overlay', 'settings-overlay']
+  .map(id => [id, document.getElementById(id).style.display]);
+out.readyAtLoad = ctx.window.__atkSnapshotReady;
+
+ev('handleMsg(globalThis.__init)');
+out.readyRightAfterInit = ctx.window.__atkSnapshotReady;
+await frames();
+out.readyAfterFrames = ctx.window.__atkSnapshotReady;
+
+out.title = document.getElementById('chart-title').textContent;
+out.paneCount = ev('Object.keys(panes).length');
+out.ranges = ev('Object.values(panes).map(p => p.chart.timeScale().getVisibleRange())');
+
+// the zone, through the formatters the page gave every pane
+const zoned = ctx.__applied.flat().filter(o => o.timeScale && o.timeScale.tickMarkFormatter);
+out.zonedPanes = zoned.length;
+const tick = zoned[0].timeScale.tickMarkFormatter, cross = zoned[0].localization.timeFormatter;
+out.tick1400 = tick({_T1400}, 3);
+out.tickDay = tick({_T1400}, 2);
+out.tickMonth = tick({_T1400}, 1);
+out.tickSeconds = tick({_T1400} + 5, 4);
+out.cross1400 = cross({_T1400});
+out.readBack = ev('snapTicks.map(t => t[2])');
+
+// the sub-pane got every candle's time, as whitespace, to line up with the candles
+out.whitespace = ctx.__lines.filter(l => l.opts.visible === false)
+  .map(l => l.series.setData._last);
+out.barTimes = bars.map(b => b.time);
+out.sent = ctx.__sent.slice();
+""", extra_globals=_SNAPSHOT)
+
+
+class TestScreenshotMode:
+    def test_page_script_runs_clean(self, snapshot_result):
+        assert snapshot_result["topLevelError"] is None
+        assert snapshot_result["snapshot"] is True
+
+    def test_controls_are_hidden(self, snapshot_result):
+        assert snapshot_result["bodyClass"] is True
+        assert dict(snapshot_result["hidden"]) == {
+            "tbar": "none", "sb": "none", "rp-hint": "none", "ctx-menu": "none",
+            "ind-overlay": "none", "settings-overlay": "none",
+        }
+
+    def test_ready_only_after_the_data_is_painted(self, snapshot_result):
+        assert snapshot_result["readyAtLoad"] is False
+        assert snapshot_result["readyRightAfterInit"] is False    # frames still to come
+        assert snapshot_result["readyAfterFrames"] is True
+
+    def test_the_title_line_replaces_the_chart_title(self, snapshot_result):
+        assert snapshot_result["title"] == "BTCUSDT · 15m · 2026-10-14 11:30 – 17:30"
+
+    def test_every_pane_shows_from_to(self, snapshot_result):
+        assert snapshot_result["paneCount"] == 2                   # the candles and RSI
+        assert snapshot_result["ranges"] == [{"from": _T0800, "to": _T1400}] * 2
+
+    def test_the_axis_reads_in_the_zone(self, snapshot_result):
+        assert snapshot_result["zonedPanes"] == 2
+        assert snapshot_result["tick1400"] == "17:30"
+        assert snapshot_result["tickDay"] == "14"
+        assert snapshot_result["tickMonth"] == "Oct"
+        assert snapshot_result["tickSeconds"] == "17:30:05"
+        assert snapshot_result["cross1400"] == "2026-10-14 17:30"
+        assert "17:30" in snapshot_result["readBack"]
+
+    def test_a_sub_pane_lines_up_with_the_candles(self, snapshot_result):
+        # RSI's points start 14 candles in; its pane also gets every candle's time
+        (whitespace,) = snapshot_result["whitespace"]
+        assert whitespace == [{"time": t} for t in snapshot_result["barTimes"]]
+
+    def test_it_sends_the_server_nothing(self, snapshot_result):
+        assert snapshot_result["sent"] == []
+
+
+# A time range sets the stub's logical range as the library would: candles 0 to 24.
+_LOGICAL_FROM_TIME = """
+const _plainCreate = ctx.LightweightCharts.createChart;
+ctx.LightweightCharts = autoStub('LightweightCharts', {createChart: (...a) => {
+  const chart = _plainCreate(...a);
+  const scale = chart.timeScale();
+  const setRange = scale.setVisibleRange;
+  scale.setVisibleRange = r => { setRange(r); chart._state.logical = {from: 0, to: 24}; };
+  return chart;
+}});
+"""
+
+
+def test_a_picture_leaves_room_for_an_open_position():
+    """An OPEN's picture ends at the entry: the live position's lines need room after
+    the last candle, and get the plot's right edge."""
+    position = (f"{{id: 'pos', type: 'live_position', open_time: {_T1400}, entry_price: 1.5,"
+                " stop_loss: 1, direction: 'long', next_tp: 2}")
+    result = _run(CHART_HTML, _SNAPSHOT_INIT + f"""
+ctx.__init.drawings = [{position}];
+ev('handleMsg(globalThis.__init)');
+await frames();
+out.logical = ev('Object.values(panes).map(p => p.chart.timeScale().getVisibleLogicalRange())');
+out.ready = ctx.window.__atkSnapshotReady;
+""", extra_globals=_SNAPSHOT + _LOGICAL_FROM_TIME)
+    assert result["topLevelError"] is None and result["ready"] is True
+    # 25 candles shown, so an eighth of them is 3: at least 8 candles of room
+    assert result["logical"] == [{"from": 0, "to": 32}] * 2
+
+
+def test_a_picture_without_a_position_ends_at_its_last_candle():
+    result = _run(CHART_HTML, _SNAPSHOT_INIT + """
+ev('handleMsg(globalThis.__init)');
+await frames();
+out.logical = ev('Object.values(panes).map(p => p.chart.timeScale().getVisibleLogicalRange())');
+""", extra_globals=_SNAPSHOT + _LOGICAL_FROM_TIME)
+    assert result["logical"] == [{"from": 0, "to": 24}] * 2
+
+
+def test_the_interactive_page_has_no_screenshot_mode():
+    """Without ?snapshot=1 nothing of it runs: no flag, no hidden controls, UTC axis."""
+    result = _run(CHART_HTML, _SNAPSHOT_INIT + """
+ev('handleMsg(globalThis.__init)');
+await frames();
+out.snapshot = ev('snapshot');
+out.flag = ctx.window.__atkSnapshotReady === undefined ? 'unset' : ctx.window.__atkSnapshotReady;
+out.bodyClass = document.body._cls.has('snapshot');
+out.toolbar = document.getElementById('tbar').style.display;
+out.zoned = ctx.__applied.flat().filter(o => o.timeScale && o.timeScale.tickMarkFormatter).length;
+out.title = document.getElementById('chart-title').textContent;
+""", extra_globals=_RECORD_OPTIONS)
+    assert result["topLevelError"] is None
+    assert result["snapshot"] is False
+    assert result["flag"] == "unset"
+    assert result["bodyClass"] is False
+    assert result["toolbar"] == ""
+    assert result["zoned"] == 0
+    assert result["title"] == "BTCUSDT"
