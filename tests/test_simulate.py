@@ -2921,3 +2921,34 @@ class TestLiveSimulationDisplay:
             return out
 
         assert _no_ids(chart_batch._drawings) == _no_ids(chart_live._drawings)
+
+
+# ===========================================================================
+# v1.3.0 — the live chart's colours
+# ===========================================================================
+
+class TestLiveSimulationChartStyle:
+    @pytest.fixture(autouse=True)
+    def _no_keep_alive(self, monkeypatch):
+        """Never register the real atexit blocker inside pytest."""
+        import AlgoTradeKit.simulate._live as live_mod
+        monkeypatch.setattr(live_mod, "_register_keep_alive", lambda: None)
+
+    def test_a_bad_style_is_refused_when_the_simulation_is_made(self):
+        with pytest.raises(ValueError) as raised:
+            LiveSimulation(_FakeLiveBroker(_flat_rows(5)), _PlanStrategy({}), _headless_cfg(),
+                           display_candles=5, chart_style={"grid": "off"})
+        assert str(raised.value) == "LiveSimulation.chart_style['grid']: 'off' is not True or False"
+
+    def test_the_live_chart_has_the_style(self):
+        live = LiveSimulation(_FakeLiveBroker(_flat_rows(12)), _PlanStrategy({}),
+                              _headless_cfg(show_chart=True), display_candles=12,
+                              open_browser=False,
+                              chart_style={"background": "#101820", "grid": False})
+        live.seed()
+        try:
+            assert live.chart.style == {"background": "#101820", "grid": False}
+            assert live.chart._server._last_init["style"] == live.chart.style
+        finally:
+            live.stop()
+            live.chart.stop()
