@@ -109,6 +109,8 @@ let activeView = null;
 let lastRange = null, lastCrosshair = null;
 const SAME_TIME = (a, b) => a != null && b != null && Math.abs(a - b) < 1;
 const frames = {};                     // view id → window
+// v1.3.0: the edit key in the page's own address goes on to every chart in it
+const editKey = new URLSearchParams(location.search).get('key');
 
 async function loadLayout(){
   const res = await fetch('layout');
@@ -149,7 +151,8 @@ function renderLayout(){
       const f = document.createElement('iframe');
       // chrome=compact drops the frame's own header bar: one page-level header
       // is enough, and the vertical space matters when charts are stacked.
-      f.src = `view?view=${encodeURIComponent(id)}&chrome=compact&title=${encodeURIComponent(titleOf(id))}`;
+      f.src = `view?view=${encodeURIComponent(id)}&chrome=compact&title=${encodeURIComponent(titleOf(id))}`
+            + (editKey ? `&key=${encodeURIComponent(editKey)}` : '');
       f.title = titleOf(id);
       f.onload = () => { frames[id] = f.contentWindow; };
       cell.appendChild(f);
