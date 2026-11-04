@@ -197,6 +197,13 @@ from ..simulate import CLOSE_REASON_TP, TP_MODE_MULTI_RR, ClosedTrade
 from ..simulate._position_math import sl_reason
 from ..strategy import BaseStrategy, Signal, StrategyMode
 from ..strategy._incremental import advance_live_candle, evaluate_forming_candle
+from ._chart_edits import (
+    ChartBridge,
+    chart_drawer,
+    drop_drawing,
+    edits_file_for,
+    open_edits_files,
+)
 from ._config import (
     DISPLAY_TRADES_REAL,
     EXEC_CANDLE_CLOSE,
@@ -408,6 +415,12 @@ class _PairWorker:
         self.stop_event = threading.Event()
         self.queue: queue.Queue = queue.Queue()
         self._pending: deque = deque()
+        # v1.3.0: held around every item the loop processes; a chart edit's hook
+        # takes it too, so it runs between two steps, never inside one.
+        self.step_lock = threading.Lock()
+        self.edits = None              # where accepted chart edits are saved
+        self.chart_bridge: ChartBridge | None = None
+        self._draw_target = None       # the real chart's draws, through the display queue
 
         self._scheduler: CandleCloseScheduler | None = None
         self._scheduler_thread: threading.Thread | None = None
@@ -544,6 +557,7 @@ class _PairWorker:
         # loop only ever enqueues (display never slows trading).
         if self.display is not None:
             self.display.start()
+        self._wire_chart_edits()
 
         # TraderConfig poll intervals drive polling venues (table): apply
         # them where the broker exposes the same-named knobs (MetaTrader).
@@ -677,20 +691,49 @@ class _PairWorker:
                 self._check_feed_alive()
                 continue
             kind, payload = item
-            try:
-                if kind == "candles":
-                    self._process_scheduler_tick(payload)
-                elif kind == "forming":
-                    self._process_forming(payload)
-                elif kind == "tick":
-                    self._process_tick(payload)
-                elif kind == "user_data":
-                    self._process_user_data(payload)
-                elif kind == "reconcile":
-                    self._reconcile_positions()
-            except Exception as exc:  # noqa: BLE001 — a live session must survive
-                self._error(kind, f"processing failed: {exc!r}", will_retry=True)
+            with self.step_lock:     # v1.3.0: a chart edit waits for the item in progress
+                try:
+                    if kind == "candles":
+                        self._process_scheduler_tick(payload)
+                    elif kind == "forming":
+                        self._process_forming(payload)
+                    elif kind == "tick":
+                        self._process_tick(payload)
+                    elif kind == "user_data":
+                        self._process_user_data(payload)
+                    elif kind == "reconcile":
+                        self._reconcile_positions()
+                except Exception as exc:  # noqa: BLE001 — a live session must survive
+                    self._error(kind, f"processing failed: {exc!r}", will_retry=True)
             self._flush_state()   #: journal every state change (one item = one flush)
+
+    def _wire_chart_edits(self) -> None:
+        """The strategy hears the edits and actions on the display's chart and on
+        every chart it watches, under :attr:`step_lock` (v1.3.0).
+
+        In the «sim» and «both» modes the display steps a copy of the strategy and
+        draws from it; the copy hears what the strategy accepted, under its own
+        lock.  In «real» mode the strategy's draws reach the real chart through the
+        display queue, so the trading loop never waits on the chart.
+        """
+        display, followers, chart = self.display, [], None
+        if display is not None:
+            if display.sim is not None:
+                copy_ = display.sim.strategy
+                followers.append((copy_, display.sim._lock))
+                chart = display.sim.chart
+                copy_._draw_hook = chart_drawer(chart) if chart is not None else drop_drawing
+            elif display.real_chart is not None:
+                chart = display.real_chart
+                self._draw_target = display.enqueue_draw
+        bridge = ChartBridge(self.strategy, self.step_lock, edits=self.edits,
+                             followers=followers, draw_hook=self._draw_target)
+        if chart is not None:
+            bridge.wire(chart, self.strategy.chart_actions)
+        for watched, actions in list(self.strategy.__dict__.get("_atk_watched", ())):
+            bridge.wire(watched, actions)
+        self.strategy._watch_hook = bridge.wire
+        self.chart_bridge = bridge
 
     def _next_item(self) -> tuple[str, Any] | None:
         if self._pending:
@@ -743,11 +786,14 @@ class _PairWorker:
         for idx, candle in enumerate(candles):
             candle_ts = int(candle["timestamp"])
             self.last_price = float(candle["close"])
-            # self.notify speaks only here, for a newly closed candle.
+            # self.notify speaks only here, for a newly closed candle — and
+            # self.draw reaches the real chart only here (v1.3.0), never from a
+            # forming evaluation.
             self.strategy._notify_hook = message_hook(
                 self.events, symbol=self.config.symbol, source=SOURCE_LIVE,
                 candle_time=lambda ts=candle_ts: ts,
             )
+            self.strategy._draw_hook = self._draw_target
             try:
                 signals, exits = advance_live_candle(
                     self.strategy, self.data, candle,
@@ -755,6 +801,7 @@ class _PairWorker:
                 )
             finally:
                 self.strategy._notify_hook = None
+                self.strategy._draw_hook = None
             self._last_committed_ts = candle_ts
             if self._forming is not None and self._forming["timestamp"] <= candle_ts:
                 self._forming = None
@@ -1329,6 +1376,12 @@ class Trader:
         # One session id for every pair (: the journal stores one
         # trader_id;: client_order_ids stay uniform across pairs).
         session_id = trader_id if trader_id is not None else secrets.token_hex(3)
+        # Saved chart edits (v1.3.0): read now — a bad file refuses the start — and
+        # given to each strategy before its display copy is made and before setup().
+        edits_files = open_edits_files(pair.config for pair in entries)
+        for pair in entries:
+            edits = edits_file_for(pair.config, edits_files)
+            pair.strategy.chart_edits = edits.records if edits is not None else ()
         self._workers: list[_PairWorker] = []
         for pair in entries:
             events = EventStream()
@@ -1341,6 +1394,7 @@ class Trader:
                 quote_asset=quote_asset,
             )
             worker = _PairWorker(pair, events=events, engine=engine)
+            worker.edits = edits_file_for(pair.config, edits_files)
             wire_notifiers(events, pair.config, _LiveView(worker), self._notify_session)
             if pair.config.display:
                 # display bridge.  Sim modes get a dedicated strategy
