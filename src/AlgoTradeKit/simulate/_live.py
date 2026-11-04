@@ -189,6 +189,8 @@ class LiveSimulation:
     chart_style : dict | None
         The chart's colours (v1.3.0), as ``Chart(style=…)`` takes them.  Checked
         here, when the simulation is created, not after the seed.
+    chart_edit_key : str | None
+        The chart's ``edit_key`` (v1.3.0): only a page with the key may change it.
 
     Threading
     ---------
@@ -216,6 +218,7 @@ class LiveSimulation:
         on_event: Callable[[dict], None] | None = None,
         on_report: Callable[[SimulateReport], None] | None = None,
         chart_style: dict | None = None,
+        chart_edit_key: str | None = None,
     ) -> None:
         if (display_candles is None) == (display_start is None):
             raise ValueError(
@@ -280,6 +283,7 @@ class LiveSimulation:
         self._on_event = on_event
         self._on_report = on_report
         self._chart_style = chart_style
+        self._chart_edit_key = chart_edit_key
 
         # Rolling window: candles kept in a bounded deque; the strategy
         # frame keeps enough extra tail for the recompute/warmup maths.
@@ -725,6 +729,7 @@ class LiveSimulation:
             port=self._chart_port,
             candle_count_limit=self._candle_count_limit,
             style=self._chart_style,
+            edit_key=self._chart_edit_key,
         )
         # The recipe the pictures of trade messages use too (v1.2.0). Indicators
         # are a seed-time computation, as on the batch chart (not recomputed per
