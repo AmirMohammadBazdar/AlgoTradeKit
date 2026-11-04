@@ -383,6 +383,12 @@ window.addEventListener('message', ev => {
     case 'layout-changed':
       loadLayout();
       break;
+    case 'style':
+      // A chart's colours changed in its Settings panel (v1.3.0). They are kept
+      // in the browser's storage, which every frame of the page shares: the
+      // others read them again. Never back to the sender.
+      broadcast(id, {t: 'style'});
+      break;
   }
 });
 
