@@ -1527,3 +1527,309 @@ out.title = document.getElementById('chart-title').textContent;
     assert result["toolbar"] == ""
     assert result["zoned"] == 0
     assert result["title"] == "BTCUSDT"
+
+
+# ---------------------------------------------------------------------------
+# index.html / page.html — colours and the grid (v1.3.0)
+# ---------------------------------------------------------------------------
+# Three layers, each over the one before: the theme's default, the program's
+# style (the init's, for the theme the chart starts in), and the browser's own
+# choice from the Settings panel, saved per theme.
+
+# Every chart the page builds: the options it was made with, what was applied to
+# it after, and its candle and volume series.
+_STYLE_RECORD = """
+ctx.__charts = [];
+ctx.LightweightCharts = autoStub('LightweightCharts', {createChart: (el, opts) => {
+  const chart = makeChartStub();
+  const rec = {made: opts || {}, applied: [], candles: null, volume: null};
+  ctx.__charts.push(rec);
+  chart.applyOptions = o => { rec.applied.push(o); };
+  chart.addCandlestickSeries = o => {
+    const series = autoStub('candles');
+    rec.candles = {made: o || {}, applied: []};
+    series.applyOptions = more => { rec.candles.applied.push(more); };
+    return series;
+  };
+  chart.addHistogramSeries = () => {
+    const series = autoStub('volume');
+    rec.volume = series;
+    return series;
+  };
+  return chart;
+}});
+// What a chart or a series shows now: the options it was made with, then every
+// applyOptions on top, merged the way lightweight-charts merges them.
+ctx.__merge = (made, applied) => {
+  const deep = (to, from) => {
+    Object.entries(from || {}).forEach(([k, v]) => {
+      to[k] = v && typeof v === 'object' && !Array.isArray(v)
+        ? deep(to[k] && typeof to[k] === 'object' ? {...to[k]} : {}, v) : v;
+    });
+    return to;
+  };
+  return applied.reduce((acc, o) => deep(acc, o), deep({}, made));
+};
+"""
+
+# A browser's storage, which a test can read and fill
+_STORAGE = """
+ctx.__store = {};
+ctx.window.localStorage = {
+  getItem: k => (k in ctx.__store ? ctx.__store[k] : null),
+  setItem: (k, v) => { ctx.__store[k] = String(v); },
+};
+"""
+
+_STYLE_KEY = "atk.chart.style.v1"
+
+# An up candle, then a down one; `look()` is what the newest main chart shows.
+_STYLE_INIT = """
+const bars = [{time: 1700000000, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1},
+              {time: 1700000060, open: 1.5, high: 2, low: 0.5, close: 1, volume: 1}];
+const init = (extra = {}) => ev('handleMsg')(Object.assign(
+  {type: 'init', title: 'BTC', theme: 'dark', bars, indicators: [], drawings: [],
+   timeframes: []}, extra));
+const look = () => {
+  const m = ctx.__charts[ctx.__charts.length - 1];
+  const opts = ctx.__merge(m.made, m.applied);
+  const candles = ctx.__merge(m.candles.made, m.candles.applied);
+  return {background: opts.layout.background.color,
+          grid: [opts.grid.vertLines.visible, opts.grid.horzLines.visible],
+          up: candles.upColor, down: candles.downColor,
+          borders: [candles.borderUpColor, candles.borderDownColor],
+          wicks: [candles.wickUpColor, candles.wickDownColor],
+          volume: (m.volume.setData._last || []).map(p => p.color)};
+};
+const saved = () => JSON.parse(ctx.__store['atk.chart.style.v1'] || 'null');
+"""
+
+_DEFAULT_LOOK = {
+    "background": "#0d1117", "grid": [True, True], "up": "#3fb950", "down": "#f85149",
+    "borders": ["#3fb950", "#f85149"], "wicks": ["#3fb950", "#f85149"],
+    "volume": ["#3fb95055", "#f8514955"],
+}
+
+
+@pytest.fixture(scope="module")
+def colours_result() -> dict:
+    """A chart with no style of its own, in a browser that has saved nothing:
+    every control of the panel in turn, in both themes."""
+    return _run(CHART_HTML, _STYLE_INIT + """
+init();
+out.start = look();
+
+ev("onStyleInput('background', '#000000')");
+out.background = look().background;
+ev("onStyleInput('upColor', '#ffffff')");
+ev("onStyleInput('downColor', '#808080')");
+out.candles = look();
+ev("onGridToggle(false)");
+out.gridOff = look().grid;
+out.savedDark = saved();
+
+ev('toggleTheme()');                          // ☀: light keeps its own colours
+out.light = look();
+out.savedAfterSun = saved();
+ev("onStyleInput('background', '#eeeeee')");
+out.lightChanged = look().background;
+ev('toggleTheme()');                          // and dark has kept its own
+out.darkAgain = look();
+
+ev('resetStyle()');                           // forgets dark's, never light's
+out.afterReset = look();
+out.savedAfterReset = saved();
+""", extra_globals=_STYLE_RECORD + _STORAGE)
+
+
+class TestColours:
+    def test_page_script_runs_clean(self, colours_result):
+        assert colours_result["topLevelError"] is None
+
+    def test_a_chart_starts_in_its_themes_colours(self, colours_result):
+        assert colours_result["start"] == _DEFAULT_LOOK
+
+    def test_the_background_control_sets_the_charts_background(self, colours_result):
+        assert colours_result["background"] == "#000000"
+
+    def test_the_candle_controls_set_body_border_wick_and_volume(self, colours_result):
+        look = colours_result["candles"]
+        assert (look["up"], look["down"]) == ("#ffffff", "#808080")
+        assert look["borders"] == ["#ffffff", "#808080"]
+        assert look["wicks"] == ["#ffffff", "#808080"]
+        assert look["volume"] == ["#ffffff55", "#80808055"]       # at a third, as before
+
+    def test_grid_off_hides_both_lines(self, colours_result):
+        assert colours_result["gridOff"] == [False, False]
+
+    def test_only_what_was_changed_is_saved_for_the_theme(self, colours_result):
+        assert colours_result["savedDark"] == {
+            "dark": {"background": "#000000", "upColor": "#ffffff", "downColor": "#808080",
+                     "grid": False},
+            "light": {},
+        }
+
+    def test_each_theme_keeps_its_own_colours(self, colours_result):
+        assert colours_result["light"] == dict(_DEFAULT_LOOK, background="#ffffff")
+        assert colours_result["savedAfterSun"] == colours_result["savedDark"]  # ☀ not saved
+        assert colours_result["lightChanged"] == "#eeeeee"
+        dark = colours_result["darkAgain"]
+        assert (dark["background"], dark["up"], dark["grid"]) == ("#000000", "#ffffff",
+                                                                  [False, False])
+
+    def test_reset_forgets_the_current_themes_choice_only(self, colours_result):
+        assert colours_result["afterReset"] == _DEFAULT_LOOK
+        assert colours_result["savedAfterReset"] == {"dark": {},
+                                                     "light": {"background": "#eeeeee"}}
+
+
+@pytest.fixture(scope="module")
+def program_style_result() -> dict:
+    """A program's style, with this browser's own choice saved over part of it."""
+    return _run(CHART_HTML, _STYLE_INIT + f"""
+ctx.__store[{_STYLE_KEY!r}] = JSON.stringify({{dark: {{background: '#000000'}}}});
+init({{style: {{background: '#101820', up_color: '#ffffff', grid: false}}}});
+out.start = look();
+ev('resetStyle()');
+out.afterReset = look();
+ev('toggleTheme()');
+out.light = look();
+ev('toggleTheme()');
+
+// chart.set_style(): the program's whole style, the browser's choice still on top
+ev("onStyleInput('downColor', '#808080')");
+ev('handleMsg')({{type: 'style', style: {{background: '#202020', down_color: '#00ff00'}}}});
+out.afterSetStyle = look();
+""", extra_globals=_STYLE_RECORD + _STORAGE)
+
+
+class TestProgramColours:
+    def test_the_browsers_choice_sits_over_the_programs(self, program_style_result):
+        look = program_style_result["start"]
+        assert look["background"] == "#000000"                    # the browser's
+        assert (look["up"], look["grid"]) == ("#ffffff", [False, False])   # the program's
+        assert look["down"] == "#f85149"                           # the theme's
+
+    def test_reset_shows_the_programs_colours_again(self, program_style_result):
+        look = program_style_result["afterReset"]
+        assert (look["background"], look["up"], look["grid"]) == ("#101820", "#ffffff",
+                                                                  [False, False])
+
+    def test_q1_2_a_the_programs_colours_belong_to_its_theme(self, program_style_result):
+        """☀ on a chart whose program set dark colours: light as it has always been."""
+        assert program_style_result["light"] == dict(_DEFAULT_LOOK, background="#ffffff")
+
+    def test_set_style_replaces_the_programs_style_under_the_browsers(
+            self, program_style_result):
+        look = program_style_result["afterSetStyle"]
+        assert look["background"] == "#202020"
+        assert look["down"] == "#808080"                           # the browser's, on top
+        assert look["up"] == "#3fb950" and look["grid"] == [True, True]   # no longer set
+
+
+def test_a_colour_with_alpha_or_three_digits_reaches_the_panel_and_the_volume():
+    result = _run(CHART_HTML, _STYLE_INIT + """
+init({style: {background: '#abc', up_color: '#11223344'}});
+ev('toggleSettings()');
+out.panel = ['sc-background', 'sc-up', 'sc-down']
+  .map(id => document.getElementById(id).value);
+out.grid = document.getElementById('stog-grid').checked;
+out.look = look();
+""", extra_globals=_STYLE_RECORD + _STORAGE)
+    assert result["topLevelError"] is None
+    assert result["panel"] == ["#aabbcc", "#112233", "#f85149"]   # what a picker can hold
+    assert result["grid"] is True
+    assert result["look"]["background"] == "#abc"                 # the colour as written
+    assert result["look"]["up"] == "#11223344"
+    assert result["look"]["volume"] == ["#11223355", "#f8514955"]  # 55 in place of 44
+
+
+def test_a_selected_drawings_hollow_handles_take_the_charts_background():
+    result = _run(CHART_HTML, _STYLE_INIT + """
+init({style: {background: '#101820'}});
+const pen = {save() {}, restore() {}, beginPath() {}, arc() {}, fill() {}, stroke() {}};
+ev('drawHandle')(pen, 10, 10, '#ff0000', false);
+out.hollow = pen.fillStyle;
+ev('drawHandle')(pen, 10, 10, '#ff0000', true);
+out.filled = pen.fillStyle;
+""", extra_globals=_STYLE_RECORD + _STORAGE)
+    assert (result["hollow"], result["filled"]) == ("#101820", "#ff0000")
+
+
+def test_a_picture_shows_the_programs_colours_and_never_touches_storage():
+    stored = json.dumps({"dark": {"background": "#000000", "grid": False}})
+    result = _run(CHART_HTML, _STYLE_INIT + f"""
+ctx.__store[{_STYLE_KEY!r}] = {json.dumps(stored)};
+init({{style: {{background: '#101820'}}}});
+out.look = look();
+ev("onStyleInput('background', '#ff0000')");
+out.stored = ctx.__store[{_STYLE_KEY!r}];
+""", extra_globals=_STYLE_RECORD + _STORAGE
+        + f"ctx.location.search = '?snapshot=1&from={_T0800}&to={_T1400}&tz=UTC';\n")
+    assert result["topLevelError"] is None
+    assert result["look"]["background"] == "#101820"
+    assert result["look"]["grid"] == [True, True]
+    assert result["stored"] == stored
+
+
+@pytest.mark.parametrize("storage", [
+    # a private window, or site data blocked: the property itself throws
+    "Object.defineProperty(ctx.window, 'localStorage', "
+    "{get() { throw new Error('SecurityError'); }});\n",
+    # storage there, but every call refused
+    "ctx.window.localStorage = {getItem() { throw new Error('SecurityError'); },"
+    " setItem() { throw new Error('QuotaExceededError'); }};\n",
+], ids=["no-storage", "refused"])
+def test_storage_that_throws_leaves_a_working_chart(storage):
+    result = _run(CHART_HTML, _STYLE_INIT + """
+init({style: {background: '#101820'}});
+out.start = look().background;
+ev("onStyleInput('background', '#000000')");
+ev("onGridToggle(false)");
+out.changed = look();
+ev('resetStyle()');
+out.reset = look().background;
+""", extra_globals=_STYLE_RECORD + storage)
+    assert result["topLevelError"] is None
+    assert result["start"] == "#101820"
+    assert result["changed"]["background"] == "#000000"     # applies, though not kept
+    assert result["changed"]["grid"] == [False, False]
+    assert result["reset"] == "#101820"
+
+
+def test_a_frame_tells_the_page_when_a_colour_is_picked_and_follows_the_others():
+    result = _run(CHART_HTML, _STYLE_INIT + f"""
+init();
+ctx.__toParent.length = 0;
+ev("onStyleInput('background', '#000000')");     // the picker moving: this chart only
+out.whileMoving = ctx.__toParent.slice();
+ev('onStylePicked()');                           // a colour picked: the page follows
+ev('onGridToggle(false)');
+ev('resetStyle()');
+out.told = ctx.__toParent.slice();
+
+// another chart of the page saved the grid off, and the shell says so
+ctx.__toParent.length = 0;
+ctx.__store[{_STYLE_KEY!r}] = JSON.stringify({{dark: {{grid: false}}, light: {{}}}});
+(docListeners.message || []).forEach(fn =>
+  fn({{source: ctx.window.parent, data: {{t: 'style'}}}}));
+out.followed = look().grid;
+out.panelGrid = document.getElementById('stog-grid').checked;
+out.echoed = ctx.__toParent.slice();
+""", extra_globals=_STYLE_RECORD + _STORAGE + _EMBED)
+    assert result["topLevelError"] is None
+    assert result["whileMoving"] == []
+    assert result["told"] == [{"view": "v2", "t": "style"}] * 3
+    assert result["followed"] == [False, False]
+    assert result["panelGrid"] is False
+    assert result["echoed"] == []                   # a relayed change is not sent back
+
+
+def test_the_shell_passes_a_colour_change_to_every_other_chart():
+    result = _run(PAGE_HTML, _SETTLE + """
+clearAll();
+fromFrame('v2', {t: 'style'});
+out.posted = Object.fromEntries(['v1', 'v2', 'v3'].map(id => [id, win(id)._posted.slice()]));
+""", extra_globals=_LAYOUT)
+    assert result["topLevelError"] is None
+    assert result["posted"] == {"v1": [{"t": "style"}], "v2": [], "v3": [{"t": "style"}]}
