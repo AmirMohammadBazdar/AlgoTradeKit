@@ -1171,6 +1171,7 @@ class _LiveView(PairView):
         self.timeframe_ms = worker.tf_ms
         self.chart_indicators = tuple(dict(spec) for spec in worker.config.chart_indicators)
         self.picture_config = worker.config
+        self.chart_style = worker.config.chart_style
         self.warmup_candles = max(200, int(worker.strategy.warmup_period or 0))
 
     @property
