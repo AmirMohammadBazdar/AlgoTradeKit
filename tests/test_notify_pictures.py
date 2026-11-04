@@ -838,3 +838,55 @@ class TestSendReport:
         text, document = tg.got(ME)
         assert text["text"].splitlines()[1] == "no trades"
         assert document["media"] == "sendDocument" and engine.asked == []
+
+
+# ===========================================================================
+# v1.3.0 — a page's chart, and the pictures' colours
+# ===========================================================================
+
+from AlgoTradeKit.visual import ChartPage  # noqa: E402
+
+
+class TestPageChartPictures:
+    def test_q1_3_a_page_chart_is_photographed_at_its_own_view(self, engine):
+        page = ChartPage(title="Desk")
+        page.add(Chart(title="ETHUSDT")).set_data(quarter_hours())
+        chart = page.add(Chart(title="BTCUSDT"))
+        chart.set_data(quarter_hours())
+        page.show(open_browser=False)
+        try:
+            chart.screenshot("2026-10-14 08:00", "2026-10-14 14:00")
+        finally:
+            page.stop()
+        (asked,) = engine.asked
+        assert asked["url"].startswith(f"{page.url}/view?view=v2&snapshot=1&")
+        assert asked["query"] == {
+            "view": "v2", "snapshot": "1", "from": str(T0800), "to": str(T1400), "tz": "UTC",
+            "title": "BTCUSDT · 15m · 2026-10-14 08:00 – 14:00 UTC",
+        }
+        assert page._server._last_init["v2"]["title"] == "BTCUSDT"   # what the view serves
+
+    def test_q1_3_a_page_that_is_not_shown_says_so_at_once(self, engine):
+        page = ChartPage()
+        chart = page.add(Chart(title="BTCUSDT"))
+        chart.set_data(quarter_hours())
+        with pytest.raises(_snapshot.SnapshotError) as raised:
+            chart.screenshot()
+        assert str(raised.value) == (
+            "the chart is on a ChartPage that is not shown — call page.show() first")
+        assert engine.asked == []
+
+    def test_the_trade_pictures_use_the_configs_colours(self, make, tg, engine, clock,
+                                                        monkeypatch):
+        styles: list[dict] = []
+        real = renderer_module.populate_chart
+
+        def recording(chart, data, **options):
+            styles.append(chart.style)
+            return real(chart, data, **options)
+
+        monkeypatch.setattr(renderer_module, "populate_chart", recording)
+        bot = make({"me": TelegramChat(ME, events={"open"})}, images={"open"})
+        paper([bot], clock, live=LIVE[:1], chart_style={"background": "#101820", "grid": False})
+        assert styles == [{"background": "#101820", "grid": False}]
+        assert len(tg.pictures(ME)) == 1
