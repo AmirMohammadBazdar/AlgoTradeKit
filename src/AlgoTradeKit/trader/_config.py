@@ -237,6 +237,14 @@ class TraderConfig:
         (v1.2.0): ``[{"kind": "ema", "period": 20}, …]``.  The pictures of trade
         messages draw them, over their own candles; with ``display=True`` the
         live chart shows them too, computed once at seed time.
+    chart_style : dict | None
+        The charts' colours (v1.3.0), as ``Chart(style=…)`` takes them:
+        ``{"background": "#101820", "up_color": "#26a69a", "down_color":
+        "#ef5350", "grid": False}``; a key left out keeps the theme's colour.
+        The live chart and the pictures of trade messages use them, for the
+        dark theme they start in.  A viewer can change them for their own
+        browser in the chart's Settings panel.  ``None`` (default) — the theme's
+        colours.
     max_daily_loss : float | str | None
         Per-pair daily-loss limit: a number = account-currency $, a
         string like ``"2%"`` = percent of the UTC-day-start balance.
@@ -327,6 +335,7 @@ class TraderConfig:
     display_start: Any = None
     candle_count_limit: int | None = None
     chart_indicators: list = field(default_factory=list)
+    chart_style: dict | None = None
 
     # ------------------------------------------------------------------
     # Safety
@@ -441,6 +450,11 @@ class TraderConfig:
                     f"TraderConfig.candle_count_limit must be >= 1 or None, "
                     f"got {self.candle_count_limit}."
                 )
+        if self.chart_style is not None:
+            # Only a config with colours pays for loading the chart package.
+            from ..visual._style import check_style
+
+            self.chart_style = check_style(self.chart_style, where="TraderConfig.chart_style")
 
         # Safety.
         if self.max_daily_loss is not None:
