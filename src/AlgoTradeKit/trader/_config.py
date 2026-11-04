@@ -245,6 +245,19 @@ class TraderConfig:
         dark theme they start in.  A viewer can change them for their own
         browser in the chart's Settings panel.  ``None`` (default) — the theme's
         colours.
+    chart_edit_key : str | None
+        Who may change the session's charts from the page (v1.3.0): only a page
+        opened at the address with ``?key=<chart_edit_key>`` may move or delete the
+        strategy's drawings and pick its candle-menu actions; any other page only
+        looks.  The start line that prints a chart's address prints it with the
+        key.  ``None`` (default) — every page may.
+    chart_edits_path : str | None
+        A JSON file of the edits the strategy accepted (v1.3.0): each edit, delete
+        and action it accepts is appended, and at every start the file is read
+        back and given to the strategy as ``chart_edits`` before ``setup()``.  A
+        file that is not a list of records stops the start.  With a fixed
+        ``chart_port``, ``run_live``'s chart offers «Re-run with edits».  ``None``
+        (default) — nothing is saved.
     max_daily_loss : float | str | None
         Per-pair daily-loss limit: a number = account-currency $, a
         string like ``"2%"`` = percent of the UTC-day-start balance.
@@ -336,6 +349,8 @@ class TraderConfig:
     candle_count_limit: int | None = None
     chart_indicators: list = field(default_factory=list)
     chart_style: dict | None = None
+    chart_edit_key: str | None = None
+    chart_edits_path: str | None = None
 
     # ------------------------------------------------------------------
     # Safety
@@ -455,6 +470,20 @@ class TraderConfig:
             from ..visual._style import check_style
 
             self.chart_style = check_style(self.chart_style, where="TraderConfig.chart_style")
+        if self.chart_edit_key is not None and (
+            not isinstance(self.chart_edit_key, str) or not self.chart_edit_key
+        ):
+            raise ValueError(
+                f"TraderConfig.chart_edit_key must be a non-empty string or None, "
+                f"got {self.chart_edit_key!r}."
+            )
+        if self.chart_edits_path is not None:
+            path = self.chart_edits_path
+            if not isinstance(path, (str, os.PathLike)) or not str(path):
+                raise ValueError(
+                    f"TraderConfig.chart_edits_path must be a file path or None, got {path!r}."
+                )
+            self.chart_edits_path = str(path)
 
         # Safety.
         if self.max_daily_loss is not None:
