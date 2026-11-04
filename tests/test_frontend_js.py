@@ -2120,3 +2120,33 @@ def test_the_shell_passes_its_key_to_every_frame():
                  extra_globals=_LAYOUT)
     assert all(src.endswith("&key=s3cret") for src in keyed["src"]) and len(keyed["src"]) == 3
     assert not any("key=" in src for src in plain["src"])
+
+
+def test_the_programs_buttons_ask_first_and_only_an_editor_has_them():
+    """``chart.add_button`` (v1.3.0): «Re-run with edits» is one."""
+    result = _edits("""
+const question = 'Re-run with the saved edits? The session stops and starts again.';
+init({buttons: [{label: 'Re-run with edits', confirm: question}, {label: 'Plain', confirm: null}]});
+const bar = document.getElementById('prog-btns');
+out.labels = bar.children.map(b => b.textContent);
+ctx.__confirmAnswer = false;
+bar.children[0].onclick();
+out.afterNo = ctx.__sent.filter(m => m.type === 'button');
+ctx.__confirmAnswer = true;
+bar.children[0].onclick();
+bar.children[1].onclick();
+out.sent = ctx.__sent.filter(m => m.type === 'button');
+out.confirms = ctx.__confirms.slice();
+ev('handleMsg')({type: 'access', edit: false});
+out.viewer = bar.children.length;
+ev('handleMsg')({type: 'buttons', buttons: [{label: 'Another'}]});
+out.viewerLater = bar.children.length;
+""")
+    assert result["topLevelError"] is None
+    assert result["labels"] == ["Re-run with edits", "Plain"]
+    assert result["afterNo"] == []
+    assert result["sent"] == [{"type": "button", "label": "Re-run with edits"},
+                              {"type": "button", "label": "Plain"}]
+    question = "Re-run with the saved edits? The session stops and starts again."
+    assert result["confirms"] == [question, question]
+    assert result["viewer"] == 0 and result["viewerLater"] == 0
