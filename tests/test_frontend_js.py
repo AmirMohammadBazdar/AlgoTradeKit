@@ -2150,3 +2150,59 @@ out.viewerLater = bar.children.length;
     question = "Re-run with the saved edits? The session stops and starts again."
     assert result["confirms"] == [question, question]
     assert result["viewer"] == 0 and result["viewerLater"] == 0
+
+
+# A box reaching into the future (v1.3.0, found in the user's check of Part 3): the
+# library's coordinateToTime answers only where it has a candle, so a drag that read
+# a time for the box's far edge gave up, and the box could not be resized at all.
+_ONLY_ON_CANDLES = """
+ev('mainChart').timeScale().coordinateToTime = x =>        // as lightweight-charts does
+  (x >= 0 && x <= 90 ? 1000 + Math.round(x / 10) * 300 : null);
+"""
+
+
+def test_a_box_reaching_past_the_last_candle_can_be_resized():
+    result = _edits("""
+init({drawings: [box({editable: ['price'], time2: 1000 + 12 * 300}),          // to x 120
+                 box({id: 'free', time1: 1600, time2: 4600, price1: 99, price2: 97})]});
+""" + _ONLY_ON_CANDLES + """
+press(70, 100); dragTo(70, 80); release();       // the price-only box's top edge, up 2
+const top = lastSent('drawing_updated').drawing;
+out.priceOnly = [top.time1, top.time2, top.price1, top.price2];
+
+press(120, 20); dragTo(140, 20); release();      // the other box's right edge, further out
+const right = lastSent('drawing_updated').drawing;
+out.further = [right.time1, right.time2, right.price1, right.price2];
+""")
+    assert result["topLevelError"] is None
+    assert result["priceOnly"] == [1600, 4600, 92, 80]      # its edges past the candles kept
+    assert result["further"] == [1600, 5200, 99, 97]        # 3700 + 50 px at 30 s a pixel
+
+
+def test_a_corner_drag_keeps_the_edges_it_does_not_move():
+    result = _edits("""
+init({drawings: [box({time1: 1650, time2: 2750, price1: 90.25, price2: 80.125})]});
+""" + _ONLY_ON_CANDLES + """
+press(60, 98); dragTo(70, 90); release();        // the top-right corner
+const d = lastSent('drawing_updated').drawing;
+out.after = [d.time1, d.time2, d.price1, d.price2];
+""")
+    after = result["after"]
+    assert (after[0], after[3]) == (1650, 80.125)           # left and bottom exactly as they were
+    assert after[1] == 3100 and after[2] == 91
+
+
+def test_a_box_edge_can_be_grabbed_away_from_its_handles():
+    """A zone reaching into the future has its middle handles off the screen: its
+    edges answer anywhere along them (v1.3.0, the user's check of Part 3)."""
+    result = _edits("""
+init({drawings: [box({editable: ['price']})]});      // x 20 to 60, y 100 to 200
+out.alongTop  = ev('hitTest(30, 101)');              // between the handles at 20 and 40
+out.alongLeft = ev('hitTest(20, 130)');              // a time edge, and this box is price only
+press(30, 101); dragTo(30, 80); release();
+const d = lastSent('drawing_updated').drawing;
+out.after = [d.time1, d.time2, d.price1, d.price2];
+""")
+    assert result["alongTop"] == {"id": "zone", "handle": "tc"}
+    assert result["alongLeft"] is None
+    assert result["after"] == [1600, 2800, 92, 80]
