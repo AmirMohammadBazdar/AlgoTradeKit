@@ -259,6 +259,16 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
   bottom:3px;background:#fff;border-radius:50%;transition:.25s}
 .stog input:checked+.stog-slider{background:var(--accent)}
 .stog input:checked+.stog-slider::before{transform:translateX(16px)}
+/* Colour pickers (v1.3.0) */
+.scolor-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:1px 0}
+.scolor-row label{font-size:12px;color:var(--text)}
+.scolor-row input[type=color]{width:46px;height:24px;padding:1px 2px;cursor:pointer;
+  background:var(--bg3);border:1px solid var(--border);border-radius:5px}
+.scolor-row input[type=color]:hover{border-color:var(--accent)}
+.sreset{height:26px;background:none;border:1px solid var(--border);border-radius:6px;
+  color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;
+  transition:border-color .15s,color .15s}
+.sreset:hover{border-color:var(--accent);color:var(--text)}
 
 /* ── Indicator-add panel (v0.7.4) ────────────────────────────── */
 #ind-overlay{
@@ -538,6 +548,43 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
     <h3>Settings <button onclick="closeSettings()">✕</button></h3>
     <div class="sdivider"></div>
 
+    <div class="sgroup-title">Colours</div>
+
+    <div class="scolor-row">
+      <label for="sc-background">Background</label>
+      <input type="color" id="sc-background" value="#0d1117"
+             oninput="onStyleInput('background', this.value)" onchange="onStylePicked()"/>
+    </div>
+    <div class="scolor-row">
+      <label for="sc-up">Up candles</label>
+      <input type="color" id="sc-up" value="#3fb950"
+             oninput="onStyleInput('upColor', this.value)" onchange="onStylePicked()"/>
+    </div>
+    <div class="scolor-row">
+      <label for="sc-down">Down candles</label>
+      <input type="color" id="sc-down" value="#f85149"
+             oninput="onStyleInput('downColor', this.value)" onchange="onStylePicked()"/>
+    </div>
+
+    <div class="stoggle-row">
+      <label class="slabel" for="stog-grid">
+        Grid
+        <small>Vertical and horizontal grid lines</small>
+      </label>
+      <label class="stog">
+        <input type="checkbox" id="stog-grid" checked
+               onchange="onGridToggle(this.checked)">
+        <span class="stog-slider"></span>
+      </label>
+    </div>
+
+    <div class="srow">
+      <button class="sreset" onclick="resetStyle()">Reset colours</button>
+      <span class="hint">Changes apply to every chart on this page and are kept in this
+        browser, one set per theme.</span>
+    </div>
+
+    <div class="sdivider"></div>
     <div class="sgroup-title">Axis &amp; OHLC</div>
 
     <div class="srow">
@@ -735,13 +782,166 @@ const LIGHT={layout:{background:{color:'#ffffff'},textColor:'#57606a'},
   grid:{vertLines:{color:'#eaeef2'},horzLines:{color:'#eaeef2'}},
   crosshair:{mode:1},rightPriceScale:{borderColor:'#d0d7de'},
   timeScale:{borderColor:'#d0d7de',timeVisible:true,secondsVisible:false}};
-const tOpts=()=>theme==='dark'?DARK:LIGHT;
+// The theme's options with this chart's colours in them, so every pane made
+// or restyled takes the background and the grid from the colours below.
+const tOpts=()=>{
+  const base=theme==='dark'?DARK:LIGHT;
+  return {...base,
+    layout:{...base.layout, background:{color:chartStyle.background}},
+    grid:{vertLines:{...base.grid.vertLines, visible:chartStyle.grid},
+          horzLines:{...base.grid.horzLines, visible:chartStyle.grid}}};
+};
 
 function toggleTheme(){
   theme=theme==='dark'?'light':'dark';
   document.body.classList.toggle('light',theme==='light');
-  Object.values(panes).forEach(p=>p.chart.applyOptions(tOpts()));
+  applyStyle();                  // ☀ swaps to the other theme's colours
+  syncStylePanel();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  COLOURS (v1.3.0)
+//  Each theme has its own background, candle colours and grid, in three
+//  layers, each over the one before: the theme's default; the program's
+//  colours (the init's `style`), which belong to the theme the chart starts
+//  in; and this browser's own choice from the Settings panel, saved per
+//  theme. A picture shows the program's colours: the screenshot mode never
+//  reads or writes the browser's choice.
+// ═══════════════════════════════════════════════════════════════
+const STYLE_DEFAULTS = {
+  dark:  {background:'#0d1117', upColor:'#3fb950', downColor:'#f85149', grid:true},
+  light: {background:'#ffffff', upColor:'#3fb950', downColor:'#f85149', grid:true},
+};
+const STYLE_KEY = 'atk.chart.style.v1';
+// The program's style comes with Python's names
+const PROGRAM_FIELDS = {background:'background', up_color:'upColor', down_color:'downColor',
+                        grid:'grid'};
+const COLOUR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+let programStyle = {}, programTheme = 'dark';
+let browserStyle = {dark:{}, light:{}};           // only the fields the viewer changed
+let chartStyle   = {...STYLE_DEFAULTS.dark};      // what the chart shows now
+
+// Only a colour where a colour goes and a boolean for the grid: storage is the
+// browser's, and anything can be in it.
+function cleanStyle(s){
+  const out = {};
+  if(!s || typeof s !== 'object') return out;
+  ['background','upColor','downColor'].forEach(k => {
+    if(typeof s[k] === 'string' && COLOUR_RE.test(s[k])) out[k] = s[k];
+  });
+  if(typeof s.grid === 'boolean') out.grid = s.grid;
+  return out;
+}
+
+function fromProgram(style){
+  const s = {};
+  Object.entries(style || {}).forEach(([k, v]) => {
+    if(PROGRAM_FIELDS[k]) s[PROGRAM_FIELDS[k]] = v;
+  });
+  return cleanStyle(s);
+}
+
+function styleFor(t){
+  return Object.assign({}, STYLE_DEFAULTS[t] || STYLE_DEFAULTS.dark,
+                       t === programTheme ? programStyle : {},
+                       browserStyle[t] || {});
+}
+
+// What this browser saved, or null when it cannot say: no storage, a private
+// window that refuses it, or a picture, which shows the program's colours.
+function readSavedStyle(){
+  if(snapshot) return null;
+  try{
+    const raw = window.localStorage.getItem(STYLE_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    return {dark: cleanStyle(all && all.dark), light: cleanStyle(all && all.light)};
+  }catch{ return null; }
+}
+function loadSavedStyle(){
+  const saved = readSavedStyle();
+  if(saved) browserStyle = saved;
+}
+function storeSavedStyle(){
+  if(snapshot) return;
+  try{ window.localStorage.setItem(STYLE_KEY, JSON.stringify(browserStyle)); }catch{}
+}
+
+function candleColours(){
+  const up = chartStyle.upColor, down = chartStyle.downColor;
+  return {upColor:up, downColor:down, borderUpColor:up, borderDownColor:down,
+          wickUpColor:up, wickDownColor:down};
+}
+
+// #rgb written out, #rrggbbaa without its alpha
+function rgbOf(c){
+  return c.length === 4 ? '#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3] : c.slice(0, 7);
+}
+
+// A volume bar is its candle's colour at a third (alpha 55), in place of any
+// alpha the colour has of its own.
+function volPoint(b){
+  return {time:b.time, value:b.volume||0,
+          color:rgbOf(b.close>=b.open ? chartStyle.upColor : chartStyle.downColor) + '55'};
+}
+
+function applyStyle(){
+  chartStyle = styleFor(theme);
+  Object.values(panes).forEach(p => { try{ p.chart.applyOptions(tOpts()); }catch{} });
+  if(mainSeries) mainSeries.applyOptions(candleColours());
+  if(volumeSeries){
+    const bars = replay.active && replay.shown ? replay.shown : allBars;
+    volumeSeries.setData(bars.map(volPoint));
+  }
   redrawAll();
+}
+
+// The panel shows the colours the chart shows. A colour picker holds #rrggbb
+// only; the colour itself is untouched until another is picked.
+function syncStylePanel(){
+  const setColour = (id, c) => {
+    const el = document.getElementById(id);
+    if(el) el.value = rgbOf(c);
+  };
+  setColour('sc-background', chartStyle.background);
+  setColour('sc-up', chartStyle.upColor);
+  setColour('sc-down', chartStyle.downColor);
+  const grid = document.getElementById('stog-grid');
+  if(grid) grid.checked = chartStyle.grid;
+}
+
+// A change applies at once and is saved at once, for the current theme.
+// Storage is read again first: another tab of this chart may have saved since.
+function changeStyle(field, value){
+  loadSavedStyle();
+  browserStyle[theme] = cleanStyle({...browserStyle[theme], [field]: value});
+  storeSavedStyle();
+  applyStyle();
+}
+
+// The picker reports while it moves (input) and once more when a colour is
+// picked (change). This chart follows every move; the page's other charts
+// follow the pick, so dragging does not redraw every chart sixty times a second.
+function onStyleInput(field, value){ changeStyle(field, value); }
+function onStylePicked(){ postToPage({t:'style'}); }
+function onGridToggle(on){ changeStyle('grid', !!on); postToPage({t:'style'}); }
+
+// Forget this browser's choice for the current theme: the program's colours
+// show again, or the theme's own.
+function resetStyle(){
+  loadSavedStyle();
+  browserStyle[theme] = {};
+  storeSavedStyle();
+  applyStyle();
+  syncStylePanel();
+  postToPage({t:'style'});
+}
+
+// Another chart of the page changed the colours: they are in the storage every
+// frame of the page shares.
+function onStyleRelayed(){
+  loadSavedStyle();
+  applyStyle();
+  syncStylePanel();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -934,6 +1134,7 @@ if(embedded){
       case 'replay-exit':     replayExit();                            break;
       case 'replay-info':     postToPage(replayInfo());                break;
       case 'navigate':        scrollToTime(msg.time);                  break;
+      case 'style':           onStyleRelayed();                        break;
     }
   });
 }
@@ -1151,11 +1352,7 @@ function initMain(){
       }
     }
   });
-  mainSeries=mainChart.addCandlestickSeries({
-    upColor:'#3fb950',downColor:'#f85149',
-    borderUpColor:'#3fb950',borderDownColor:'#f85149',
-    wickUpColor:'#3fb950',wickDownColor:'#f85149',
-  });
+  mainSeries=mainChart.addCandlestickSeries(candleColours());
   // Apply initial axis label settings
   mainSeries.applyOptions({ lastValueVisible: showLastClose });
   panes.main.seriesList=[mainSeries];
@@ -1175,10 +1372,7 @@ function initMain(){
 function setData(bars){
   allBars=bars;
   mainSeries.setData(bars);
-  if(volumeSeries) volumeSeries.setData(bars.map(b=>({
-    time:b.time,value:b.volume||0,
-    color:b.close>=b.open?'#3fb95055':'#f8514955',
-  })));
+  if(volumeSeries) volumeSeries.setData(bars.map(volPoint));
   document.getElementById('barcnt').textContent=bars.length+' bars';
   // Show last-close label on right axis immediately (cursor not yet on chart)
   updateCursorAxisLabel(null);
@@ -1192,8 +1386,7 @@ function streamBar(bar){
   // trimming allBars underneath the cursor would invalidate what is on screen.
   if(!replay.active){
     mainSeries.update(bar);
-    if(volumeSeries) volumeSeries.update({time:bar.time,value:bar.volume||0,
-      color:bar.close>=bar.open?'#3fb95055':'#f8514955'});
+    if(volumeSeries) volumeSeries.update(volPoint(bar));
   }
   if(allBars.length&&allBars[allBars.length-1].time===bar.time) allBars[allBars.length-1]=bar;
   else allBars.push(bar);
@@ -1229,10 +1422,7 @@ function enforceCandleLimit(){
   const cutoff = allBars[0].time;
 
   if(mainSeries) mainSeries.setData(allBars);
-  if(volumeSeries) volumeSeries.setData(allBars.map(b=>({
-    time:b.time,value:b.volume||0,
-    color:b.close>=b.open?'#3fb95055':'#f8514955',
-  })));
+  if(volumeSeries) volumeSeries.setData(allBars.map(volPoint));
 
   // Indicator series: drop points older than the window start
   Object.values(indMeta).forEach(m=>{
@@ -2365,7 +2555,7 @@ function drawHandle(ctx,x,y,color,filled){
   ctx.save();
   ctx.beginPath(); ctx.arc(x,y,HANDLE_R,0,Math.PI*2);
   ctx.strokeStyle=color; ctx.lineWidth=1.5;
-  ctx.fillStyle=filled?color:(theme==='dark'?'#0d1117':'#ffffff');
+  ctx.fillStyle=filled?color:chartStyle.background;
   ctx.fill(); ctx.stroke();
   ctx.restore();
 }
@@ -3018,11 +3208,6 @@ function replayExit(){
 }
 
 // ── Rendering ──────────────────────────────────────────────────
-function volPoint(b){
-  return {time:b.time, value:b.volume||0,
-          color:b.close>=b.open?'#3fb95055':'#f8514955'};
-}
-
 function countClosed(T, tf){
   // number of display candles whose close is at or before the cursor
   let lo = 0, hi = allBars.length;
@@ -3304,6 +3489,10 @@ function handleMsg(msg){
 
       theme=msg.theme||'dark';
       document.body.classList.toggle('light',theme==='light');
+      programTheme=theme;                     // the program's colours belong to it
+      programStyle=fromProgram(msg.style);
+      loadSavedStyle();
+      chartStyle=styleFor(theme);
       chartType=msg.chartType||'candlestick';
       volumeInMain=msg.volumeInMain!==false;
       candleCountLimit=msg.candleCountLimit||null;
@@ -3321,6 +3510,7 @@ function handleMsg(msg){
       (msg.drawings||[]).forEach(d=>{ drawings[d.id]=d; });
       enforceCandleLimit();   // server already trims; belt-and-braces
       redrawAll(); fitAll();
+      syncStylePanel();
       setCanvasInteractive(false);
       if(snapshot) snapshotApply();
       // A timeframe switch mid-replay arrives as a fresh init: re-cut the new
@@ -3357,6 +3547,12 @@ function handleMsg(msg){
       console.warn('timeframe:', msg.message);
       alert(msg.message);
       break;
+    case 'style':
+      // chart.set_style(): the program's whole style, in place of the one the
+      // page had. The viewer's own choice stays on top of it.
+      programStyle=fromProgram(msg.style);
+      applyStyle(); syncStylePanel();
+      break;
     case 'set_candle_limit':
       // Rolling window (v1.0.0): arm/disarm and apply immediately
       candleCountLimit=msg.limit||null;
@@ -3387,6 +3583,7 @@ function toggleSettings(){
   document.getElementById('settings-btn').classList.add('on');
   document.getElementById('stog-last-close').checked  = showLastClose;
   document.getElementById('stog-ind-prices').checked  = showIndLastPrices;
+  syncStylePanel();
 }
 function closeSettings(){
   document.getElementById('settings-overlay').classList.remove('open');
@@ -3618,6 +3815,7 @@ function applyAxisLabelSettings(){
 //  BOOT
 // ═══════════════════════════════════════════════════════════════
 window.addEventListener('resize',()=>{ resizeOverlays(); redrawAll(); });
+loadSavedStyle(); chartStyle=styleFor(theme);
 initMain(); resizeOverlays(); wsConnect(); setTool('cursor');
 // Only run the periodic redraw when there are visible drawings or a visible cloud
 // (keeps the chart smooth when no canvas work is needed)
