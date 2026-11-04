@@ -1327,3 +1327,166 @@ class TestFrontendWiring:
         # streamBar must call the window enforcement on every new bar
         stream_fn = html.split("function streamBar")[1].split("function ")[0]
         assert "enforceCandleLimit()" in stream_fn
+
+
+# ===========================================================================
+# Colours (v1.3.0): Chart(style=), set_style, the layout file
+# ===========================================================================
+
+import re  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from AlgoTradeKit.visual._style import check_style  # noqa: E402
+from AlgoTradeKit.visual.indicator_renderer import add_strategy_drawings  # noqa: E402
+
+_STYLE = {"background": "#101820", "up_color": "#ffffff", "down_color": "#808080",
+          "grid": False}
+
+
+def _refused(style, where="style") -> str:
+    with pytest.raises(ValueError) as raised:
+        check_style(style, where=where)
+    return str(raised.value)
+
+
+class TestCheckStyle:
+    def test_its_three_sentences(self):
+        assert _refused({"background": "black"}) == (
+            "style['background']: 'black' is not a colour — use '#rrggbb'")
+        assert _refused({"grid": "off"}) == "style['grid']: 'off' is not True or False"
+        assert _refused({"bg": "#000000"}) == (
+            "style: unknown key 'bg' — known: background, up_color, down_color, grid")
+
+    def test_a_style_that_is_not_a_dict(self):
+        assert _refused("dark") == (
+            "style: 'dark' is not a dict of background, up_color, down_color and grid")
+
+    def test_the_message_names_where_the_style_came_from(self):
+        assert _refused({"background": "black"}, where="TraderConfig.chart_style") == (
+            "TraderConfig.chart_style['background']: 'black' is not a colour — use '#rrggbb'")
+
+    def test_three_six_or_eight_hex_digits_kept_as_written(self):
+        style = {"background": "#ABC", "up_color": "#11223344", "down_color": "#ff0000",
+                 "grid": True}
+        assert check_style(style) == style
+        for bad in ("#12345", "#1234567", "rgb(0,0,0)", "101820", 0x101820):
+            assert "is not a colour" in _refused({"up_color": bad})
+
+    def test_grid_is_a_bool_not_a_number(self):
+        assert _refused({"grid": 1}) == "style['grid']: 1 is not True or False"
+
+    def test_none_is_not_set(self):
+        assert check_style(None) == {}
+        assert check_style({"background": None, "grid": False}) == {"grid": False}
+
+
+class TestChartStyle:
+    def test_a_bad_style_is_refused_when_the_chart_is_made(self):
+        with pytest.raises(ValueError, match=re.escape(
+                "style['background']: 'black' is not a colour — use '#rrggbb'")):
+            Chart(style={"background": "black"})
+
+    def test_the_init_carries_only_the_keys_set(self):
+        assert Chart(style={"background": "#101820"})._build_init_payload()["style"] == {
+            "background": "#101820"}
+        assert Chart()._build_init_payload()["style"] == {}
+
+    def test_style_is_a_copy_both_ways(self):
+        given = dict(_STYLE)
+        c = Chart(style=given)
+        given["background"] = "#000000"
+        c.style["grid"] = True
+        assert c.style == _STYLE
+
+    def test_from_csv_takes_a_style(self, tmp_path):
+        path = tmp_path / "candles.csv"
+        _make_ohlcv_df(5, use_timestamp_col=True).to_csv(path, index=False)
+        assert Chart.from_csv(str(path), style=_STYLE).style == _STYLE
+
+    def test_set_style_merges_and_tells_the_open_page(self):
+        c = _shown_chart(style={"background": "#101820"})
+        c.set_style(up_color="#ffffff", grid=False)
+        expected = {"background": "#101820", "up_color": "#ffffff", "grid": False}
+        assert c.style == expected
+        assert _sent(c) == [{"type": "style", "style": expected}]
+        assert c._server._last_init["style"] == expected     # and a reload shows it
+
+    def test_none_brings_back_the_themes_colour(self):
+        c = _shown_chart(style=_STYLE)
+        c.set_style(background=None)
+        assert "background" not in c.style
+        assert _sent(c)[-1]["style"] == {k: v for k, v in _STYLE.items() if k != "background"}
+
+    def test_a_bad_field_changes_nothing(self):
+        c = _shown_chart(style={"background": "#101820"})
+        with pytest.raises(ValueError, match="unknown key 'bg'"):
+            c.set_style(bg="#000000")
+        assert c.style == {"background": "#101820"} and _sent(c) == []
+
+    def test_before_show_it_only_changes_the_init(self):
+        c = _make_chart()
+        c._server = _FakeServer()
+        c.set_style(grid=False)
+        assert c._server.sent == []
+        assert c._build_init_payload()["style"] == {"grid": False}
+
+    def test_the_layout_file_keeps_the_style(self, tmp_path):
+        path = tmp_path / "layout.json"
+        Chart(style=_STYLE).save_layout(str(path))
+        assert json.loads(path.read_text())["style"] == _STYLE
+        restored = Chart()
+        restored.load_layout(str(path))
+        assert restored.style == _STYLE
+
+    def test_a_layout_file_without_a_style_leaves_it(self, tmp_path):
+        path = tmp_path / "old.json"
+        path.write_text(json.dumps({"title": "Old", "indicators": [], "drawings": []}))
+        c = Chart(style={"up_color": "#ffffff"})
+        c.load_layout(str(path))
+        assert c.style == {"up_color": "#ffffff"}
+
+
+# ===========================================================================
+# Gap 1 (v1.3.0): a strategy's drawing keeps what the browser did to it
+# ===========================================================================
+
+class TestStrategyDrawingEdits:
+    @staticmethod
+    def _chart_with_zone() -> Chart:
+        c = _shown_chart()
+        add_strategy_drawings(c, SimpleNamespace(drawings=[
+            {"type": "box", "id": "zone", "time1": ANCHOR_S, "time2": ANCHOR_S + ONE_DAY_S,
+             "price1": 100.0, "price2": 104.0, "color": "#26a69a", "label": "Zone"},
+        ]))
+        _sent(c).clear()
+        return c
+
+    def test_an_edit_reaches_a_fresh_init(self):
+        c = self._chart_with_zone()
+        c._handle_browser_message({"type": "drawing_updated", "drawing": {
+            "id": "zone", "type": "box", "time1": ANCHOR_S, "time2": ANCHOR_S + 3 * ONE_DAY_S,
+            "price1": 98.0, "price2": 104.0, "color": "#ff9800", "label": "Moved"}})
+        (zone,) = c._build_init_payload()["drawings"]
+        assert (zone["time2"], zone["price1"]) == (ANCHOR_S + 3 * ONE_DAY_S, 98.0)
+        assert (zone["color"], zone["label"]) == ("#ff9800", "Moved")
+        assert zone["id"] == "zone" and zone["source"] == "server"
+        assert c._server._last_init["drawings"] == [zone]     # what a reload is sent
+
+    def test_a_lock_change_reaches_a_fresh_init(self):
+        c = self._chart_with_zone()
+        c._handle_browser_message({"type": "drawing_lock_changed", "id": "zone",
+                                   "locked": False})
+        (zone,) = c._server._last_init["drawings"]
+        assert zone["locked"] is False
+        assert not hasattr(c._drawings[0], "locked")          # the payload, not the wrapper
+
+    def test_the_librarys_own_drawings_are_edited_as_before(self):
+        c = _shown_chart()
+        c.add_box(ANCHOR_S, 100.0, ANCHOR_S + ONE_DAY_S, 104.0)
+        box = c._drawings[-1]
+        c._handle_browser_message({"type": "drawing_updated", "drawing": {
+            "id": box.id, "price1": 98.0, "made_up": 1}})
+        c._handle_browser_message({"type": "drawing_lock_changed", "id": box.id,
+                                   "locked": True})
+        assert (box.price1, box.locked) == (98.0, True)
+        assert not hasattr(box, "made_up")
