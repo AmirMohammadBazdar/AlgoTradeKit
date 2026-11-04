@@ -2142,10 +2142,30 @@ function fromXY(cx,cy){
     const wR=panes.main.paneWrap.getBoundingClientRect();
     const pR=document.getElementById('panes').getBoundingClientRect();
     const price=mainSeries.coordinateToPrice(cy-(wR.top-pR.top));
-    const time=mainChart.timeScale().coordinateToTime(cx);
+    const time=xToTime(cx);
     if(price==null||time==null) return null;
     return{time,price};
   }catch{return null;}
+}
+
+// The time at x, also off the candles (v1.3.0). The scale answers only where it
+// has a candle; past the last one (or before the first) the time runs on at the
+// spacing of the two nearest candles — the way timeToX draws there — so a shape
+// reaching into the future can still be grabbed and resized.
+function xToTime(x){
+  if(!mainChart) return null;
+  let t=null;
+  try{ t=mainChart.timeScale().coordinateToTime(x); }catch{}
+  if(t!=null) return t;
+  const bars=scaleBars();
+  if(bars.length<2) return null;
+  const last=bars.length-1;
+  const first=timeToX(bars[0].time);
+  const [lo,hi]=(first!=null&&x<first) ? [0,1] : [last-1,last];
+  const x0=timeToX(bars[lo].time), x1=timeToX(bars[hi].time);
+  if(x0==null||x1==null||x1===x0) return null;
+  const t0=bars[lo].time, t1=bars[hi].time;
+  return Math.round(t0+(t1-t0)*((x-x0)/(x1-x0)));
 }
 function toXYFromOrig(time,price){ return toXY(time,price); }
 
@@ -2666,6 +2686,13 @@ function hitDrawing(d,cx,cy){
                    ['br',x+w,y+h],['bc',cx2,y+h],['bl',x,y+h],['lc',x,cy2]];
     for(const [hname,hx,hy] of handles)
       if(dist(cx,cy,hx,hy)<HIT_R) return{id:d.id,handle:hname};
+    // An edge can be grabbed anywhere along it (v1.3.0): a zone that reaches into
+    // the future has its middle handles off the screen.
+    const alongX=cx>=x&&cx<=x+w, alongY=cy>=y&&cy<=y+h;
+    if(alongX&&Math.abs(cy-y)<HIT_R)     return{id:d.id,handle:'tc'};
+    if(alongX&&Math.abs(cy-(y+h))<HIT_R) return{id:d.id,handle:'bc'};
+    if(alongY&&Math.abs(cx-x)<HIT_R)     return{id:d.id,handle:'lc'};
+    if(alongY&&Math.abs(cx-(x+w))<HIT_R) return{id:d.id,handle:'rc'};
     const ez=HIT_R+2;
     if(cx>x+ez&&cx<x+w-ez&&cy>y+ez&&cy<y+h-ez) return{id:d.id,handle:'interior'};
   }
@@ -3018,13 +3045,18 @@ function onDragMove(cx,cy){
       if(h==='tr'||h==='rc'||h==='br') newRight=Math.max(cx,origLeft+10);
       if(h==='tl'||h==='tc'||h==='tr') newTop  =Math.min(cy,origBot-10);
       if(h==='bl'||h==='bc'||h==='br') newBot  =Math.max(cy,origTop+10);
-      const tL=mainChart.timeScale().coordinateToTime(newLeft);
-      const tR=mainChart.timeScale().coordinateToTime(newRight);
+      // Only the edges this handle moves are read back from the pointer; the others
+      // keep their values exactly (v1.3.0). An edge past the last candle has a time
+      // too (xToTime): before, a box reaching into the future could not be resized.
       const wR=panes.main.paneWrap.getBoundingClientRect();
       const pR=document.getElementById('panes').getBoundingClientRect();
       const offY=wR.top-pR.top;
-      const priceTop=mainSeries.coordinateToPrice(newTop-offY);
-      const priceBot=mainSeries.coordinateToPrice(newBot-offY);
+      const tL=(h==='tl'||h==='lc'||h==='bl') ? xToTime(newLeft)  : Math.min(o.time1,o.time2);
+      const tR=(h==='tr'||h==='rc'||h==='br') ? xToTime(newRight) : Math.max(o.time1,o.time2);
+      const priceTop=(h==='tl'||h==='tc'||h==='tr')
+        ? mainSeries.coordinateToPrice(newTop-offY) : Math.max(o.price1,o.price2);
+      const priceBot=(h==='bl'||h==='bc'||h==='br')
+        ? mainSeries.coordinateToPrice(newBot-offY) : Math.min(o.price1,o.price2);
       if(tL==null||tR==null||priceTop==null||priceBot==null) return;
       const t1WasLeft=(o.time1<=o.time2);
       d.time1=t1WasLeft?tL:tR; d.time2=t1WasLeft?tR:tL;
