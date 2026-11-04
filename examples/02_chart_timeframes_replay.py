@@ -1,7 +1,7 @@
 """
-Timeframe switching and bar replay on one chart  *(v1.1.0)*
+Timeframe switching, bar replay and edits on one chart  *(v1.1.0, v1.3.0)*
 
-    python examples/04_chart_timeframes_replay.py [path/to/1m.csv]
+    python examples/02_chart_timeframes_replay.py [path/to/1m.csv]
 
 The chart is given **1m** candles and told to display **5m**. Everything else
 happens in the browser toolbar.
@@ -23,6 +23,14 @@ What to try
    * The EMA stops at the last *closed* candle: no value is drawn for a candle
      that has not finished.
    * `Esc` leaves replay and every candle comes back.
+4. The yellow **High zone** around the last hour's high is the program's own
+   (v1.3.0). Right-click it → `Unlock`, then drag its top or bottom edge: this
+   terminal prints the new prices. Its left and right edges stay where they are
+   (`editable=("price",)`). Make it more than twice as tall and the program
+   refuses: the zone jumps back and the status bar says «Refused: too tall».
+5. Right-click it → `Delete`: the page asks first, and this terminal prints it.
+6. Right-click a candle, away from any drawing → `Mark here`: a vertical line
+   appears on that candle.
 """
 from __future__ import annotations
 
@@ -33,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from _sample_data import one_minute_candles
 
-from AlgoTradeKit.visual import Chart
+from AlgoTradeKit.visual import Chart, EditRefused
 
 candles = one_minute_candles(days=5)
 print(f"  {len(candles)} 1m candles")
@@ -53,6 +61,40 @@ chart.add_indicator_from_atk(
     candles.assign(value=candles["close"])[["timestamp", "value"]],
     name="1m close", color="#8b949e",
 )
+
+# ── Edits on the page reach the program (v1.3.0) ─────────────────────────────
+# A keyed drawing reports what the user does to it. Chart(edit_key="…") would let
+# only the address with ?key=… change anything; this one lets every page.
+last_hour = candles.tail(60)
+high = float(last_hour["high"].max())
+top, bottom = high * 1.0002, high * 0.9998
+chart.add_box(int(last_hour["timestamp"].iloc[0]) // 1000, top,
+              int(last_hour["timestamp"].iloc[-1]) // 1000, bottom,
+              color="#e3b341", border_color="#e3b341", label="High zone",
+              key="zone:high", editable=("price",), title="Last hour's high")
+
+
+@chart.on_drawing_edit
+def zone_edited(edit):
+    height = abs(edit.after["price1"] - edit.after["price2"])
+    if height > 2 * (top - bottom):
+        print(f"  {edit.key}: refused, {height:,.2f} tall")
+        raise EditRefused("too tall")            # it goes back, in every open page
+    print(f"  {edit.key}: {edit.after['price2']:,.2f} – {edit.after['price1']:,.2f}")
+
+
+@chart.on_drawing_delete
+def zone_deleted(edit):
+    print(f"  {edit.key}: deleted")
+
+
+def mark_here(action):                           # action.time: the candle's opening, ms
+    chart.add_vline(action.time // 1000, label="mark")
+    price = "—" if action.price is None else f"{action.price:,.2f}"
+    print(f"  marked the candle of {action.time} (UTC ms) at {price}")
+
+
+chart.add_action("Mark here", mark_here)
 
 print(f"  source {chart.source_timeframe} · showing {chart.display_timeframe} "
       f"({len(chart._bars)} candles)")
