@@ -43,6 +43,7 @@ from typing import Literal
 
 import pandas as pd
 
+from ._style import check_style
 from .models import (
     Box,
     FibRetracement,
@@ -119,6 +120,13 @@ class Chart:
         Which timeframes the browser's selector offers.  ``None`` offers every
         valid multiple of the source.  Pass a list to narrow it; an entry that
         cannot be produced from the source is rejected.
+    style : dict | None
+        The chart's colours (v1.3.0): ``background``, ``up_color`` and
+        ``down_color`` (``"#rrggbb"``, ``"#rgb"`` or ``"#rrggbbaa"``) and
+        ``grid`` (``True`` / ``False``); a key left out keeps the theme's value.
+        They belong to *theme*, the theme the chart starts in: ☀ shows the other
+        theme's own colours.  Pictures use them.  A viewer can change them for
+        their own browser in the Settings panel; see :meth:`set_style`.
     """
 
     def __init__(
@@ -133,11 +141,13 @@ class Chart:
         source_timeframe:   str | None = None,
         display_timeframe:  str | None = None,
         timeframes:         list[str] | None = None,
+        style:              dict | None = None,
     ) -> None:
         self.title          = title
         self.chart_type     = chart_type
         self.theme          = theme
         self.volume_in_main = volume_in_main
+        self._style: dict   = check_style(style)     # v1.3.0: the program's colours
 
         self._bars:       list[dict]          = []
         self._indicators: list[IndicatorSeries] = []
@@ -188,6 +198,7 @@ class Chart:
         source_timeframe:  str | None = None,
         display_timeframe: str | None = None,
         timeframes:        list[str] | None = None,
+        style:             dict | None = None,
     ) -> Chart:
         """
         Create a Chart pre-loaded with data from an AlgoTradeKit CSV file.
@@ -217,6 +228,8 @@ class Chart:
             Timeframe switching (v1.1.0) — see :class:`Chart`.  Load a 1m CSV
             with ``display_timeframe="5m"`` and the viewer can switch from the
             toolbar.
+        style
+            The chart's colours (v1.3.0) — see :class:`Chart`.
 
         Example
         -------
@@ -245,6 +258,7 @@ class Chart:
             source_timeframe=source_timeframe,
             display_timeframe=display_timeframe,
             timeframes=timeframes,
+            style=style,
         )
         chart.set_data(df, candle_range=candle_range)
         return chart
@@ -1442,6 +1456,33 @@ class Chart:
         return self
 
     # -----------------------------------------------------------------------
+    # Colours (v1.3.0)
+    # -----------------------------------------------------------------------
+
+    @property
+    def style(self) -> dict:
+        """The program's colours: a copy of what ``style=`` and :meth:`set_style` set."""
+        return dict(self._style)
+
+    def set_style(self, **fields) -> Chart:
+        """
+        Change the chart's colours: ``background``, ``up_color``, ``down_color``
+        and ``grid``, as ``Chart(style=…)`` takes them.
+
+        The fields are merged into the current style, and ``None`` takes one out,
+        so the theme's own value shows again.  An open page redraws at once; a
+        viewer's own choice from the Settings panel stays on top of it::
+
+            chart.set_style(background="#000000", grid=False)
+            chart.set_style(background=None)        # the theme's background again
+        """
+        self._style = check_style({**self._style, **fields})
+        if self._shown:
+            self._server.send({"type": "style", "style": dict(self._style)})
+            self._refresh_init_cache()
+        return self
+
+    # -----------------------------------------------------------------------
     # Rolling candle window (v1.0.0)
     # -----------------------------------------------------------------------
 
@@ -1536,9 +1577,15 @@ class Chart:
             if did:
                 for drawing in self._drawings:
                     if drawing.id == did:
-                        for key, val in d.items():
-                            if hasattr(drawing, key):
-                                setattr(drawing, key, val)
+                        payload = getattr(drawing, "_payload", None)
+                        if isinstance(payload, dict):
+                            # A strategy's drawing is its dict (v1.3.0): the
+                            # edit goes into it, or a reload undoes it.
+                            payload.update({k: v for k, v in d.items() if k != "id"})
+                        else:
+                            for key, val in d.items():
+                                if hasattr(drawing, key):
+                                    setattr(drawing, key, val)
                         break
                 self._refresh_init_cache()
 
@@ -1554,7 +1601,11 @@ class Chart:
             if did is not None and state is not None:
                 for drawing in self._drawings:
                     if drawing.id == did:
-                        drawing.locked = state
+                        payload = getattr(drawing, "_payload", None)
+                        if isinstance(payload, dict):
+                            payload["locked"] = state
+                        else:
+                            drawing.locked = state
                         break
                 self._refresh_init_cache()
 
@@ -1908,11 +1959,12 @@ class Chart:
     # -----------------------------------------------------------------------
 
     def save_layout(self, path: str) -> Chart:
-        """Save the current chart configuration (indicators + drawings) to JSON."""
+        """Save the current chart configuration (style, indicators, drawings) to JSON."""
         layout = {
             "title":      self.title,
             "chart_type": self.chart_type,
             "theme":      self.theme,
+            "style":      dict(self._style),
             "indicators": [i.to_dict() for i in self._indicators],
             "drawings":   [d.to_dict() for d in self._drawings],
         }
@@ -1926,6 +1978,8 @@ class Chart:
         self.title      = layout.get("title",      self.title)
         self.chart_type = layout.get("chart_type", self.chart_type)
         self.theme      = layout.get("theme",       self.theme)
+        if "style" in layout:               # v1.3.0; an older file keeps the style
+            self._style = check_style(layout["style"])
 
         TYPE_MAP = {
             "hline":     HorizontalLine,
@@ -2049,12 +2103,21 @@ class Chart:
         interactive chart stays UTC.
 
         A chart that is not shown is served for the picture, with no browser tab,
-        and stopped after it; a shown one stays as it is.  Needs the ``[notify]``
-        extra and its browser: ``pip install "AlgoTradeKit[notify]"``, then
-        ``playwright install chromium``.
+        and stopped after it; a shown one stays as it is.  A chart on a
+        :class:`ChartPage` is photographed from the page's server (v1.3.0), so the
+        page must be shown first.  Needs the ``[notify]`` extra and its browser:
+        ``pip install "AlgoTradeKit[notify]"``, then ``playwright install chromium``.
         """
-        from ._snapshot import snapshot
+        from ._page import _ViewProxy
+        from ._snapshot import SnapshotError, snapshot
 
+        # A page's chart lives at /view?view=<id> on the page's server, which only
+        # the page starts.
+        on_page = isinstance(self._server, _ViewProxy)
+        if on_page and not self._shown:
+            raise SnapshotError(
+                "the chart is on a ChartPage that is not shown — call page.show() first"
+            )
         query = self._snapshot_query(start, end, timezone)
         with _SCREENSHOT_LOCK:
             started_here = not self._shown
@@ -2063,8 +2126,9 @@ class Chart:
                 self._shown = True
             # The page asks for the chart as it is now; an open tab is not told.
             self._server._last_init = self._build_init_payload()
+            address = f"{self.url}&{query}" if on_page else f"{self.url}/?{query}"
             try:
-                return snapshot(f"{self.url}/?{query}", width, height)
+                return snapshot(address, width, height)
             finally:
                 if started_here:
                     self._server.stop()
@@ -2085,6 +2149,7 @@ class Chart:
             "title":            self.title,
             "chartType":        self.chart_type,
             "theme":            self.theme,
+            "style":            dict(self._style),
             "volumeInMain":     self.volume_in_main,
             "candleCountLimit": self._candle_count_limit,
             "sourceTimeframe":  self._source_tf,
