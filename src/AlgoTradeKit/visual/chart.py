@@ -199,7 +199,9 @@ class Chart:
         self._edit_callbacks:   list = []
         self._delete_callbacks: list = []
         self._actions: dict = {}                 # label → fn, in the menu's order
+        self._buttons: dict = {}                 # label → (fn, confirm), the toolbar's
         self._events = ChartEvents()             # its thread starts with the first job
+        self._unheard_said = False               # «nothing told», once per chart
 
         self._candle_count_limit: int | None = None
         if candle_count_limit is not None:
@@ -1661,10 +1663,63 @@ class Chart:
         self._send_actions()
         return self
 
+    @property
+    def actions(self) -> list[str]:
+        """The candle menu's labels, in its order."""
+        return list(self._actions)
+
     def _send_actions(self) -> None:
         if self._shown:
             self._server.send({"type": "actions", "actions": list(self._actions)})
             self._refresh_init_cache()
+
+    def add_button(self, label: str, fn, *, confirm: str | None = None) -> Chart:
+        """
+        A button in the chart's toolbar (v1.3.0), shown to a page that may change
+        the chart.  A click asks *confirm* first, when given, then calls ``fn()`` on
+        the chart's thread.  Labels are unique per chart; an open page gets the
+        button at once.
+        """
+        if not isinstance(label, str) or not label:
+            raise ValueError(f"button label {label!r} is not a non-empty string")
+        if not callable(fn):
+            raise TypeError(f"add_button takes a function, got {type(fn).__name__}")
+        if confirm is not None and not isinstance(confirm, str):
+            raise TypeError(f"confirm must be a string, got {type(confirm).__name__}")
+        if label in self._buttons:
+            raise ValueError(f"button {label!r} is already on this chart")
+        self._buttons[label] = (fn, confirm)
+        if self._shown:
+            self._server.send({"type": "buttons", "buttons": self._button_list()})
+            self._refresh_init_cache()
+        return self
+
+    def _button_list(self) -> list[dict]:
+        return [{"label": label, "confirm": confirm}
+                for label, (_fn, confirm) in self._buttons.items()]
+
+    def _queue_button(self, msg: dict) -> None:
+        label = msg.get("label")
+        found = self._buttons.get(label) if isinstance(label, str) else None
+        if found is None:
+            return
+        fn = found[0]
+
+        def run() -> None:
+            try:
+                fn()
+            except Exception as exc:
+                print(f"[AlgoTradeKit] chart: button {label!r} failed — "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+
+        self._events.put(run)
+
+    def _say_unheard(self, key: str) -> None:
+        """A keyed drawing changed on a chart nothing listens to: say so, once."""
+        if not self._unheard_said:
+            self._unheard_said = True
+            print(f"[AlgoTradeKit] chart: edit of {key!r} — no live session, nothing told",
+                  flush=True)
 
     def _apply_browser_edit(self, drawing, fields: dict) -> None:
         """Store a page's edit of *drawing*, and hand a keyed drawing's change to
@@ -1673,6 +1728,8 @@ class Chart:
         state = payload if isinstance(payload, dict) else drawing.__dict__
         key = drawing_key(drawing)
         watched = key is not None and bool(self._edit_callbacks)
+        if key is not None and not watched:
+            self._say_unheard(key)
         if watched:
             before = copy.deepcopy(drawing.to_dict())
             state_before = copy.deepcopy(state)
@@ -1703,6 +1760,8 @@ class Chart:
         if key is not None and self._delete_callbacks:
             before = copy.deepcopy(drawing.to_dict())
             self._events.put(lambda: self._run_delete(drawing, index, key, before))
+        elif key is not None:
+            self._say_unheard(key)
 
     def _run_edit(self, drawing, key, before, after, undo, added) -> None:
         edit = DrawingEdit(chart=self, drawing_id=drawing.id, key=key, before=before,
@@ -1863,7 +1922,7 @@ class Chart:
     #: program's drawings, pick an action, or change what every viewer sees.
     _EDITOR_ONLY = frozenset({
         "drawing_updated", "drawing_deleted", "drawing_lock_changed", "chart_action",
-        "set_timeframe", "compute_indicator", "remove_indicator",
+        "set_timeframe", "compute_indicator", "remove_indicator", "button",
     })
 
     def _handle_browser_message(self, msg: dict) -> None:
@@ -1895,6 +1954,9 @@ class Chart:
 
         elif msg_type == "chart_action":
             self._queue_action(msg)
+
+        elif msg_type == "button":
+            self._queue_button(msg)
 
         elif msg_type == "drawing_lock_changed":
             did   = msg.get("id")
@@ -2458,6 +2520,7 @@ class Chart:
             "displayTimeframe": self._display_tf,
             "timeframes":       list(self._timeframes),
             "actions":          list(self._actions),
+            "buttons":          self._button_list(),
             "bars":             self._bars,
             "indicators":       [i.to_dict() for i in self._indicators],
             "drawings":         [d.to_dict() for d in self._drawings],
