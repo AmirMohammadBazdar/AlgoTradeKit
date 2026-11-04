@@ -44,7 +44,21 @@ class _ViewProxy:
         self._server  = page_server
         self._view_id = view_id
         self.on_message = None
-        self._last_init: dict | None = None
+        self._last_init = None
+
+    @property
+    def _last_init(self) -> dict | None:
+        """The view's latest ``init``: what a browser that connects is sent."""
+        return self.__dict__.get("_view_init")
+
+    @_last_init.setter
+    def _last_init(self, message: dict | None) -> None:
+        # A chart refreshes this copy after every change (Chart._refresh_init_cache);
+        # the page replays its own, so the copy goes there too (v1.3.0). Before, a
+        # reloaded page showed the chart as it was when the page opened.
+        self.__dict__["_view_init"] = message
+        if message is not None:
+            self._server._last_init[self._view_id] = message
 
     def send(self, message: dict) -> None:
         if message.get("type") == "init":
@@ -157,6 +171,9 @@ class ChartPage:
         self._attach(chart, vid)
 
         if self._shown:
+            # The new frame asks for its view as soon as the layout names it, so
+            # the view's init is there first (v1.3.0): before, it never came.
+            chart._send_init()
             self._refresh_layout()
         return chart
 
