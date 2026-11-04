@@ -611,6 +611,7 @@ class _DisplayBridge:
             chart_port=config.chart_port,
             report_port=config.report_port,
             open_browser=config.display_open_browser,
+            chart_style=config.chart_style,
             # No on_event/on_report: the [LIVE] terminal stream is the
             # trader's voice — a parallel [SIM] log would be noise.
         )
@@ -705,6 +706,7 @@ class _DisplayBridge:
             host=config.chart_host,
             port=config.chart_port,
             candle_count_limit=config.candle_count_limit,
+            style=config.chart_style,
         )
         chart.set_data(df)
         chart.show(open_browser=config.display_open_browser, block=False)
