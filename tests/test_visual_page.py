@@ -323,3 +323,44 @@ class TestShutdownRace:
         server.start(open_browser=False)
         assert server._uvicorn.config.timeout_graceful_shutdown == _SHUTDOWN_GRACE
         server.stop()
+
+
+# ---------------------------------------------------------------------------
+# What a reload shows (v1.3.0)
+# ---------------------------------------------------------------------------
+
+def _connect_and_read(page: ChartPage, view: str, timeout: float = 5.0) -> dict:
+    """The first message a browser opening *view* gets: what a reload shows."""
+    from websockets.sync.client import connect
+
+    with connect(f"ws://127.0.0.1:{page._server.port}/ws?view={view}") as ws:
+        return json.loads(ws.recv(timeout=timeout))
+
+
+@pytest.fixture
+def shown_page():
+    page = ChartPage(title="Reload")
+    page.add(_chart("BTC 3m", "3m"))
+    page.show(block=False, open_browser=False)
+    yield page
+    page.stop()
+
+
+class TestWhatAReloadShows:
+    def test_gap_3_a_box_added_after_show_is_in_the_reloaded_page(self, shown_page):
+        chart = shown_page.charts[0]
+        start = ANCHOR // 1000
+        chart.add_box(start, 100.0, start + 600, 120.0, label="Zone")
+        chart.set_style(background="#000000")
+        init = _connect_and_read(shown_page, "v1")
+        assert init["type"] == "init"
+        assert [d["label"] for d in init["drawings"]] == ["Zone"]
+        assert init["style"] == {"background": "#000000"}
+
+    def test_q1_4_a_chart_added_to_a_shown_page_gets_its_init(self, shown_page):
+        late = _chart("ETH 5m", "5m")
+        shown_page.add(late)
+        init = _connect_and_read(shown_page, "v2")
+        assert (init["type"], init["title"], len(init["bars"])) == ("init", "ETH 5m", 60)
+        late.add_hline(150.0)
+        assert [d["price"] for d in _connect_and_read(shown_page, "v2")["drawings"]] == [150.0]
