@@ -26,6 +26,7 @@ python examples/06_telegram_chart_picture.py   # a chart picture to Telegram (sa
 python examples/07_price_alerts.py             # price alerts to Telegram (same)
 python examples/08_telegram_commands.py        # /status, /positions, /stop from Telegram (same)
 python examples/09_other_backends.py           # Discord, e-mail, a webhook (their own variables)
+python examples/10_chart_edits.py              # edits on the chart reach a paper strategy
 ```
 
 > ### 🔔 New in v1.2.0 — notifications
