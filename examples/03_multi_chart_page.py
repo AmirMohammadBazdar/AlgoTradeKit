@@ -1,7 +1,7 @@
 """
 Several charts on one page, moving together  *(v1.1.0)*
 
-    python examples/05_multi_chart_page.py [path/to/1m.csv]
+    python examples/03_multi_chart_page.py [path/to/1m.csv]
 
 Three views of the *same* 1m candles — 3m, 5m and 1h — laid out as one chart
 across the top and two side by side underneath. Everything is served from one
@@ -20,6 +20,12 @@ What to try
 6. `⏵⏵ REPLAY` in the **page header** arms all three. Click a candle on any of
    them and they all jump there; one step advances every chart by one minute,
    so the 5m candle closes on its boundary while the 3m one is still forming.
+7. The 1h chart starts in colours of its own, a dark blue background and no
+   grid (`style=`, v1.3.0). Open Settings (the gear) on any chart: under
+   «Colours», pick a background or candle colour, or turn «Grid» off, and every
+   chart on the page follows. Your browser keeps the choice for the next visit;
+   «Reset colours» brings back each chart's own. ☀ shows the light theme, whose
+   colours are kept apart from the dark theme's.
 """
 from __future__ import annotations
 
@@ -36,8 +42,8 @@ candles = one_minute_candles(days=5)
 print(f"  {len(candles)} 1m candles")
 
 
-def view(title: str, timeframe: str) -> Chart:
-    chart = Chart(title=title, display_timeframe=timeframe)
+def view(title: str, timeframe: str, style: dict | None = None) -> Chart:
+    chart = Chart(title=title, display_timeframe=timeframe, style=style)
     chart.set_data(candles)
     chart.add_indicator_spec({"kind": "ema", "period": 20})
     return chart
@@ -45,7 +51,9 @@ def view(title: str, timeframe: str) -> Chart:
 
 fast = view("BTC 3m", "3m")
 slow = view("BTC 5m", "5m")
-wide = view("BTC 1h", "1h")
+# The colours this chart starts in. The Settings panel changes them for whoever is
+# looking, in their own browser; pictures (chart.screenshot()) keep these.
+wide = view("BTC 1h", "1h", style={"background": "#101820", "grid": False})
 
 page = ChartPage(title="BTC desk")
 page.add(fast)              # row 0 — across the top
