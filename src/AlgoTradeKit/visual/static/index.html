@@ -417,6 +417,8 @@ body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
       <path d="M7 1v1.8M7 11.2V13M1 7h1.8M11.2 7H13M2.9 2.9l1.3 1.3M9.8 9.8l1.3 1.3M11.1 2.9l-1.3 1.3M4.2 9.8l-1.3 1.3" stroke="currentColor" stroke-width="1.2"/>
     </svg>
   </button>
+  <!-- v1.3.0: the program's own buttons (chart.add_button), for a page that may edit -->
+  <span id="prog-btns"></span>
 </div>
 
 <!-- ── Indicator-add overlay (v0.7.4) ─────────────────────────── -->
@@ -3253,8 +3255,32 @@ document.addEventListener('click', closeCandleMenu);
 const NO_EDIT = 'needs the edit key';
 const _editTitles = {};
 
+// The program's toolbar buttons (v1.3.0): shown to a page that may edit. A click
+// asks the button's question first, when it has one.
+let programButtons = [];
+function setProgramButtons(list){
+  programButtons = Array.isArray(list)
+    ? list.filter(b => b && typeof b.label === 'string') : [];
+  renderProgramButtons();
+}
+function renderProgramButtons(){
+  const box = document.getElementById('prog-btns');
+  box.innerHTML = '';
+  if(!canEdit || snapshot) return;
+  programButtons.forEach(b => {
+    const btn = document.createElement('button');
+    btn.className = 'tb'; btn.textContent = b.label;
+    btn.onclick = () => {
+      if(b.confirm && !confirm(b.confirm)) return;
+      sendMsg({type:'button', label:b.label});
+    };
+    box.appendChild(btn);
+  });
+}
+
 function applyAccess(){
   document.body.classList.toggle('no-edit', !canEdit);
+  renderProgramButtons();
   ['tf-btn','ind-btn'].forEach(id=>{
     const el=document.getElementById(id); if(!el) return;
     if(!(id in _editTitles)) _editTitles[id]=el.title;
@@ -3738,6 +3764,7 @@ function handleMsg(msg){
       document.getElementById('chart-title').textContent=msg.title||'Chart';
       document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
       setChartActions(msg.actions);
+      setProgramButtons(msg.buttons);
 
       initMain(); resizeOverlays();
       setData(msg.bars||[]);
@@ -3795,6 +3822,9 @@ function handleMsg(msg){
       break;
     case 'actions':
       setChartActions(msg.actions);
+      break;
+    case 'buttons':
+      setProgramButtons(msg.buttons);
       break;
     case 'edit_refused':
       // The program put the drawing back (an update_drawing came first)
