@@ -531,6 +531,7 @@ class _PaperView(PairView):
             self.timeframe_ms = None   # "1M": months have no fixed length
         self.chart_indicators = tuple(dict(spec) for spec in config.chart_indicators)
         self.picture_config = config
+        self.chart_style = config.chart_style
         self.warmup_candles = max(200, int(session.pair.strategy.warmup_period or 0))
 
     @property
@@ -649,6 +650,7 @@ def _attach_sim(session: _PaperSession, initial_balance: float) -> None:
         open_browser=config.display_open_browser,
         on_event=bridge.on_event,
         on_report=session.on_report,
+        chart_style=config.chart_style,
     )
     bridge.bind(sim)
     session.sim = sim
