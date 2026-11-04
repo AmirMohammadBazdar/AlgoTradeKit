@@ -782,6 +782,38 @@ def add_strategy_drawings(
     return chart
 
 
+def put_strategy_drawing(chart: Chart, drawing: dict) -> str:
+    """
+    Put one strategy drawing on *chart* — or, when a drawing with its ``key`` is
+    already there, change that one to it (v1.3.0).  Returns the drawing's id.
+
+    What a live session does with ``BaseStrategy.draw``: the strategy names its
+    objects by key, and the chart finds them by it.
+    """
+    from ._edits import drawing_key
+    from .models import _new_id
+
+    d = dict(drawing)
+    key = d.get("key")
+    if key is not None:
+        for existing in chart._drawings:
+            if drawing_key(existing) == key:
+                chart.update_drawing(existing.id, **{k: v for k, v in d.items() if k != "id"})
+                return existing.id
+    d.setdefault("id", _new_id("drawn"))
+    add_strategy_drawings(chart, SimpleNamespace(drawings=[d]))
+    return d["id"]
+
+
+def erase_strategy_drawing(chart: Chart, key: str) -> None:
+    """Take the drawing with *key* off *chart* (v1.3.0); an unknown key does nothing."""
+    from ._edits import drawing_key
+
+    for existing in list(chart._drawings):
+        if drawing_key(existing) == key:
+            chart.remove_drawing(existing.id)
+
+
 # ---------------------------------------------------------------------------
 # A live session's chart (v1.2.0): one recipe for the live chart and pictures
 # ---------------------------------------------------------------------------
