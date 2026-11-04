@@ -1833,3 +1833,290 @@ out.posted = Object.fromEntries(['v1', 'v2', 'v3'].map(id => [id, win(id)._poste
 """, extra_globals=_LAYOUT)
     assert result["topLevelError"] is None
     assert result["posted"] == {"v1": [{"t": "style"}], "v2": [], "v3": [{"t": "style"}]}
+
+
+# ---------------------------------------------------------------------------
+# index.html / page.html — edits on the page reach Python (v1.3.0, Part 2)
+# ---------------------------------------------------------------------------
+# A 5m display of 1m data: ten 5m candles 300 s apart, 10 px apart on screen.
+# Prices map linearly: y = 1000 - 10 * price, so 100 is the top of the 400 px pane.
+
+# Elements that keep their listeners, a socket that keeps its address, and a
+# canvas pen that records what is drawn.
+_EDIT_HARNESS = """
+['draw-cv', 'panes'].forEach(id => {
+  const el = document.getElementById(id);
+  el._ls = {};
+  el.addEventListener = (type, fn) => { (el._ls[type] ??= []).push(fn); };
+});
+ctx.__fireOn = (id, type, ev) =>
+  (document.getElementById(id)._ls[type] || []).forEach(fn => fn(ev));
+ctx.__wsUrls = [];
+ctx.WebSocket = function (url) {
+  ctx.__wsUrls.push(url);
+  return {readyState: 0, send() {}, close() {}};
+};
+ctx.__penCalls = [];
+ctx.__pen = new Proxy({}, {
+  get: (t, k) => (k in t ? t[k] : (...a) => { ctx.__penCalls.push([String(k), ...a]);
+                                              return {width: 10}; }),
+  set: (t, k, v) => { t[k] = v; return true; },
+});
+document.getElementById('draw-cv').getContext = () => ctx.__pen;
+ctx.__confirms = [];
+ctx.__confirmAnswer = true;
+ctx.confirm = text => { ctx.__confirms.push(text); return ctx.__confirmAnswer; };
+"""
+
+_EDIT_SETUP = """
+const bars = [];
+for (let i = 0; i < 10; i++) bars.push({time: 1000 + i * 300, open: 90, high: 95, low: 85,
+                                        close: 92, volume: 1});
+ctx.__bars = bars;
+ev('ws = {readyState: 1, send: m => globalThis.__sent.push(JSON.parse(m))}');
+const init = (extra = {}) => {
+  ev('handleMsg')(Object.assign({type: 'init', title: 'BTC', bars, indicators: [],
+    drawings: [], sourceTimeframe: '1m', displayTimeframe: '5m', timeframes: ['1m', '5m']},
+    extra));
+  const chart = mainChartStub();
+  chart._state.barTimes = bars.map(b => b.time);
+  const scale = chart.timeScale();
+  scale.coordinateToTime = x => 1000 + x * 30;
+  scale.coordinateToLogical = x => x / 10;
+  const series = ev('mainSeries');
+  series.priceToCoordinate = p => 1000 - p * 10;
+  series.coordinateToPrice = y => (1000 - y) / 10;
+};
+// A box from candle 2 to candle 6 (x 20 to 60), price 90 to 80 (y 100 to 200)
+const box = (extra = {}) => Object.assign({type: 'box', id: 'zone', time1: 1600, price1: 90,
+  time2: 2800, price2: 80, color: '#26a69a', borderColor: '#26a69a', opacity: 0.2, label: 'Zone',
+  locked: false, source: 'server'}, extra);
+const press = (x, y) => ctx.__fireOn('draw-cv', 'mousedown',
+  {button: 0, clientX: x, clientY: y, stopPropagation() {}});
+const dragTo = (x, y) => fire('mousemove', document.body, {clientX: x, clientY: y});
+const release = () => fire('mouseup', document.body);
+const lastSent = type => ctx.__sent.filter(m => m.type === type).slice(-1)[0];
+const rightClick = (id, x, y) => {
+  const e = {clientX: x, clientY: y, prevented: false,
+             preventDefault() { this.prevented = true; }, stopPropagation() {}};
+  ctx.__fireOn(id, 'contextmenu', e);
+  return e;
+};
+const shown = id => document.getElementById(id).style.display;
+"""
+
+
+def _edits(body: str, extra_globals: str = "") -> dict:
+    return _run(CHART_HTML, _EDIT_SETUP + body, extra_globals=_EDIT_HARNESS + extra_globals)
+
+
+def test_a_price_only_box_moves_only_its_prices():
+    result = _edits("""
+init({drawings: [box({editable: ['price']})]});
+out.rightEdge = ev('hitTest(60, 150)');         // its time edge: nothing to grab
+out.inside    = ev('hitTest(40, 150)');         // its inside would move it: no
+out.topEdge   = ev('hitTest(40, 100)');
+
+press(40, 100); dragTo(40, 80); release();      // the top edge, 2 up in price
+const top = lastSent('drawing_updated').drawing;
+out.afterTop = [top.time1, top.time2, top.price1, top.price2];
+
+press(60, 80); dragTo(90, 70); release();       // a corner, up and to the right
+const corner = lastSent('drawing_updated').drawing;
+out.afterCorner = [corner.time1, corner.time2, corner.price1, corner.price2];
+""")
+    assert result["topLevelError"] is None
+    assert result["rightEdge"] is None and result["inside"] is None
+    assert result["topEdge"] == {"id": "zone", "handle": "tc"}
+    assert result["afterTop"] == [1600, 2800, 92, 80]
+    assert result["afterCorner"] == [1600, 2800, 93, 80]   # vertically only
+
+
+def test_an_editable_box_moves_as_before():
+    result = _edits("""
+init({drawings: [box()]});
+press(60, 150); dragTo(90, 150); release();     // its right edge, three candles on
+const d = lastSent('drawing_updated').drawing;
+out.after = [d.time1, d.time2, d.price1, d.price2];
+""")
+    assert result["after"] == [1600, 3700, 90, 80]
+
+
+def test_the_menu_follows_editable_and_deletable():
+    result = _edits("""
+init({drawings: [box({editable: false, deletable: false, locked: true, title: 'Sell POI'})]});
+rightClick('draw-cv', 40, 150);
+out.fixed = {menu: shown('ctx-menu'), title: document.getElementById('ctx-title').textContent,
+             unlock: shown('ctx-lock-row'), del: shown('ctx-delete-row')};
+ev('ctxTargetId = "zone"'); ev('ctxToggleLock()'); ev('ctxDelete()');
+out.fixedAfter = {locked: ev('drawings.zone.locked'), there: ev('"zone" in drawings'),
+                  sent: ctx.__sent.length};
+
+ev('handleMsg')({type: 'add_drawing', drawing: box({id: 'free', time1: 2200, time2: 2500,
+                                                     price1: 98, price2: 96})});
+rightClick('draw-cv', 55, 30);                  // inside the second box
+out.free = {title: shown('ctx-title'), unlock: shown('ctx-lock-row'), del: shown('ctx-delete-row')};
+""")
+    assert result["fixed"] == {"menu": "block", "title": "Sell POI", "unlock": "none",
+                               "del": "none"}
+    assert result["fixedAfter"] == {"locked": True, "there": True, "sent": 0}
+    assert result["free"] == {"title": "none", "unlock": "", "del": ""}
+
+
+def test_deleting_a_keyed_drawing_asks_first():
+    result = _edits("""
+init({drawings: [box({key: 'poi:sell:1', title: 'Sell POI 4019.5–4026.7'}),
+                 box({id: 'labelled', key: 'poi:buy:2', label: 'Buy POI', time1: 1000,
+                      time2: 1300}),
+                 box({id: 'plain', label: '', time1: 1000, time2: 1300, key: 'z:3'}),
+                 box({id: 'unkeyed', time1: 1000, time2: 1300})]});
+ctx.__confirmAnswer = false;
+ev('ctxTargetId = "zone"'); ev('ctxDelete()');
+out.kept = ev('"zone" in drawings') && !lastSent('drawing_deleted');
+ctx.__confirmAnswer = true;
+['zone', 'labelled', 'plain', 'unkeyed'].forEach(id => {
+  ev(`ctxTargetId = "${id}"`);
+  ev('ctxDelete()');
+});
+out.confirms = ctx.__confirms;
+out.deleted = ctx.__sent.filter(m => m.type === 'drawing_deleted').map(m => m.id);
+""")
+    assert result["kept"] is True
+    assert result["confirms"] == [
+        "Delete Sell POI 4019.5–4026.7? The program is told.",
+        "Delete Sell POI 4019.5–4026.7? The program is told.",
+        "Delete Buy POI? The program is told.",
+        "Delete box? The program is told.",
+    ]                                           # the unkeyed box goes without asking
+    assert result["deleted"] == ["zone", "labelled", "plain", "unkeyed"]
+
+
+def test_the_candle_menu_sends_the_candles_opening():
+    result = _edits("""
+init({actions: ['Mark here', 'Restart here']});
+const e = rightClick('panes', 34, 150);         // over candle 3 (x 30), price 85
+out.menu = shown('candle-menu');
+out.items = document.getElementById('candle-menu').children.map(c => c.textContent);
+out.prevented = e.prevented;
+document.getElementById('candle-menu').children[1].onclick();
+out.sent = lastSent('chart_action');
+out.closed = shown('candle-menu');
+
+rightClick('panes', 112, 120);                  // two candles past the last one
+document.getElementById('candle-menu').children[0].onclick();
+out.future = lastSent('chart_action');
+
+ev('handleMsg')({type: 'actions', actions: []});
+out.noneLeft = rightClick('panes', 34, 150).prevented;
+""")
+    assert result["topLevelError"] is None
+    assert result["menu"] == "block" and result["prevented"] is True
+    assert result["items"] == ["Mark here", "Restart here"]
+    assert result["sent"] == {"type": "chart_action", "label": "Restart here", "time": 1900,
+                              "price": 85}
+    assert result["closed"] == "none"
+    assert result["future"]["time"] == 1000 + 11 * 300       # a candle not there yet
+    assert result["noneLeft"] is False                       # the browser's own menu
+
+
+def test_without_actions_a_right_click_is_left_alone():
+    result = _edits("""
+init();
+const e = rightClick('panes', 34, 150);
+out.prevented = e.prevented;
+out.menu = shown('candle-menu');
+""")
+    assert result["prevented"] is False
+    assert result["menu"] in ("", "none")
+
+
+def test_a_vertical_line_sits_on_the_candle_that_holds_its_time():
+    result = _edits("""
+init({drawings: [{type: 'vline', id: 'v', time: 2300, color: '#e3b341', label: 'Restart',
+                  style: 'dashed', locked: true, source: 'server', key: 'restart:1',
+                  editable: false, deletable: true, title: null}]});
+ctx.__penCalls.length = 0;
+ev('redrawAll()');
+const calls = ctx.__penCalls;
+const i = calls.findIndex(c => c[0] === 'moveTo' && c[1] === 40);
+out.line = [calls[i], calls[i + 1]];
+out.dash = calls.slice(0, i).filter(c => c[0] === 'setLineDash').slice(-1)[0];
+out.label = calls.find(c => c[0] === 'fillText' && c[1] === 'Restart');
+out.hit = ev('hitTestAny(42, 300)');
+out.miss = ev('hitTestAny(55, 300)');
+out.drag = ev('hitTest(42, 300)');
+rightClick('draw-cv', 42, 300);
+out.menu = {unlock: shown('ctx-lock-row'), del: shown('ctx-delete-row')};
+""")
+    assert result["topLevelError"] is None
+    assert result["line"] == [["moveTo", 40, 0], ["lineTo", 40, 400]]   # 2300 is in candle 4
+    assert result["dash"] == ["setLineDash", [5, 4]]
+    assert result["label"] is not None
+    assert result["hit"] == {"id": "v", "handle": "body"}
+    assert result["miss"] is None and result["drag"] is None             # never dragged
+    assert result["menu"] == {"unlock": "none", "del": ""}
+
+
+def test_a_page_without_the_key_only_looks():
+    result = _edits("""
+init({actions: ['Mark here'], drawings: [box({key: 'z', title: 'Zone'}),
+     {type: 'box', id: 'mine', time1: 1000, price1: 99, time2: 1300, price2: 97, label: '',
+      locked: false, source: 'user', color: '#fff'}]});
+ev('handleMsg')({type: 'access', edit: false});
+out.body = document.body._cls.has('no-edit');
+out.tfTitle = document.getElementById('tf-btn').title;
+out.dragProgram = ev('hitTest(40, 100)');
+out.dragMine = ev('hitTest(10, 30)');
+rightClick('draw-cv', 40, 150);
+out.programMenu = {unlock: shown('ctx-lock-row'), del: shown('ctx-delete-row'),
+  rename: document.getElementById('ctx-rename-row')._cls.has('disabled')};
+ev('ctxTargetId = "zone"'); ev('ctxDelete()');
+out.zoneThere = ev('"zone" in drawings');
+out.candleMenu = rightClick('panes', 34, 150).prevented;
+ctx.__sent.length = 0;
+ev('selectTimeframe("1m")'); ev('toggleIndPanel()'); ev('removeIndicator("EMA")');
+out.sent = ctx.__sent.slice();
+out.panelOpen = document.getElementById('ind-overlay')._cls.has('open');
+out.status = document.getElementById('sbmsg').textContent;
+ev('ctxTargetId = "mine"'); ev('ctxDelete()');
+out.mineGone = !ev('"mine" in drawings');
+""")
+    assert result["topLevelError"] is None
+    assert result["body"] is True and result["tfTitle"] == "needs the edit key"
+    assert result["dragProgram"] is None
+    assert result["dragMine"] == {"id": "mine", "handle": "br"}   # your own lines move
+    assert result["programMenu"] == {"unlock": "none", "del": "none", "rename": True}
+    assert result["zoneThere"] is True
+    assert result["candleMenu"] is False
+    assert result["sent"] == []
+    assert result["panelOpen"] is False
+    assert result["status"] == "needs the edit key"
+    assert result["mineGone"] is True
+
+
+def test_a_refusal_says_why_in_the_status_bar():
+    result = _edits("""
+init({drawings: [box({key: 'z'})]});
+ev('handleMsg')({type: 'update_drawing', drawing: {id: 'zone', price1: 90}});
+ev('handleMsg')({type: 'edit_refused', id: 'zone', message: 'too tall'});
+out.status = document.getElementById('sbmsg').textContent;
+out.price1 = ev('drawings.zone.price1');
+""")
+    assert result["status"] == "Refused: too tall"
+    assert result["price1"] == 90
+
+
+def test_the_page_gives_its_key_when_it_connects():
+    result = _edits("""
+out.urls = ctx.__wsUrls.slice();
+""", extra_globals=_EMBED.replace("title=BTC%205m'", "title=BTC%205m&key=s%203cret'"))
+    assert result["urls"][-1] == "ws://vps.example:9100/ws?view=v2&key=s+3cret"
+
+
+def test_the_shell_passes_its_key_to_every_frame():
+    keyed = _run(PAGE_HTML, _SETTLE + "out.src = iframes.map(f => f.src);",
+                 extra_globals=_LAYOUT + "ctx.location.search = '?key=s3cret';\n")
+    plain = _run(PAGE_HTML, _SETTLE + "out.src = iframes.map(f => f.src);",
+                 extra_globals=_LAYOUT)
+    assert all(src.endswith("&key=s3cret") for src in keyed["src"]) and len(keyed["src"]) == 3
+    assert not any("key=" in src for src in plain["src"])
