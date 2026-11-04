@@ -202,6 +202,16 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
 #ctx-lock-row{padding:6px 14px;font-size:12px;cursor:pointer;
               display:flex;align-items:center;gap:8px;transition:background .1s}
 #ctx-lock-row:hover{background:var(--bg3)}
+#ctx-menu .mi-title{padding:5px 14px 2px;font-size:11px;font-weight:600;color:var(--text);
+                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+/* ── Candle menu (v1.3.0): the program's actions ──────────────── */
+#candle-menu{position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;
+             padding:4px 0;z-index:300;box-shadow:0 8px 28px #000a;min-width:160px;display:none}
+#candle-menu .mi{padding:6px 14px;font-size:12px;cursor:pointer;transition:background .1s}
+#candle-menu .mi:hover{background:var(--bg3)}
+/* A page without the edit key (v1.3.0): what would change every viewer's chart */
+body.no-edit #tf-btn,body.no-edit #ind-btn,body.no-edit .il-btn.remove,
+body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
 
 /* ── Status bar ──────────────────────────────────────────────── */
 #sb{height:var(--sb);background:var(--bg2);border-top:1px solid var(--border);
@@ -210,6 +220,7 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
 #wsdot{width:7px;height:7px;border-radius:50%;background:#444;margin-right:5px;transition:background .3s}
 #wsdot.live{background:var(--green)} #wsdot.conn{background:var(--yellow);animation:blink 1s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+#sbmsg{color:var(--yellow)}
 
 /* ── Settings panel ──────────────────────────────────────────── */
 #settings-overlay{
@@ -674,9 +685,12 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
   <span id="wsdot" class="conn"></span><span id="wslbl">Connecting…</span>
   <span id="barcnt">—</span>
   <span id="lupd"></span>
+  <span id="sbmsg"></span>
 </div>
 
 <div id="ctx-menu">
+  <!-- v1.3.0: the drawing's title, when the program gave it one -->
+  <div class="mi-title" id="ctx-title"></div>
   <!-- Row 1: metadata — source info -->
   <div class="mi-info">
     <span id="ctx-source-label">Created by</span>
@@ -688,14 +702,17 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
     <span id="ctx-lock-icon">🔒</span>
     <span id="ctx-lock-label">Unlock</span>
   </div>
-  <hr/>
+  <hr id="ctx-lock-sep"/>
   <!-- Rows 3-4: edit actions — hidden when locked -->
   <div class="mi" id="ctx-rename-row" onclick="ctxRename()">✏️ Rename label</div>
   <div class="mi" id="ctx-color-row"  onclick="ctxEditColor()">🎨 Change color</div>
-  <hr/>
-  <!-- Row 5: delete — always available -->
-  <div class="mi danger" onclick="ctxDelete()">🗑 Delete</div>
+  <hr id="ctx-delete-sep"/>
+  <!-- Row 5: delete — unless the drawing is not deletable (v1.3.0) -->
+  <div class="mi danger" id="ctx-delete-row" onclick="ctxDelete()">🗑 Delete</div>
 </div>
+
+<!-- v1.3.0: the program's actions, on a right-click away from any drawing -->
+<div id="candle-menu"></div>
 
 <script>
 'use strict';
@@ -723,6 +740,11 @@ const embedded = viewId !== null && window.parent !== window;
 // page a headless browser photographs for a chart picture. It only reads: it
 // sends the server nothing.
 const snapshot = _q.get('snapshot') === '1';
+// The edit key (v1.3.0): read from this page's address and given to the server when
+// the socket connects. The server answers with what this page may change; until it
+// does — or if it never does, an older server — the page may, as before.
+const editKey = _q.get('key');
+let canEdit = true;
 // Only the chart the pointer is over may drive the others.
 //
 // Comparing values is not enough to stop an echo: each chart snaps a range to
@@ -1541,7 +1563,7 @@ function _addCloudLegendRow(name, color, grpName){
               onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
         <span class="il-dot" style="background:${color}"></span>
         <span class="il-group-name">${grpName}</span>
-        <button class="il-btn" title="Edit settings"
+        <button class="il-btn il-edit" title="Edit settings"
                 onclick="openEditPanel('${grpName.replace(/'/g,"\\'")}')">⚙</button>
         <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
                 onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
@@ -1656,7 +1678,7 @@ function addLegendRow(name, color, group){
               onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
         <span class="il-dot" style="background:${existingColor}"></span>
         <span class="il-group-name">${grpName}</span>
-        <button class="il-btn" title="Edit settings"
+        <button class="il-btn il-edit" title="Edit settings"
                 onclick="openEditPanel('${grpName.replace(/'/g,"\\'")}')">⚙</button>
         <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
                 onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
@@ -1704,7 +1726,7 @@ function _makeIndRow(name, color, isChild, grpName){
     <span class="il-dot" style="background:${color}"></span>
     <span class="il-name">${name}</span>
     <span class="il-val" id="ilval-${CSS.escape(name)}">—</span>
-    ${isChild ? '' : `<button class="il-btn" title="Edit settings"
+    ${isChild ? '' : `<button class="il-btn il-edit" title="Edit settings"
             onclick="openEditPanel('${g}')">⚙</button>`}
     <button class="il-btn" title="Hide/Show"
             onclick="toggleIndVisibility('${name.replace(/'/g,"\\'")}')">
@@ -1762,6 +1784,7 @@ function toggleGroupVisibility(grpName){
 }
 
 function removeIndicatorGroup(grpName){
+  if(!canEdit && refuseNoEdit()) return;
   const g = indGroups[grpName]; if(!g) return;
   if(grpName.startsWith('Ichimoku') || g.names.some(n=>n==='Cloud (Bull)'||n==='Cloud (Bear)')){
     ichimokuCloud = null;
@@ -1879,6 +1902,7 @@ function toggleSubGrpVisibility(paneId, grpName){
 }
 
 function removeSubGrp(paneId, grpName){
+  if(!canEdit && refuseNoEdit()) return;
   const g = subPaneGroups[paneId]?.[grpName]; if(!g) return;
   [...g.names].forEach(n=>removeIndicator(n));
   const grpChip = document.getElementById('chipgrp-'+CSS.escape(paneId+'-'+grpName));
@@ -1904,6 +1928,7 @@ function toggleIndVisibility(name){
 
 // ── Remove indicator (frontend + notify Python) ───────────────
 function removeIndicator(name){
+  if(!canEdit && refuseNoEdit()) return;
   if(name==='Cloud (Bull)' || name==='Cloud (Bear)'){
     ichimokuCloud=null; redrawAll(); return;
   }
@@ -2305,6 +2330,21 @@ function renderOne(d,ctx,W,H){
     if(hl) drawHandle(ctx,W/2,xy.y,d.color,true);
   }
 
+  else if(d.type==='vline'){
+    // v1.3.0: across the price pane, its label at the top
+    const x=vlineX(d.time), band=mainPaneBand();
+    if(x==null||!band){ctx.restore();return;}
+    const col=d.color||'#e3b341';
+    ctx.beginPath(); ctx.strokeStyle=col;
+    ctx.lineWidth=(d.id===hoverId||d.id===selectedId)?2:1;
+    ctx.setLineDash(d.style==='solid'?[]:[5,4]);
+    ctx.moveTo(x,band.top); ctx.lineTo(x,band.bottom); ctx.stroke(); ctx.setLineDash([]);
+    if(d.label){
+      ctx.fillStyle=col; ctx.textAlign='left';
+      ctx.fillText(d.label,x+4,band.top+drawingFontSize+4);
+    }
+  }
+
   else if(d.type==='trendline'){
     const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
     if(!p1||!p2){ctx.restore();return;}
@@ -2580,84 +2620,157 @@ function hitTestAny(cx,cy){ return _hitTest(cx,cy,true); }
 
 function _hitTest(cx,cy,includeAll){
   for(const d of Object.values(drawings).reverse()){
-    // For drag hit-test, skip locked drawings entirely
-    if(!includeAll && d.locked) continue;
-
-    if(d.type==='hline'){
-      const xy=toXY(allBars.length?allBars[Math.floor(allBars.length/2)].time:0,d.price);
-      if(!xy) continue;
-      if(Math.abs(cy-xy.y)<HIT_R) return{id:d.id,handle:'body'};
-    }
-    else if(d.type==='trendline'||d.type==='fib'){
-      const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
-      if(!p1||!p2) continue;
-      if(dist(cx,cy,p1.x,p1.y)<HIT_R) return{id:d.id,handle:'p1'};
-      if(dist(cx,cy,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'p2'};
-      const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
-      if(dist(cx,cy,mx,my)<HIT_R) return{id:d.id,handle:'body'};
-      if(d.type==='trendline'&&distToSeg(cx,cy,p1.x,p1.y,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'body'};
-      if(d.type==='fib'){
-        const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
-        const range=d.price2-d.price1;
-        for(const lvl of (d.levels||[])){
-          const pt=toXY(d.time1,d.price1+range*lvl); if(!pt) continue;
-          if(cx>=xL&&cx<=xR&&Math.abs(cy-pt.y)<HIT_R) return{id:d.id,handle:'body'};
-        }
-      }
-    }
-    else if(d.type==='box'){
-      const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
-      if(!p1||!p2) continue;
-      const x=Math.min(p1.x,p2.x), y=Math.min(p1.y,p2.y);
-      const w=Math.abs(p2.x-p1.x), h=Math.abs(p2.y-p1.y), cx2=x+w/2, cy2=y+h/2;
-      const handles=[['tl',x,y],['tc',cx2,y],['tr',x+w,y],['rc',x+w,cy2],
-                     ['br',x+w,y+h],['bc',cx2,y+h],['bl',x,y+h],['lc',x,cy2]];
-      for(const [hname,hx,hy] of handles)
-        if(dist(cx,cy,hx,hy)<HIT_R) return{id:d.id,handle:hname};
-      const ez=HIT_R+2;
-      if(cx>x+ez&&cx<x+w-ez&&cy>y+ez&&cy<y+h-ez) return{id:d.id,handle:'interior'};
-    }
-    else if(d.type==='signal'){
-      const price=d.price||(d.side==='buy'?findBarLow(d.time):findBarHigh(d.time));
-      const pt=toXY(d.time,price); if(!pt) continue;
-      if(dist(cx,cy,pt.x,pt.y)<HIT_R+4) return{id:d.id,handle:'body'};
-    }
-    else if(d.type==='text'){
-      const pt=toXY(d.time,d.price); if(!pt) continue;
-      const fs=d.fontSize||drawingFontSize;
-      if(cx>=pt.x&&cx<=pt.x+d.text.length*fs*0.62&&cy>=pt.y-fs-2&&cy<=pt.y+4)
-        return{id:d.id,handle:'body'};
-    }
-    else if(d.type==='position_box'){
-      const openPt  = toXY(d.open_time,  d.entry_price);
-      const closePt = toXY(d.close_time, d.entry_price);
-      if(!openPt) continue;
-      const x1 = openPt.x;
-      const x2 = closePt ? closePt.x : x1 + 60;
-      const entryPt  = toXY(d.open_time, d.entry_price);
-      const tpPt     = toXY(d.open_time, d.visual_tp || d.profit_top || d.entry_price);
-      const slPt     = toXY(d.open_time, d.stop_loss  || d.loss_bottom || d.entry_price);
-      if(!entryPt || !tpPt || !slPt) continue;
-      const entryY = entryPt.y, tpY = tpPt.y, slY = slPt.y;
-      const yTop   = Math.min(tpY, slY);
-      const yBot   = Math.max(tpY, slY);
-      // Edge handles (resize)
-      if(Math.abs(cx - x1) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
-        return{id:d.id, handle:'left'};
-      if(Math.abs(cx - x2) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
-        return{id:d.id, handle:'right'};
-      if(Math.abs(cy - entryY) < HIT_R && cx >= x1 && cx <= x2)
-        return{id:d.id, handle:'entry'};
-      if(Math.abs(cy - tpY) < HIT_R && cx >= x1 && cx <= x2)
-        return{id:d.id, handle:'tp'};
-      if(Math.abs(cy - slY) < HIT_R && cx >= x1 && cx <= x2)
-        return{id:d.id, handle:'sl'};
-      // Interior (move)
-      if(cx >= x1 && cx <= x2 && cy >= yTop && cy <= yBot)
-        return{id:d.id, handle:'interior'};
-    }
+    // A drag: only what is unlocked and this page may change (v1.3.0)...
+    if(!includeAll && (d.locked || !mayChange(d))) continue;
+    const hit=hitDrawing(d,cx,cy);
+    if(!hit) continue;
+    // ...and only by a handle its `editable` names
+    if(!includeAll && !handleAxes(d,hit.handle)) continue;
+    return hit;
   }
   return null;
+}
+
+// Where the point is on drawing d: a handle, its body or its inside; or null.
+function hitDrawing(d,cx,cy){
+  if(d.type==='hline'){
+    const xy=toXY(allBars.length?allBars[Math.floor(allBars.length/2)].time:0,d.price);
+    if(!xy) return null;
+    if(Math.abs(cy-xy.y)<HIT_R) return{id:d.id,handle:'body'};
+  }
+  else if(d.type==='trendline'||d.type==='fib'){
+    const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+    if(!p1||!p2) return null;
+    if(dist(cx,cy,p1.x,p1.y)<HIT_R) return{id:d.id,handle:'p1'};
+    if(dist(cx,cy,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'p2'};
+    const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+    if(dist(cx,cy,mx,my)<HIT_R) return{id:d.id,handle:'body'};
+    if(d.type==='trendline'&&distToSeg(cx,cy,p1.x,p1.y,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'body'};
+    if(d.type==='fib'){
+      const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
+      const range=d.price2-d.price1;
+      for(const lvl of (d.levels||[])){
+        const pt=toXY(d.time1,d.price1+range*lvl); if(!pt) continue;
+        if(cx>=xL&&cx<=xR&&Math.abs(cy-pt.y)<HIT_R) return{id:d.id,handle:'body'};
+      }
+    }
+  }
+  else if(d.type==='box'){
+    const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+    if(!p1||!p2) return null;
+    const x=Math.min(p1.x,p2.x), y=Math.min(p1.y,p2.y);
+    const w=Math.abs(p2.x-p1.x), h=Math.abs(p2.y-p1.y), cx2=x+w/2, cy2=y+h/2;
+    const handles=[['tl',x,y],['tc',cx2,y],['tr',x+w,y],['rc',x+w,cy2],
+                   ['br',x+w,y+h],['bc',cx2,y+h],['bl',x,y+h],['lc',x,cy2]];
+    for(const [hname,hx,hy] of handles)
+      if(dist(cx,cy,hx,hy)<HIT_R) return{id:d.id,handle:hname};
+    const ez=HIT_R+2;
+    if(cx>x+ez&&cx<x+w-ez&&cy>y+ez&&cy<y+h-ez) return{id:d.id,handle:'interior'};
+  }
+  else if(d.type==='signal'){
+    const price=d.price||(d.side==='buy'?findBarLow(d.time):findBarHigh(d.time));
+    const pt=toXY(d.time,price); if(!pt) return null;
+    if(dist(cx,cy,pt.x,pt.y)<HIT_R+4) return{id:d.id,handle:'body'};
+  }
+  else if(d.type==='text'){
+    const pt=toXY(d.time,d.price); if(!pt) return null;
+    const fs=d.fontSize||drawingFontSize;
+    if(cx>=pt.x&&cx<=pt.x+d.text.length*fs*0.62&&cy>=pt.y-fs-2&&cy<=pt.y+4)
+      return{id:d.id,handle:'body'};
+  }
+  else if(d.type==='position_box'){
+    const openPt  = toXY(d.open_time,  d.entry_price);
+    const closePt = toXY(d.close_time, d.entry_price);
+    if(!openPt) return null;
+    const x1 = openPt.x;
+    const x2 = closePt ? closePt.x : x1 + 60;
+    const entryPt  = toXY(d.open_time, d.entry_price);
+    const tpPt     = toXY(d.open_time, d.visual_tp || d.profit_top || d.entry_price);
+    const slPt     = toXY(d.open_time, d.stop_loss  || d.loss_bottom || d.entry_price);
+    if(!entryPt || !tpPt || !slPt) return null;
+    const entryY = entryPt.y, tpY = tpPt.y, slY = slPt.y;
+    const yTop   = Math.min(tpY, slY);
+    const yBot   = Math.max(tpY, slY);
+    // Edge handles (resize)
+    if(Math.abs(cx - x1) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
+      return{id:d.id, handle:'left'};
+    if(Math.abs(cx - x2) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
+      return{id:d.id, handle:'right'};
+    if(Math.abs(cy - entryY) < HIT_R && cx >= x1 && cx <= x2)
+      return{id:d.id, handle:'entry'};
+    if(Math.abs(cy - tpY) < HIT_R && cx >= x1 && cx <= x2)
+      return{id:d.id, handle:'tp'};
+    if(Math.abs(cy - slY) < HIT_R && cx >= x1 && cx <= x2)
+      return{id:d.id, handle:'sl'};
+    // Interior (move)
+    if(cx >= x1 && cx <= x2 && cy >= yTop && cy <= yBot)
+      return{id:d.id, handle:'interior'};
+  }
+  else if(d.type==='vline'){
+    const x=vlineX(d.time), band=mainPaneBand();
+    if(x==null||!band) return null;
+    if(Math.abs(cx-x)<HIT_R&&cy>=band.top&&cy<=band.bottom) return{id:d.id,handle:'body'};
+  }
+  return null;
+}
+
+// A program's drawing (source 'server') changes only on a page with the edit key;
+// the viewer's own drawings never leave the browser (v1.3.0).
+function mayChange(d){ return canEdit || d.source !== 'server'; }
+
+// What a handle moves (v1.3.0): its vertical part is "price", its horizontal part
+// "time", and the body or the inside "move". A horizontal line's body is its price.
+function handleMoves(d,h){
+  if(d.type==='hline') return {price:true};
+  if(h==='body'||h==='interior') return {move:true};
+  if(d.type==='box'){
+    if(h==='tc'||h==='bc') return {price:true};
+    if(h==='lc'||h==='rc') return {time:true};
+    return {price:true, time:true};                 // a corner
+  }
+  if(d.type==='position_box'){
+    if(h==='left'||h==='right') return {time:true};
+    return {price:true};                            // entry, stop, target
+  }
+  return {price:true, time:true};                   // a line's end point
+}
+
+// Which of them `editable` lets move, or null when none: true is all of them
+// (as before), false none, a list names them.
+function handleAxes(d,h){
+  const e=d.editable, moves=handleMoves(d,h);
+  if(e===false) return null;
+  if(!Array.isArray(e)) return moves;
+  const ok={price:!!moves.price&&e.includes('price'), time:!!moves.time&&e.includes('time'),
+            move:!!moves.move&&e.includes('move')};
+  if(d.type==='hline'&&e.includes('move')) ok.price=true;   // moving it is its price
+  return (ok.price||ok.time||ok.move) ? ok : null;
+}
+
+// The main pane's top and bottom, in the overlay's coordinates
+function mainPaneBand(){
+  if(!panes.main) return null;
+  const wR=panes.main.paneWrap.getBoundingClientRect();
+  const pR=document.getElementById('panes').getBoundingClientRect();
+  return {top:wR.top-pR.top, bottom:wR.top-pR.top+wR.height};
+}
+
+// A vertical line sits on the candle that holds its time, on every timeframe;
+// right of the last candle, on the opening of a candle not there yet.
+function vlineX(t){
+  const bars=scaleBars();
+  if(!bars.length) return null;
+  let at=t;
+  const last=bars[bars.length-1].time;
+  if(t>=last){
+    const tf=displayTfSec();
+    at = tf>0 ? last+Math.floor((t-last)/tf)*tf : last;
+  } else if(t>=bars[0].time){
+    let a=0, b=bars.length-1;
+    while(b-a>1){ const mid=(a+b)>>1; if(bars[mid].time<=t) a=mid; else b=mid; }
+    at=bars[a].time;
+  }
+  return timeToX(at);
 }
 function dist(x1,y1,x2,y2){return Math.sqrt((x2-x1)**2+(y2-y1)**2);}
 function distToSeg(px,py,x1,y1,x2,y2){
@@ -2773,7 +2886,8 @@ drawCv.addEventListener('mousedown',e=>{
   e.stopPropagation();
   selectedId=hit.id; hoverId=hit.id;
   dragState={id:hit.id,handle:hit.handle,startX:cx,startY:cy,
-             startCoord:fromXY(cx,cy),orig:JSON.parse(JSON.stringify(drawings[hit.id]))};
+             startCoord:fromXY(cx,cy),orig:JSON.parse(JSON.stringify(drawings[hit.id])),
+             axes:handleAxes(drawings[hit.id],hit.handle)};
   redrawAll();
 });
 
@@ -2956,6 +3070,13 @@ function onDragMove(cx,cy){
       _recomputePosBoxZones(d);
     }
   }
+  // v1.3.0: what `editable` leaves out stays where it was. A price-only box keeps
+  // its time edges whatever is dragged; its corners move vertically only.
+  const ax=dragState.axes;
+  if(ax&&!ax.move){
+    if(!ax.time)  ['time1','time2'].forEach(k=>{ if(o[k]!==undefined) d[k]=o[k]; });
+    if(!ax.price) ['price1','price2'].forEach(k=>{ if(o[k]!==undefined) d[k]=o[k]; });
+  }
   redrawAll();
 }
 
@@ -2982,12 +3103,22 @@ drawCv.addEventListener('contextmenu',e=>{
   const r=document.getElementById('panes').getBoundingClientRect();
   // hitTestAny includes locked drawings for right-click
   const hit=hitTestAny(e.clientX-r.left, e.clientY-r.top);
-  if(!hit){ ctxMenu.style.display='none'; return; }
+  if(!hit){ ctxMenu.style.display='none'; return; }     // the candle menu may open
+  e.stopPropagation();
 
   ctxTargetId=hit.id; selectedId=hit.id; redrawAll();
+  closeCandleMenu();
   const d=drawings[hit.id];
   const isServer=(d.source==='server');
   const isLocked=!!d.locked;
+  // v1.3.0: what this page may do with it
+  const may=mayChange(d), canUnlock=may&&d.editable!==false, canDelete=may&&d.deletable!==false;
+  const titleRow=document.getElementById('ctx-title');
+  titleRow.textContent=d.title||''; titleRow.style.display=d.title?'':'none';
+  document.getElementById('ctx-lock-row').style.display=canUnlock?'':'none';
+  document.getElementById('ctx-lock-sep').style.display=canUnlock?'':'none';
+  document.getElementById('ctx-delete-row').style.display=canDelete?'':'none';
+  document.getElementById('ctx-delete-sep').style.display=canDelete?'':'none';
 
   // 1. Source badge
   document.getElementById('ctx-source-badge').textContent = isServer ? 'Server' : 'User';
@@ -2997,9 +3128,9 @@ drawCv.addEventListener('contextmenu',e=>{
   document.getElementById('ctx-lock-icon').textContent  = isLocked ? '🔒' : '🔓';
   document.getElementById('ctx-lock-label').textContent = isLocked ? 'Unlock' : 'Lock';
 
-  // 3. Edit rows — greyed out when locked
-  document.getElementById('ctx-rename-row').classList.toggle('disabled', isLocked);
-  document.getElementById('ctx-color-row').classList.toggle('disabled',  isLocked);
+  // 3. Edit rows — greyed out when locked, or on a page that may not change it
+  document.getElementById('ctx-rename-row').classList.toggle('disabled', isLocked||!may);
+  document.getElementById('ctx-color-row').classList.toggle('disabled',  isLocked||!may);
 
   ctxMenu.style.left=e.clientX+'px'; ctxMenu.style.top=e.clientY+'px';
   ctxMenu.style.display='block';
@@ -3007,7 +3138,7 @@ drawCv.addEventListener('contextmenu',e=>{
 document.addEventListener('click',()=>ctxMenu.style.display='none');
 
 function ctxToggleLock(){
-  const d=drawings[ctxTargetId]; if(!d) return;
+  const d=drawings[ctxTargetId]; if(!d||!mayChange(d)||d.editable===false) return;
   d.locked=!d.locked;
   // Update the menu while it may still be open
   document.getElementById('ctx-lock-icon').textContent  = d.locked ? '🔒' : '🔓';
@@ -3021,21 +3152,27 @@ function ctxToggleLock(){
 }
 
 function ctxRename(){
-  const d=drawings[ctxTargetId]; if(!d||d.locked) return;
+  const d=drawings[ctxTargetId]; if(!d||d.locked||!mayChange(d)) return;
   const cur=d.type==='text'?d.text:(d.label||'');
   const val=prompt('Label / text:',cur); if(val===null) return;
   if(d.type==='text') d.text=val; else d.label=val;
   redrawAll(); notifyDrawingChanged(d);
 }
 function ctxEditColor(){
-  const d=drawings[ctxTargetId]; if(!d||d.locked) return;
+  const d=drawings[ctxTargetId]; if(!d||d.locked||!mayChange(d)) return;
   const val=prompt('Color (hex):',d.color); if(!val) return;
   d.color=val; if(d.borderColor) d.borderColor=val;
   redrawAll(); notifyDrawingChanged(d);
 }
-// Delete works regardless of lock state
+// Delete works regardless of lock state; not for a drawing that is not deletable,
+// nor for a program's drawing on a page without the edit key (v1.3.0). A keyed
+// drawing asks first: the program hears about it.
 function ctxDelete(){
   if(!ctxTargetId) return;
+  const d=drawings[ctxTargetId];
+  if(d&&(!mayChange(d)||d.deletable===false)) return;
+  if(d&&d.key!=null&&!confirm(`Delete ${d.title||d.label||d.type}? The program is told.`))
+    return;
   delete drawings[ctxTargetId];
   if(selectedId===ctxTargetId) selectedId=null;
   redrawAll();
@@ -3049,6 +3186,97 @@ function clearDrawings(){
 }
 function notifyDrawingChanged(d){
   if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'drawing_updated',drawing:d}));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  THE CANDLE MENU (v1.3.0)
+//  The program's actions (chart.add_action), on a right-click on the price
+//  pane away from any drawing. With none, a right-click does what it did.
+// ═══════════════════════════════════════════════════════════════
+let chartActions = [];
+const candleMenu = document.getElementById('candle-menu');
+
+function setChartActions(list){
+  chartActions = Array.isArray(list) ? list.filter(l => typeof l === 'string') : [];
+  closeCandleMenu();
+}
+function closeCandleMenu(){ candleMenu.style.display='none'; }
+
+// The candle under the pointer: its opening, in seconds. Right of the last candle,
+// the opening of a candle not there yet.
+function candleTimeAt(cx){
+  const bars=scaleBars();
+  if(!bars.length||!mainChart) return null;
+  let logical=null;
+  try{ logical=mainChart.timeScale().coordinateToLogical(cx); }catch{}
+  if(logical==null) return null;
+  const i=Math.round(logical), n=bars.length, tf=displayTfSec();
+  if(i>=0&&i<n) return bars[i].time;
+  if(i>=n) return bars[n-1].time+(i-(n-1))*tf;
+  return bars[0].time+i*tf;
+}
+
+function openCandleMenu(e){
+  if(snapshot||!chartActions.length||!canEdit) return false;
+  const band=mainPaneBand(); if(!band) return false;
+  const r=document.getElementById('panes').getBoundingClientRect();
+  const cx=e.clientX-r.left, cy=e.clientY-r.top;
+  if(cy<band.top||cy>band.bottom) return false;          // the price pane only
+  if(hitTestAny(cx,cy)) return false;                     // a drawing has its own menu
+  const time=candleTimeAt(cx);
+  if(time==null) return false;
+  let price=null;
+  try{ price=mainSeries.coordinateToPrice(cy-band.top); }catch{}
+  ctxMenu.style.display='none';
+  candleMenu.innerHTML='';
+  chartActions.forEach(label=>{
+    const item=document.createElement('div');
+    item.className='mi'; item.textContent=label;
+    item.onclick=()=>{ closeCandleMenu(); sendMsg({type:'chart_action', label, time, price}); };
+    candleMenu.appendChild(item);
+  });
+  candleMenu.style.left=e.clientX+'px'; candleMenu.style.top=e.clientY+'px';
+  candleMenu.style.display='block';
+  return true;
+}
+document.getElementById('panes').addEventListener('contextmenu', e=>{
+  if(openCandleMenu(e)) e.preventDefault();
+});
+document.addEventListener('click', closeCandleMenu);
+
+// ═══════════════════════════════════════════════════════════════
+//  ACCESS (v1.3.0)
+//  Without the edit key a page may look, scroll, replay and draw its own
+//  lines, and changes nothing another viewer sees: no program drawing moves
+//  or goes, no action runs, the timeframe and the indicators stay.
+// ═══════════════════════════════════════════════════════════════
+const NO_EDIT = 'needs the edit key';
+const _editTitles = {};
+
+function applyAccess(){
+  document.body.classList.toggle('no-edit', !canEdit);
+  ['tf-btn','ind-btn'].forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    if(!(id in _editTitles)) _editTitles[id]=el.title;
+    el.title=canEdit?_editTitles[id]:NO_EDIT;
+  });
+  if(!canEdit){
+    closeTfMenu(); closeIndPanel(); closeCandleMenu();
+    ctxMenu.style.display='none';
+    dragState=null;
+  }
+  redrawAll();
+}
+// A control a page without the key may not use says why, briefly
+function refuseNoEdit(){ flashStatus(NO_EDIT, 3000); return true; }
+
+// A line in the status bar that clears itself
+let _sbTimer=null;
+function flashStatus(text, ms=6000){
+  const el=document.getElementById('sbmsg'); if(!el) return;
+  el.textContent=text;
+  clearTimeout(_sbTimer);
+  _sbTimer=setTimeout(()=>{ el.textContent=''; }, ms);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3414,6 +3642,7 @@ function renderTfSelector(){
 }
 
 function toggleTfMenu(){
+  if(!canEdit && refuseNoEdit()) return;
   const menu = document.getElementById('tf-menu');
   if(menu.classList.contains('open')){ closeTfMenu(); return; }
   // Place it under the button by viewport coordinates, since it is fixed
@@ -3429,6 +3658,7 @@ function closeTfMenu(){
 
 function selectTimeframe(tf){
   closeTfMenu();
+  if(!canEdit && refuseNoEdit()) return;
   if(tf === (displayTimeframe||sourceTimeframe)) return;
   tfPending = tf;
   renderTfSelector();
@@ -3459,7 +3689,11 @@ let ws=null, retryTimer=null;
 function wsConnect(){
   const dot=document.getElementById('wsdot'), lbl=document.getElementById('wslbl');
   dot.className='conn'; lbl.textContent='Connecting…';
-  ws=new WebSocket(`ws://${location.host}/ws${viewId ? '?view='+encodeURIComponent(viewId) : ''}`);
+  const wsQuery = new URLSearchParams();
+  if(viewId) wsQuery.set('view', viewId);
+  if(editKey) wsQuery.set('key', editKey);
+  const query = wsQuery.toString();
+  ws=new WebSocket(`ws://${location.host}/ws${query ? '?' + query : ''}`);
   ws.onopen=()=>{ dot.className='live'; lbl.textContent='Live'; };
   ws.onclose=()=>{ dot.className=''; lbl.textContent='Disconnected';
     clearTimeout(retryTimer); retryTimer=setTimeout(wsConnect,2000); };
@@ -3503,6 +3737,7 @@ function handleMsg(msg){
       renderTfSelector();
       document.getElementById('chart-title').textContent=msg.title||'Chart';
       document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
+      setChartActions(msg.actions);
 
       initMain(); resizeOverlays();
       setData(msg.bars||[]);
@@ -3552,6 +3787,18 @@ function handleMsg(msg){
       // page had. The viewer's own choice stays on top of it.
       programStyle=fromProgram(msg.style);
       applyStyle(); syncStylePanel();
+      break;
+    case 'access':
+      // v1.3.0: what this page may change. It comes once, after the first init.
+      canEdit = msg.edit !== false;
+      applyAccess();
+      break;
+    case 'actions':
+      setChartActions(msg.actions);
+      break;
+    case 'edit_refused':
+      // The program put the drawing back (an update_drawing came first)
+      flashStatus('Refused: ' + (msg.message || ''));
       break;
     case 'set_candle_limit':
       // Rolling window (v1.0.0): arm/disarm and apply immediately
@@ -3614,6 +3861,7 @@ const indSpecs = {};
 let _editingGroup = null;
 
 function toggleIndPanel(){
+  if(!canEdit && refuseNoEdit()) return;
   const ov=document.getElementById('ind-overlay');
   if(ov.classList.contains('open')){ closeIndPanel(); return; }
   ov.classList.add('open');
@@ -3633,6 +3881,7 @@ function onIndOverlayClick(e){ if(e.target.id==='ind-overlay') closeIndPanel(); 
 
 // ── Open the panel pre-filled to EDIT an existing indicator group ─────────
 function openEditPanel(grpName){
+  if(!canEdit && refuseNoEdit()) return;
   const spec = indSpecs[grpName];
   if(!spec){ toggleIndPanel(); return; }   // no stored spec — fall back to add
   const ov = document.getElementById('ind-overlay');
@@ -3706,6 +3955,7 @@ function _gv(id){ return document.getElementById(id).value; }
 function _gi(id){ return parseInt(_gv(id),10); }
 
 function submitIndicator(){
+  if(!canEdit && refuseNoEdit()) return;
   const kind = _gv('ind-type');
   const color = _gv('ind-color');
   let params = { kind, color };
