@@ -18,6 +18,13 @@ A strategy's own message (v1.2.0): ``self.notify("RSI above 70")`` is sent
 only by a live runner, for a newly closed candle — never from a backtest or
 the seed history.  It is not a lifecycle step.
 
+The chart (v1.3.0): ``self.draw(drawing)`` and ``self.erase(key)`` put the
+strategy's own objects on the chart — returned by ``run()`` in
+``StrategyResult.drawings``, and drawn at once in a live session.
+``on_chart_edit`` and ``on_chart_action`` hear what the user does to them on a
+live session's chart.  A live session calls them between candles; they are not
+lifecycle steps either.
+
 Run modes
 ---------
 BACKTEST  Every candle is processed; all signals are returned.
@@ -141,6 +148,23 @@ class BaseStrategy(ABC):
     #: Set by a live runner while it processes a newly closed candle; ``notify``
     #: hands its message over through it.  ``None`` everywhere else.
     _notify_hook: Callable[[str, bool], None] | None = None
+
+    #: The labels of the strategy's candle menu on a live session's chart
+    #: (v1.3.0): picking one calls :meth:`on_chart_action`.
+    chart_actions: tuple[str, ...] = ()
+
+    #: What the user changed on the chart in earlier runs (v1.3.0): the records of
+    #: ``TraderConfig.chart_edits_path``, set by a live session before ``setup()``
+    #: so the strategy can apply them as each object appears.  ``()`` otherwise.
+    chart_edits: tuple = ()
+
+    #: Set by a live session after its seed (v1.3.0): where :meth:`draw` and
+    #: :meth:`erase` go — ``hook("draw", drawing)`` and ``hook("erase", key)``.
+    _draw_hook: Callable[[str, object], None] | None = None
+
+    #: Set by a live session while it runs (v1.3.0): wires a chart that
+    #: :meth:`watch_chart` names after the session started.
+    _watch_hook: Callable[[object, tuple], None] | None = None
 
     # ------------------------------------------------------------------
     # Abstract interface — MUST implement
@@ -313,6 +337,99 @@ class BaseStrategy(ABC):
         hook(text, bool(silent))
 
     # ------------------------------------------------------------------
+    # The chart (v1.3.0): what the user does to it, and what the strategy draws
+    # ------------------------------------------------------------------
+
+    def on_chart_edit(self, edit) -> bool | None:
+        """
+        The user changed or deleted one of the strategy's **keyed** drawings on a
+        live session's chart (v1.3.0).  ``edit`` has ``key``, ``before`` and
+        ``after`` — the drawing's dicts; ``after`` is ``None`` for a deletion — and
+        ``chart``.  Match it by ``edit.key``, the object's own name, never by the
+        drawing's id.
+
+        Return ``False`` to refuse it: the drawing goes back on every open page,
+        which says so.  Anything else accepts it, and it is saved when
+        ``TraderConfig.chart_edits_path`` is set.
+
+        ``run_live`` and ``Trader`` call it between candles, holding the lock their
+        candle step holds — at once, or right after the candle in progress — so the
+        strategy never sees half a candle.  A backtest never calls it.
+        """
+        return None
+
+    def on_chart_action(self, action) -> None:
+        """
+        The user picked one of :attr:`chart_actions` from the candle menu
+        (v1.3.0).  ``action`` has ``label``, ``time`` (the opening of the candle
+        under the pointer, UTC ms), ``price`` (the pointer's) and ``chart``.  Called
+        as :meth:`on_chart_edit` is; it is saved too.
+        """
+
+    def watch_chart(self, chart, actions=()) -> None:
+        """
+        Route a chart of the strategy's own — one it builds and draws on itself —
+        to :meth:`on_chart_edit` and :meth:`on_chart_action` as well, with *actions*
+        in its candle menu (v1.3.0).  Called before the live session exists, it is
+        remembered and wired when the session starts; during one, at once.  A second
+        call for the same chart adds its actions.
+        """
+        actions = tuple(actions)
+        watched = self.__dict__.setdefault("_atk_watched", [])
+        for i, (known, labels) in enumerate(watched):
+            if known is chart:
+                watched[i] = (chart, labels + tuple(a for a in actions if a not in labels))
+                break
+        else:
+            watched.append((chart, actions))
+        hook = self._watch_hook
+        if hook is not None:
+            hook(chart, actions)
+
+    def draw(self, drawing: dict) -> None:
+        """
+        Put a drawing of the strategy's own on the chart (v1.3.0): a dict as
+        ``StrategyResult.drawings`` documents it, times in Unix seconds::
+
+            self.draw({"type": "box", "time1": t1, "price1": top, "time2": t2,
+                       "price2": bottom, "key": "zone:high:1793030100000",
+                       "editable": ("price",), "title": "High zone"})
+
+        A ``key`` — the object's own name — makes it the user's to change, and
+        :meth:`on_chart_edit` hears what they do; drawing again with the same key
+        replaces it.  In a backtest, and in a live session's seed, the drawings are
+        collected and :meth:`run` returns them in ``StrategyResult.drawings``.  In
+        ``run_live`` and a ``Trader``'s display, after the seed, each goes on the
+        session's chart at once.  Without a chart it does nothing.
+        """
+        if not isinstance(drawing, dict):
+            raise TypeError(f"draw takes a dict, got {type(drawing).__name__}")
+        hook = self._draw_hook
+        if hook is not None:
+            hook("draw", dict(drawing))
+            return
+        drawn = self.__dict__.get("_atk_drawn")
+        if drawn is None:
+            return
+        key = drawing.get("key")
+        for i, known in enumerate(drawn):
+            if key is not None and known.get("key") == key:
+                drawn[i] = dict(drawing)
+                return
+        drawn.append(dict(drawing))
+
+    def erase(self, key: str) -> None:
+        """Take the drawing with *key* off the chart, or out of what :meth:`run`
+        returns (v1.3.0).  An unknown key does nothing."""
+        hook = self._draw_hook
+        if hook is not None:
+            hook("erase", key)
+            return
+        drawn = self.__dict__.get("_atk_drawn")
+        if drawn is not None:
+            drawn[:] = [d for d in drawn if d.get("key") != key]
+
+    # ------------------------------------------------------------------
     # Framework entry point — do NOT override
     # ------------------------------------------------------------------
 
@@ -345,30 +462,36 @@ class BaseStrategy(ABC):
 
         self._validate_input(data)
 
-        # ---- 1. Compute all indicators (once) -----------------------
-        data = self.prepare_indicators(data)
+        # What self.draw() collects during this run (v1.3.0)
+        self.__dict__["_atk_drawn"] = []
+        try:
+            # ---- 1. Compute all indicators (once) -------------------
+            data = self.prepare_indicators(data)
 
-        # ---- 2. Initialise state (once) -----------------------------
-        self.setup(data)
+            # ---- 2. Initialise state (once) -------------------------
+            self.setup(data)
 
-        # ---- 3. Main loop — candle by candle on primary TF ----------
-        primary_df = data[self.primary_timeframe]
-        n = len(primary_df)
+            # ---- 3. Main loop — candle by candle on primary TF ------
+            primary_df = data[self.primary_timeframe]
+            n = len(primary_df)
 
-        all_signals: list[Signal] = []
-        all_exits: list[ExitSignal] = []
+            all_signals: list[Signal] = []
+            all_exits: list[ExitSignal] = []
 
-        for i in range(n):
-            if i < self.warmup_period:
-                continue
+            for i in range(n):
+                if i < self.warmup_period:
+                    continue
 
-            signals = self.generate_signals(i, data)
-            exits = self.detect_exit_signals(i, data)
+                signals = self.generate_signals(i, data)
+                exits = self.detect_exit_signals(i, data)
 
-            if signals:
-                all_signals.extend(signals)
-            if exits:
-                all_exits.extend(exits)
+                if signals:
+                    all_signals.extend(signals)
+                if exits:
+                    all_exits.extend(exits)
+            drawings = list(self.__dict__["_atk_drawn"])
+        finally:
+            self.__dict__["_atk_drawn"] = None
 
         # ---- 4. Filter for LIVE mode --------------------------------
         if mode is StrategyMode.LIVE and n > 0:
@@ -381,6 +504,7 @@ class BaseStrategy(ABC):
             exit_signals=all_exits,
             data=data,
             mode=mode,
+            drawings=drawings,
         )
 
     # ------------------------------------------------------------------
