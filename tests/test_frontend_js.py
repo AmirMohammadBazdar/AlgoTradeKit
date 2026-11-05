@@ -2206,3 +2206,21 @@ out.after = [d.time1, d.time2, d.price1, d.price2];
     assert result["alongTop"] == {"id": "zone", "handle": "tc"}
     assert result["alongLeft"] is None
     assert result["after"] == [1600, 2800, 92, 80]
+
+
+def test_a_view_address_without_its_view_opens_the_page():
+    """A ChartPage's frame is ``/view?view=<id>``.  Typed without the view — the
+    user's check of Part 4: ``/view?key=…`` stayed blank — it opens the page, with
+    the key; a frame, and a chart served on its own, stay where they are."""
+    go = ("ctx.location.pathname = '/view';\n"
+          "ctx.location.replace = u => { ctx.__replaced = u; };\n")
+    read = "out.to = ctx.__replaced === undefined ? null : ctx.__replaced;"
+    keyed = _run(CHART_HTML, read, extra_globals=go + "ctx.location.search = '?key=s 3';\n")
+    bare = _run(CHART_HTML, read, extra_globals=go)
+    framed = _run(CHART_HTML, read,
+                  extra_globals=go + "ctx.location.search = '?view=v1&key=k';\n")
+    alone = _run(CHART_HTML, read, extra_globals=go.replace("'/view'", "'/'")
+                 + "ctx.location.search = '?key=k';\n")
+    assert keyed["to"] == "/?key=s%203"
+    assert bare["to"] == "/"
+    assert framed["to"] is None and alone["to"] is None
