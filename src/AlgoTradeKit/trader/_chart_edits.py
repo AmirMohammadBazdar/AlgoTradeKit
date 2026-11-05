@@ -20,6 +20,7 @@ import tempfile
 import threading
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 #: The reason a session stops for «Re-run with edits»: run_live starts again.
 RERUN_REASON = "re-run with chart edits"
@@ -100,6 +101,16 @@ def open_edits_files(configs) -> dict[str, EditsFile]:
 def edits_file_for(config, files: dict[str, EditsFile]) -> EditsFile | None:
     path = config.chart_edits_path
     return None if path is None else files[os.path.abspath(path)]
+
+
+def chart_address(chart, key: str | None) -> str:
+    """Where a person opens *chart* (v1.3.0): the page it is in when a runner has
+    put it in a ``ChartPage``, else its own address — with the edit key, if any."""
+    url = getattr(getattr(chart, "_server", None), "page_url", None) or chart.url
+    if not key:
+        return url
+    joint = "&" if "?" in url else "/?"
+    return f"{url}{joint}key={quote(key, safe='')}"
 
 
 def chart_drawer(chart) -> Any:
