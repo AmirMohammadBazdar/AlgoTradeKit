@@ -366,6 +366,23 @@ class TestSavedEdits:
         assert delete == {"type": "delete", "chart": edit["chart"], "key": ZONE}
         assert [p.name for p in tmp_path.iterdir()] == ["edits.json"]   # no temporary left
 
+    def test_an_edit_carries_the_last_candle_closed_before_it(self, built, tmp_path):
+        """Q4.4 (b): a strategy replaying a resize from the zone's birth needs to know
+        what came before it.  A delete or an action carries no such time."""
+        path = tmp_path / "edits.json"
+
+        def after(index, row):
+            chart = built[0]
+            if index == 1:                       # candle 9 has closed; 10 has not come
+                zone = next(d for d in chart._drawings if drawing_key(d) == ZONE)
+                page_says(chart, {"type": "drawing_updated",
+                                  "drawing": {**zone.to_dict(), "price1": 101.5}})
+
+        run_live(strategy=Zones(ZONES), broker=Stepped(SEED, LIVE, after),
+                 config=config(chart_edits_path=str(path)))
+        (edit,) = json.loads(path.read_text())
+        assert (edit["type"], edit["at"]) == ("edit", _p_ts(9))
+
     def test_q3_1_b_and_q3_2_b_the_next_start_reads_them_and_its_seed_has_no_trade(
             self, built, tmp_path):
         path = tmp_path / "edits.json"
@@ -440,6 +457,32 @@ class TestRerun:
         assert (path, argv) == (sys.executable, [sys.executable, *sys.orig_argv[1:]])
         assert "STOP re-run with chart edits" in out_before     # the stop message came first
 
+    def test_pressed_after_the_feeds_ended_it_starts_the_program_again_at_once(
+            self, built, tmp_path, monkeypatch):
+        """A past window: the walk is over, run_live has returned and the pages stay
+        up (a runner holds them, or the keep-alive) — the button still re-runs."""
+        calls = []
+        monkeypatch.setattr(os, "execv", lambda path, argv: calls.append(list(argv)))
+        report = run_live(strategy=Zones(ZONES), broker=Stepped(SEED, LIVE),
+                          config=config(chart_edits_path=str(tmp_path / "edits.json"),
+                                        chart_port=_find_free_port()))
+        assert report is not None and calls == []           # it ended: nobody asked
+        page_says(built[0], {"type": "button", "label": RERUN_LABEL})
+        assert calls == [[sys.executable, *sys.orig_argv[1:]]]
+
+    def test_a_press_while_the_session_ends_is_not_lost(self, monkeypatch):
+        from AlgoTradeKit.trader import _run_live
+
+        calls = []
+        monkeypatch.setattr(_run_live, "_rerun", lambda: calls.append("rerun"))
+        flag = _run_live._StopFlag()
+        flag.rerun()                                        # while it runs: a stop
+        assert (flag.is_set(), flag.reason, calls) == (True, "re-run with chart edits", [])
+        assert flag.end() is True                           # run_live re-runs on that
+        flag.rerun()                                        # once over: at once
+        assert calls == ["rerun"]
+        assert _run_live._StopFlag().end() is False
+
     def test_not_offered_without_a_fixed_port(self, built, tmp_path, capsys):
         run_live(strategy=Zones(ZONES), broker=Stepped(SEED, LIVE),
                  config=config(chart_edits_path=str(tmp_path / "edits.json")))
@@ -447,6 +490,19 @@ class TestRerun:
         assert ("[AlgoTradeKit] run_live BTCUSDT: «Re-run with edits» is not offered — "
                 "chart_port is 0, and a re-run is found only on a fixed port."
                 in capsys.readouterr().out)
+
+    def test_inside_a_page_the_key_follows_the_views_query(self):
+        """A runner that puts the session's chart in a ChartPage: the chart's address
+        is its view, ``…/view?view=v1``, so the key comes after an ``&``."""
+        from types import SimpleNamespace
+
+        from AlgoTradeKit.trader._run_live import _chart_address
+
+        cfg = config(chart_edit_key="a b")
+        view = SimpleNamespace(url="http://127.0.0.1:8341/view?view=v1")
+        assert _chart_address(view, cfg) == "http://127.0.0.1:8341/view?view=v1&key=a%20b"
+        plain = SimpleNamespace(url="http://127.0.0.1:8341")
+        assert _chart_address(plain, cfg) == "http://127.0.0.1:8341/?key=a%20b"
 
     def test_the_editors_address_carries_the_key(self, built, capsys):
         run_live(strategy=Zones(ZONES), broker=Stepped(SEED, LIVE),
@@ -485,6 +541,21 @@ class TestTrader:
         assert strategy.heard == [(True, True)]   # with the lock, once the item let go
         (record,) = json.loads((tmp_path / "edits.json").read_text())
         assert (record["type"], record["key"]) == ("edit", "zone:t")
+
+    def test_its_edit_records_carry_the_last_committed_candle(self, tmp_path):
+        own = Chart(title="Own")
+        own.add_box(1, 101.0, 2, 100.0, key="zone:t")
+        strategy = Zones()
+        strategy.watch_chart(own)
+        t = _t_trader(cfg=_t_cfg(chart_edits_path=str(tmp_path / "edits.json")),
+                      strategy=strategy, state_path=tmp_path / "state.json")
+        worker = t._worker
+        worker.seed()
+        worker._wire_chart_edits()
+        box = own._drawings[0]
+        page_says(own, {"type": "drawing_updated", "drawing": {**box.to_dict(), "price1": 101.5}})
+        (record,) = json.loads((tmp_path / "edits.json").read_text())
+        assert record["at"] == worker._last_committed_ts > 0
 
     def test_saved_edits_reach_the_strategy_and_its_display_copy(self, tmp_path):
         path = tmp_path / "edits.json"
