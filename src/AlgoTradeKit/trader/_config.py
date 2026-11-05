@@ -254,10 +254,12 @@ class TraderConfig:
     chart_edits_path : str | None
         A JSON file of the edits the strategy accepted (v1.3.0): each edit, delete
         and action it accepts is appended, and at every start the file is read
-        back and given to the strategy as ``chart_edits`` before ``setup()``.  A
-        file that is not a list of records stops the start.  With a fixed
-        ``chart_port``, ``run_live``'s chart offers «Re-run with edits».  ``None``
-        (default) — nothing is saved.
+        back and given to the strategy as ``chart_edits`` before ``setup()``.  An
+        edit's record carries ``"at"``, the opening of the last candle the session
+        had closed when it was made (UTC ms).  A file that is not a list of
+        records stops the start.  With a fixed ``chart_port``, ``run_live``'s chart
+        offers «Re-run with edits», which also works once the session has ended
+        and its pages stay up.  ``None`` (default) — nothing is saved.
     max_daily_loss : float | str | None
         Per-pair daily-loss limit: a number = account-currency $, a
         string like ``"2%"`` = percent of the UTC-day-start balance.
