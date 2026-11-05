@@ -129,15 +129,19 @@ class ChartBridge:
     the Trader's display steps a copy of its own, which must not go on drawing or
     trading a zone the user deleted.  *draw_hook*, when given, is armed on the
     strategy while a hook runs (a Trader arms it only around its own steps).
+    *clock* gives the opening of the last candle the session closed: a saved edit
+    carries it as ``"at"`` (v1.3.0).
     """
 
     def __init__(self, strategy, lock, *, edits: EditsFile | None = None, followers=(),
-                 draw_hook=None) -> None:
+                 draw_hook=None, clock=None) -> None:
         self.strategy = strategy
         self.lock = lock
         self.edits = edits
         self.followers = list(followers)
         self.draw_hook = draw_hook
+        #: The opening of the last candle the session closed (UTC ms), or None.
+        self.clock = clock
         self._wired: dict[int, Any] = {}
 
     def wire(self, chart, actions=()) -> None:
@@ -164,8 +168,14 @@ class ChartBridge:
 
                 raise EditRefused(f"{type(self.strategy).__name__} refused it")
             self._tell_followers("on_chart_edit", edit)
-            self._save({"type": "edit", "chart": edit.chart.title, "key": edit.key,
-                        "drawing": edit.after})
+            record = {"type": "edit", "chart": edit.chart.title, "key": edit.key,
+                      "drawing": edit.after}
+            at = self.clock() if self.clock is not None else None
+            if at is not None:
+                # When it was made: a strategy that replays an edit from the start
+                # can tell what came before it from what came after.
+                record["at"] = int(at)
+            self._save(record)
 
     def _on_delete(self, edit) -> None:
         with self.lock, self._armed():
