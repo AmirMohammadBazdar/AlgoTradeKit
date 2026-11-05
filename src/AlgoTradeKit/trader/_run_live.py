@@ -497,6 +497,8 @@ class _StopFlag:
     def __init__(self) -> None:
         self._event = threading.Event()
         self.reason: str | None = None
+        self._lock = threading.Lock()
+        self._over = False
 
     def request(self, reason: str) -> None:
         if self.reason is None:
@@ -505,6 +507,23 @@ class _StopFlag:
 
     def is_set(self) -> bool:
         return self._event.is_set()
+
+    def rerun(self) -> None:
+        """«Re-run with edits» (v1.3.0): stop the session — or, once it is over
+        (its feeds ended and its pages stayed up), start the program again at once."""
+        with self._lock:
+            over = self._over
+            if not over:
+                self.request(RERUN_REASON)
+        if over:
+            _rerun()
+
+    def end(self) -> bool:
+        """The session is over: from now on «Re-run with edits» re-runs at once.
+        True when one was asked for before (while the session was ending, too)."""
+        with self._lock:
+            self._over = True
+            return self.reason == RERUN_REASON
 
 
 @dataclass
@@ -678,7 +697,8 @@ def _wire_chart_edits(session: _PaperSession, stop: _StopFlag) -> None:
     the edits and actions on it and on every chart it watches — each under the
     step's lock — and the chart offers «Re-run with edits» when it can."""
     sim, strategy, config = session.sim, session.pair.strategy, session.pair.config
-    bridge = ChartBridge(strategy, sim._lock, edits=session.edits)
+    bridge = ChartBridge(strategy, sim._lock, edits=session.edits,
+                         clock=lambda: sim._last_ts)
     chart = sim.chart
     if chart is not None:
         bridge.wire(chart, strategy.chart_actions)
@@ -695,14 +715,15 @@ def _wire_chart_edits(session: _PaperSession, stop: _StopFlag) -> None:
 def _offer_rerun(chart, config: TraderConfig, stop: _StopFlag) -> None:
     """«Re-run with edits» needs the saved edits, and a fixed port for the page
     to find the new run on.  A session that saves no edits has nothing to re-run
-    with, and says nothing."""
+    with, and says nothing.  The button outlives the session: pressed after its
+    feeds ended — a past window walked, its pages kept up — it re-runs at once."""
     if config.chart_edits_path is None:
         return
     if not config.chart_port:
         print(f"{_LOG_PREFIX} {config.symbol}: «{RERUN_LABEL}» is not offered — "
               "chart_port is 0, and a re-run is found only on a fixed port.")
         return
-    chart.add_button(RERUN_LABEL, lambda: stop.request(RERUN_REASON), confirm=RERUN_CONFIRM)
+    chart.add_button(RERUN_LABEL, stop.rerun, confirm=RERUN_CONFIRM)
 
 
 def _rerun() -> None:
@@ -716,10 +737,12 @@ def _rerun() -> None:
 
 
 def _chart_address(chart, config: TraderConfig) -> str:
-    """A chart's address, with the edit key when the session has one (v1.3.0)."""
-    if config.chart_edit_key:
-        return f"{chart.url}/?key={quote(config.chart_edit_key, safe='')}"
-    return chart.url
+    """A chart's address, with the edit key when the session has one (v1.3.0).
+    Inside a ``ChartPage`` the chart's address is its view, which has a query."""
+    if not config.chart_edit_key:
+        return chart.url
+    joint = "&" if "?" in chart.url else "/?"
+    return f"{chart.url}{joint}key={quote(config.chart_edit_key, safe='')}"
 
 
 def _arm_messages(session: _PaperSession, view: PairView) -> None:
@@ -978,7 +1001,7 @@ def run_live(
         notify_session.unlisten()
         notify_session.close()
 
-    if reason == RERUN_REASON:
+    if stop.end() or reason == RERUN_REASON:
         _rerun()
     reports = [session.sim.last_report for session in sessions]
     return reports if multi else reports[0]
