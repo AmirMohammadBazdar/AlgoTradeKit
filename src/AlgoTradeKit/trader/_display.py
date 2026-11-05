@@ -89,7 +89,6 @@ from collections.abc import Mapping
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote
 
 import pandas as pd
 
@@ -795,10 +794,9 @@ class _DisplayBridge:
         if chart is None:
             chart = self._real_chart
         if chart is not None and getattr(chart, "url", None):
-            address = chart.url
-            if self.config.chart_edit_key:          # v1.3.0: the editor's address
-                joint = "&" if "?" in address else "/?"   # a page's view has a query
-                address += f"{joint}key={quote(self.config.chart_edit_key, safe='')}"
+            from ._chart_edits import chart_address
+
+            address = chart_address(chart, self.config.chart_edit_key)   # v1.3.0
             print(f"{_LOG_PREFIX} {symbol} chart  → {address}")
         server = (
             self.sim.report_server
