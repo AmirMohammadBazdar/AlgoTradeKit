@@ -727,7 +727,8 @@ class _PairWorker:
                 chart = display.real_chart
                 self._draw_target = display.enqueue_draw
         bridge = ChartBridge(self.strategy, self.step_lock, edits=self.edits,
-                             followers=followers, draw_hook=self._draw_target)
+                             followers=followers, draw_hook=self._draw_target,
+                             clock=lambda: self._last_committed_ts or None)
         if chart is not None:
             bridge.wire(chart, self.strategy.chart_actions)
         for watched, actions in list(self.strategy.__dict__.get("_atk_watched", ())):
