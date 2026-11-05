@@ -504,6 +504,19 @@ class TestRerun:
         plain = SimpleNamespace(url="http://127.0.0.1:8341")
         assert _chart_address(plain, cfg) == "http://127.0.0.1:8341/?key=a%20b"
 
+    def test_a_chart_in_a_page_is_opened_at_the_page(self):
+        """A runner that moves the session's chart into a ChartPage: the address to
+        open is the page — both grids — not one frame of it (the user's check of
+        Part 4 took the frame's for the page)."""
+        from AlgoTradeKit.trader._run_live import _chart_address
+        from AlgoTradeKit.visual import ChartPage
+
+        page, chart = ChartPage(title="p"), Chart(title="c")
+        page.add(chart)
+        assert chart.url == f"{page.url}/view?view=v1"
+        assert _chart_address(chart, config(chart_edit_key="k")) == f"{page.url}/?key=k"
+        assert _chart_address(chart, config()) == page.url
+
     def test_the_editors_address_carries_the_key(self, built, capsys):
         run_live(strategy=Zones(ZONES), broker=Stepped(SEED, LIVE),
                  config=config(chart_edit_key="s3cret"))
