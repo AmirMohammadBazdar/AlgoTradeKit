@@ -747,6 +747,13 @@ const snapshot = _q.get('snapshot') === '1';
 // does — or if it never does, an older server — the page may, as before.
 const editKey = _q.get('key');
 let canEdit = true;
+// A ChartPage serves each frame this page as /view?view=<id>. The same address
+// with no view names nothing on that page: whoever typed it wanted the page, so
+// go there, with the key (v1.3.0, the check of Part 4: /view?key=… stayed blank).
+if (viewId === null && !snapshot && /\/view\/?$/.test(location.pathname || '')) {
+  const root = location.pathname.replace(/\/view\/?$/, '/');
+  location.replace(root + (editKey ? `?key=${encodeURIComponent(editKey)}` : ''));
+}
 // Only the chart the pointer is over may drive the others.
 //
 // Comparing values is not enough to stop an echo: each chart snaps a range to
