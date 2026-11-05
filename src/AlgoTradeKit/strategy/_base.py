@@ -155,7 +155,10 @@ class BaseStrategy(ABC):
 
     #: What the user changed on the chart in earlier runs (v1.3.0): the records of
     #: ``TraderConfig.chart_edits_path``, set by a live session before ``setup()``
-    #: so the strategy can apply them as each object appears.  ``()`` otherwise.
+    #: so the strategy can apply them as each object appears.  An ``"edit"`` record
+    #: carries ``"at"``, the opening of the last candle the session had closed when
+    #: it was made (UTC ms), for a strategy that tells what came before it.
+    #: ``()`` otherwise.
     chart_edits: tuple = ()
 
     #: Set by a live session after its seed (v1.3.0): where :meth:`draw` and
