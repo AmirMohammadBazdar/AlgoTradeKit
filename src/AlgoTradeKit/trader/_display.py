@@ -797,7 +797,8 @@ class _DisplayBridge:
         if chart is not None and getattr(chart, "url", None):
             address = chart.url
             if self.config.chart_edit_key:          # v1.3.0: the editor's address
-                address += f"/?key={quote(self.config.chart_edit_key, safe='')}"
+                joint = "&" if "?" in address else "/?"   # a page's view has a query
+                address += f"{joint}key={quote(self.config.chart_edit_key, safe='')}"
             print(f"{_LOG_PREFIX} {symbol} chart  → {address}")
         server = (
             self.sim.report_server
