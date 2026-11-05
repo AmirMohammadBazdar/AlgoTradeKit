@@ -83,6 +83,11 @@ class _ViewProxy:
     def url(self) -> str:
         return f"{self._server.url}/view?view={self._view_id}"
 
+    @property
+    def page_url(self) -> str:
+        """The page this view is in: what a person opens (v1.3.0)."""
+        return self._server.url
+
 
 class ChartPage:
     """
