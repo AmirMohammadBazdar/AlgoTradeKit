@@ -85,7 +85,6 @@ import time
 import warnings
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
 
 from ..broker._timeutil import now_ms
 from ..simulate import (
@@ -105,6 +104,7 @@ from ._chart_edits import (
     RERUN_REASON,
     ChartBridge,
     EditsFile,
+    chart_address,
     chart_drawer,
     drop_drawing,
     edits_file_for,
@@ -737,12 +737,9 @@ def _rerun() -> None:
 
 
 def _chart_address(chart, config: TraderConfig) -> str:
-    """A chart's address, with the edit key when the session has one (v1.3.0).
-    Inside a ``ChartPage`` the chart's address is its view, which has a query."""
-    if not config.chart_edit_key:
-        return chart.url
-    joint = "&" if "?" in chart.url else "/?"
-    return f"{chart.url}{joint}key={quote(config.chart_edit_key, safe='')}"
+    """A chart's address, with the edit key when the session has one (v1.3.0) —
+    the page's, when a runner has put the chart in a ``ChartPage``."""
+    return chart_address(chart, config.chart_edit_key)
 
 
 def _arm_messages(session: _PaperSession, view: PairView) -> None:
