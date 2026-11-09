@@ -10,6 +10,8 @@ exactly like a Binance connector to the rest of the library.
 from __future__ import annotations
 
 import platform
+import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -37,7 +39,7 @@ from .._types import (
     Ticker,
     TradingCosts,
 )
-from ..base import BaseBroker
+from ..base import _CLOCK_OFFSET_TTL_MS, BaseBroker
 from ._bridge_client import BridgeClient
 from ._native import NativeTransport
 
@@ -56,6 +58,15 @@ _MT_ORDER_TYPE = {
 }
 
 _ORDER_KIND = {ORDER_MARKET: "market", ORDER_LIMIT: "limit", ORDER_STOP: "stop"}
+
+# clock_offset_ms() (v1.3.0): the trade server's clock, read from its newest tick.
+_QUARTER_HOUR_MS = 15 * 60_000      # brokers sit on whole, half or quarter hours
+_CLOCK_SPAN_MS = 14 * 3_600_000     # no clock is further than this from UTC
+_CLOCK_FRESH_MS = 7 * 60_000        # a tick new since a reading this recent is fresh
+_CLOCK_WATCH_S = 2.0                # with no recent reading: how long to watch for one
+_CLOCK_WATCH_STEP_S = 0.2
+_CLOCK_RETRY_MS = 60_000            # no fresh tick (the market is shut): look again after
+_sleep = time.sleep                 # tests replace it
 
 
 class MetaTraderBroker(BaseBroker):
@@ -127,6 +138,13 @@ class MetaTraderBroker(BaseBroker):
         self._account_currency = ""
         self._authenticated = False
 
+        # The trade server's clock (v1.3.0), read from the newest tick of the
+        # symbol last asked for: see clock_offset_ms().
+        self._clock_lock = threading.Lock()
+        self._clock_symbol: str | None = None
+        self._clock_seen: tuple[str, Any, int] | None = None   # (symbol, tick, read at)
+        self._clock_retry_at = 0
+
         if connect:
             self._connect(login, password, server)
 
@@ -170,6 +188,11 @@ class MetaTraderBroker(BaseBroker):
     def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         return self._transport.call(method, *args, **kwargs)
 
+    def _note(self, symbol: str) -> None:
+        """Remember *symbol*: the clock reads its ticks (v1.3.0)."""
+        if isinstance(symbol, str) and symbol:
+            self._clock_symbol = symbol
+
     # ==================================================================
     # Market data
     # ==================================================================
@@ -178,10 +201,12 @@ class MetaTraderBroker(BaseBroker):
         self, symbol: str, timeframe: str, start_ms: int, end_ms: int
     ) -> list[dict[str, Any]]:
         tf = normalize_timeframe(timeframe)
+        self._note(symbol)
         return self._call("candles_range", symbol, tf, start_ms, end_ms)
 
     def fetch_last_candles(self, symbol: str, timeframe: str, count: int) -> list[dict[str, Any]]:
         tf = normalize_timeframe(timeframe)
+        self._note(symbol)
         return self._call("candles_from_count", symbol, tf, int(count))
 
     def list_symbols(self, group: str = "*") -> list[str]:
@@ -201,12 +226,87 @@ class MetaTraderBroker(BaseBroker):
                       timestamp=int(t.get("time_ms", now_ms())), raw=t)
 
     def get_ticker(self, symbol: str) -> Ticker:
+        self._note(symbol)
         return self._ticker_from_payload(symbol, self._call("tick", symbol))
 
     def server_time(self) -> int:
-        # MT5 exposes no clean broker-server clock; the terminal host clock is the
-        # closest proxy and the feed timestamps are authoritative anyway.
-        return now_ms()
+        """The trade server's clock now, as it stamps candles and ticks: this
+        machine's clock plus :meth:`clock_offset_ms` (v1.3.0; it was this
+        machine's clock)."""
+        return now_ms() + self.clock_offset_ms()
+
+    def clock_offset_ms(self, *, force_refresh: bool = False) -> int:
+        """
+        The trade server's clock minus this machine's, in milliseconds (v1.3.0).
+
+        MetaTrader stamps candles and ticks in the trade server's own time: the
+        broker's wall clock written as if it were UTC (EET/EEST at many brokers,
+        two hours ahead of UTC in winter and three in summer).  A candle is final
+        once ``now_ms() + clock_offset_ms()`` reaches its close (the trader's
+        scheduler, the live seeds), so this must be that clock.  MT5 has no call
+        for it: it is read from the newest tick of the symbol this broker was
+        last asked for — the tick's time minus now, rounded to the nearest
+        quarter of an hour (brokers sit on whole, half or quarter hours, and a
+        tick a few minutes old cannot move it).
+
+        Only a fresh tick is read: one new since a reading less than seven
+        minutes old, or one that arrives while the clock watches for two
+        seconds.  While none comes — the market is shut — the last reading
+        stands, and the clock looks again a minute later; before the first
+        reading (a start while the market is shut, or before any symbol was
+        asked for) it is 0, this machine's clock.  A reading is kept five
+        minutes, as :meth:`BaseBroker.clock_offset_ms`; ``force_refresh=True``
+        reads now.  A failing transport keeps the last reading.
+        """
+        with self._clock_lock:
+            cached = self._clock_offset_cache
+            last = cached[0] if cached is not None else 0
+            now = now_ms()
+            if not force_refresh:
+                if cached is not None and now - cached[1] < _CLOCK_OFFSET_TTL_MS:
+                    return last
+                if now < self._clock_retry_at:
+                    return last
+            symbol = self._clock_symbol
+            if symbol is None:
+                return last
+            fresh = self._fresh_tick(symbol)
+            if fresh is None:
+                self._clock_retry_at = now_ms() + _CLOCK_RETRY_MS
+                return last
+            tick_ms, read_at = fresh
+            offset = round((tick_ms - read_at) / _QUARTER_HOUR_MS) * _QUARTER_HOUR_MS
+            self._clock_offset_cache = (offset, now_ms())
+            self._clock_retry_at = 0
+            return offset
+
+    def _fresh_tick(self, symbol: str) -> tuple[int, int] | None:
+        """``(tick time, when it was read)`` for a tick known to be fresh, else None."""
+        try:
+            tick = self._call("tick", symbol)
+        except Exception:            # the transport failed: the last reading stands
+            return None
+        read_at = now_ms()
+        seen, self._clock_seen = self._clock_seen, (symbol, tick, read_at)
+        tick_ms = int((tick or {}).get("time_ms") or 0)
+        if not tick_ms or abs(tick_ms - read_at) > _CLOCK_SPAN_MS:
+            return None              # days old: the market is shut
+        if seen is not None and seen[0] == symbol and read_at - seen[2] < _CLOCK_FRESH_MS:
+            return (tick_ms, read_at) if seen[1] != tick else None
+        # Nothing recent to compare with: watch for a new tick
+        deadline = read_at + int(_CLOCK_WATCH_S * 1000)
+        while now_ms() < deadline:
+            _sleep(_CLOCK_WATCH_STEP_S)
+            try:
+                newer = self._call("tick", symbol)
+            except Exception:
+                return None
+            at = now_ms()
+            self._clock_seen = (symbol, newer, at)
+            if newer != tick:
+                newer_ms = int((newer or {}).get("time_ms") or 0)
+                return (newer_ms, at) if newer_ms else None
+        return None
 
     def get_trading_costs(self, symbol: str) -> TradingCosts:
         """
@@ -218,6 +318,7 @@ class MetaTraderBroker(BaseBroker):
         the ``TraderConfig`` cost override is the place to supply a real
         per-lot commission.  An unknown symbol raises (transport error).
         """
+        self._note(symbol)
         info = self._call("symbol_info", symbol)
         point = float(info.get("point", 0.0) or 0.0)
         spread = float(info.get("spread", 0.0) or 0.0) * point
@@ -256,6 +357,7 @@ class MetaTraderBroker(BaseBroker):
         changes (and immediately on subscribe).
         """
         tf = normalize_timeframe(timeframe)
+        self._note(symbol)
         poll = self._make_candle_poller(symbol, tf, on_candle, closed_only)
         return start_poll_stream(
             poll,
@@ -269,6 +371,7 @@ class MetaTraderBroker(BaseBroker):
         seconds.  *on_tick* receives a :class:`Ticker` whenever the venue tick
         changed since the previous poll (the first poll always fires).
         """
+        self._note(symbol)
         poll = self._make_ticker_poller(symbol, on_tick)
         return start_poll_stream(
             poll,
