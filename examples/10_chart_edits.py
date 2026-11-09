@@ -28,6 +28,17 @@ What to try (from the address printed with `?key=…`; over an SSH tunnel to
    after the start. Switch to `5m` or `1h` and it counts that candle. Settings →
    «Time to the candle's close» turns it off (kept in this browser).
 6. `GO TO` (or `Alt+G`) takes the chart to a date and a time, as its axis shows it.
+7. A zone that can still trade has no right edge (`"time2": None`): it runs five
+   candles past the last candle. A traded zone, or one older than four hours, is
+   erased.
+8. Draw a box (the toolbar's ▭) where you see a zone, right-click it →
+   `Make it a zone`: the strategy takes your box as a zone from its left edge — a
+   high zone above the last close, a low one below — and your box becomes it.
+   Saved with the rest, so a re-run makes it again on time
+   (`chart_drawing_actions`; offered on the drawings you draw).
+9. Settings → «Time zone» → «Show times in»: your own zone. The candles are
+   stamped in UTC on Binance; on MetaTrader set
+   `TraderConfig(chart_source_timezone=...)` to the broker's zone.
 """
 from __future__ import annotations
 
@@ -49,6 +60,7 @@ class Breakout(BaseStrategy):
     primary_timeframe = "1m"
     warmup_period = 60
     chart_actions = ("Add zone here",)
+    chart_drawing_actions = ("Make it a zone",)
 
     def prepare_indicators(self, data):
         return data
@@ -63,17 +75,19 @@ class Breakout(BaseStrategy):
 
     # ── zones ────────────────────────────────────────────────────────────────
 
-    def _make(self, key, side, price, made):
+    def _make(self, key, side, price, made, top=None, bottom=None):
         if key in self.gone:
             return
-        top, bottom = price * (1 + BAND), price * (1 - BAND)
+        if top is None:
+            top, bottom = price * (1 + BAND), price * (1 - BAND)
         if key in self.moved:
             prices = (self.moved[key]["price1"], self.moved[key]["price2"])
             top, bottom = max(prices), min(prices)
         self.zones[key] = {"side": side, "top": top, "bottom": bottom, "made": made}
         colour = "#3fb950" if side == "high" else "#f85149"
+        # No right edge while it can trade: it runs to the live edge (time2 None)
         self.draw({"type": "box", "key": key, "title": f"{side} zone {price:,.2f}",
-                   "time1": made // 1000, "time2": (made + KEEP_HOURS * HOUR_MS) // 1000,
+                   "time1": made // 1000, "time2": None,
                    "price1": top, "price2": bottom, "color": colour, "borderColor": colour,
                    "opacity": 0.15, "label": f"{side} zone", "editable": ("price",)})
 
@@ -81,6 +95,12 @@ class Breakout(BaseStrategy):
         """«Add zone here»: a high zone above the last close, a low one below it."""
         side = "high" if price > self.last_close else "low"
         self._make(f"zone:added:{made}", side, price, made)
+
+    def _from_box(self, box, made):
+        """«Make it a zone»: the viewer's box, from its left edge."""
+        top, bottom = max(box["price1"], box["price2"]), min(box["price1"], box["price2"])
+        side = "high" if bottom > self.last_close else "low"
+        self._make(f"zone:drawn:{made}", side, (top + bottom) / 2, made, top, bottom)
 
     def _forget(self, key):
         self.zones.pop(key, None)
@@ -98,7 +118,10 @@ class Breakout(BaseStrategy):
             self._make(f"zone:low:{made}", "low", float(hour["low"].min()), made)
         for added in [a for a in self.added if a["time"] <= ts]:   # saved ones, on time
             self.added.remove(added)
-            self._add_here(added["price"], added["time"])
+            if added["label"] == "Make it a zone" and added.get("drawing"):
+                self._from_box(added["drawing"], added["time"])
+            elif added["label"] == "Add zone here" and added["price"] is not None:
+                self._add_here(added["price"], added["time"])
         signals = []
         for key, zone in list(self.zones.items()):
             if ts - zone["made"] > KEEP_HOURS * HOUR_MS:
@@ -132,6 +155,13 @@ class Breakout(BaseStrategy):
         if action.label == "Add zone here" and action.price is not None:
             self._add_here(action.price, action.time)
             print(f"  [strategy] zone added at {action.price:,.2f}")
+        elif action.label == "Make it a zone" and action.drawing is not None:
+            if action.drawing.get("type") != "box":
+                print("  [strategy] Make it a zone: draw a box")
+                return
+            self._from_box(action.drawing, action.time)
+            action.chart.remove_drawing(action.drawing["id"])   # your box became the zone
+            print(f"  [strategy] your box is now zone:drawn:{action.time}")
 
 
 if __name__ == "__main__":
