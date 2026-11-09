@@ -22,6 +22,9 @@ body{background:var(--bg);color:var(--text);
 #hdr{height:var(--hh);background:var(--bg2);border-bottom:1px solid var(--border);
      display:flex;align-items:center;padding:0 12px;gap:14px;flex-shrink:0}
 #logo{font-size:12px;font-weight:600;color:var(--accent);letter-spacing:.04em}
+/* v1.3.0: the brand is a link to the repository; it looks as it did */
+a#logo{text-decoration:none;cursor:pointer}
+a#logo:hover{text-decoration:underline}
 #page-title{font-size:12px;color:var(--text2)}
 #sync-box{margin-left:auto;display:flex;align-items:center;gap:6px}
 .sync-btn{height:22px;padding:0 9px;border-radius:5px;border:1px solid var(--border);
@@ -63,7 +66,8 @@ body{background:var(--bg);color:var(--text);
 <body>
 
 <div id="hdr">
-  <span id="logo">⬡ AlgoTradeKit</span>
+  <a id="logo" href="https://github.com/AmirMohammadBazdar/AlgoTradeKit" target="_blank"
+     rel="noopener noreferrer" title="AlgoTradeKit on GitHub">⬡ AlgoTradeKit</a>
   <span id="page-title">Chart Page</span>
   <div id="rp">
     <button class="sync-btn" id="rp-btn" onclick="replayToggle()"
@@ -364,8 +368,10 @@ window.addEventListener('message', ev => {
       broadcast(id, {t: 'range', from: msg.from, to: msg.to});
       break;
     case 'navigate':
-      // The report sent one chart to a trade; the rest of the page follows.
-      broadcast(id, {t: 'navigate', time: msg.time});
+      // The report sent one chart to a trade — or «Go to» did (v1.3.0, `keep`:
+      // each chart keeps its zoom); the rest of the page follows.
+      broadcast(id, msg.keep ? {t: 'navigate', time: msg.time, keep: true}
+                             : {t: 'navigate', time: msg.time});
       break;
     case 'crosshair':
       if(!sync.crosshair) break;
