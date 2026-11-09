@@ -23,6 +23,11 @@ What to try (from the address printed with `?key=…`; over an SSH tunnel to
    in the toolbar stops the session and starts it again: the new start walks the
    history with your edits, so a deleted zone has no trade in the seed either.
    Delete the file to forget them all.
+5. Under the last price, on the price axis: the time left until the candle
+   closes, counted on the feed's own clock — it appears with the first new candle
+   after the start. Switch to `5m` or `1h` and it counts that candle. Settings →
+   «Time to the candle's close» turns it off (kept in this browser).
+6. `GO TO` (or `Alt+G`) takes the chart to a date and a time, as its axis shows it.
 """
 from __future__ import annotations
 
