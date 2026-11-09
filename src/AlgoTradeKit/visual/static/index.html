@@ -1392,31 +1392,86 @@ function applyZones(){
 
 // The Settings panel's two lists: UTC, this PC's zone, the program's, then all
 let _zoneListBuilt = false;
-function zoneChoices(){
+// The browser (ICU) still lists some places by their old names: the list shows,
+// and keeps, the current ones — the same zones under the names tzdata gives now.
+const ZONE_RENAMED = {
+  'Africa/Asmera':'Africa/Asmara', 'America/Buenos_Aires':'America/Argentina/Buenos_Aires',
+  'America/Catamarca':'America/Argentina/Catamarca', 'America/Cordoba':'America/Argentina/Cordoba',
+  'America/Godthab':'America/Nuuk', 'America/Indianapolis':'America/Indiana/Indianapolis',
+  'America/Jujuy':'America/Argentina/Jujuy', 'America/Louisville':'America/Kentucky/Louisville',
+  'America/Mendoza':'America/Argentina/Mendoza', 'Asia/Calcutta':'Asia/Kolkata',
+  'Asia/Katmandu':'Asia/Kathmandu', 'Asia/Rangoon':'Asia/Yangon', 'Asia/Saigon':'Asia/Ho_Chi_Minh',
+  'Atlantic/Faeroe':'Atlantic/Faroe', 'Europe/Kiev':'Europe/Kyiv', 'Pacific/Enderbury':'Pacific/Kanton',
+  'Pacific/Ponape':'Pacific/Pohnpei', 'Pacific/Truk':'Pacific/Chuuk'};
+function modernZone(z){
+  const m = ZONE_RENAMED[z];
+  return m && validZone(m) ? m : z;
+}
+
+// Each zone as «+03:30 Tehran»: its offset from UTC at *at*, then its city; the
+// list goes by the offset, then the city (v1.3.0).
+function zoneChoices(at = Date.now()){
   const here = (() => { try{ return Intl.DateTimeFormat().resolvedOptions().timeZone; }
                         catch{ return null; } })();
   let all = [];
   try{ all = Intl.supportedValuesOf('timeZone'); }catch{}
   const seen = new Set(), out = [];
-  ['UTC', here, programZones.source, programZones.display, ...all].forEach(z => {
-    if(z && !seen.has(z) && validZone(z)){ seen.add(z); out.push(z); }
+  ['UTC', here, programZones.source, programZones.display, zones.source, zones.display,
+   ...all].forEach(name => {
+    const z = name && modernZone(name);
+    if(!z || seen.has(z)) return;
+    const offset = listOffset(z, at);           // null: a zone this browser does not know
+    if(offset == null) return;
+    seen.add(z);
+    out.push({zone: z, offset, city: zoneCity(z)});
   });
+  out.sort((a, b) => a.offset - b.offset || a.city.localeCompare(b.city));
+  out.forEach(c => { c.label = offsetText(c.offset) + ' ' + c.city; });
   return out;
+}
+function zoneCity(z){ return z.split('/').pop().replace(/_/g, ' '); }
+// The offset alone («GMT+03:30»): one light formatter per zone, which is most of
+// what the list costs — so it is also the list's check that the zone is known.
+function listOffset(z, at){
+  let part;
+  try{
+    part = new Intl.DateTimeFormat('en-US', {timeZone: z, timeZoneName: 'longOffset'})
+      .formatToParts(new Date(at)).find(p => p.type === 'timeZoneName');
+  }catch{
+    return validZone(z) ? zoneOffset(z, at) : null;     // no «longOffset» here, or unknown
+  }
+  const text = part ? part.value : '';
+  if(text === 'GMT') return 0;
+  const m = /^GMT([+-])(\d{2}):(\d{2})$/.exec(text);
+  return m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) * 60000
+           : zoneOffset(z, at);
+}
+function offsetText(ms){
+  const m = Math.round(Math.abs(ms) / 60000);
+  return (ms < 0 ? '-' : '+') + String(Math.floor(m / 60)).padStart(2, '0') + ':'
+       + String(m % 60).padStart(2, '0');
+}
+// The lists are filled the first time Settings opens: some 420 zones cost a few
+// hundred milliseconds, which a page of charts should not pay on every load.
+function buildZoneLists(){
+  const src = document.getElementById('sz-source'), shown = document.getElementById('sz-display');
+  if(_zoneListBuilt || !src || !shown) return;
+  zoneChoices().forEach(c => {
+    [src, shown].forEach(sel => {
+      const o = document.createElement('option');
+      o.value = c.zone; o.textContent = c.label; o.title = c.zone;
+      sel.appendChild(o);
+    });
+  });
+  _zoneListBuilt = true;
 }
 function syncZonePanel(){
   const src = document.getElementById('sz-source'), shown = document.getElementById('sz-display');
   if(!src || !shown) return;
-  if(!_zoneListBuilt){
-    zoneChoices().forEach(z => {
-      [src, shown].forEach(sel => {
-        const o = document.createElement('option'); o.value = z; o.textContent = z;
-        sel.appendChild(o);
-      });
-    });
-    _zoneListBuilt = true;
+  if(_zoneListBuilt){
+    src.value = modernZone(zones.source);
+    shown.value = modernZone(zones.display);
   }
-  src.value = zones.source;
-  shown.value = zones.display;
   const note = document.getElementById('sz-source-note');
   if(note){
     note.textContent = browserZones.source
@@ -1433,7 +1488,7 @@ function onZoneChange(){
   loadZones();
   const src = document.getElementById('sz-source').value;
   const shown = document.getElementById('sz-display').value;
-  const prog = k => validZone(programZones[k]) ? programZones[k] : 'UTC';
+  const prog = k => modernZone(validZone(programZones[k]) ? programZones[k] : 'UTC');
   browserZones = {};
   if(validZone(src) && src !== prog('source')) browserZones.source = src;
   if(validZone(shown) && shown !== prog('display')) browserZones.display = shown;
@@ -4497,6 +4552,7 @@ function toggleSettings(){
   document.getElementById('sf-drawing').value = drawingFont;
   document.getElementById('sf-size').value    = drawingFontSize;
   document.getElementById('sf-size-val').textContent = drawingFontSize+'px';
+  buildZoneLists(); syncZonePanel();                 // v1.3.0: filled on the first opening
   ov.classList.add('open');
   document.getElementById('settings-btn').classList.add('on');
   document.getElementById('stog-last-close').checked  = showLastClose;
