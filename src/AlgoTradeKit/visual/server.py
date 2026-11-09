@@ -127,6 +127,19 @@ def _with_key(url: str, edit_key: str | None) -> str:
     return f"{url}/?key={quote(edit_key, safe='')}" if edit_key else url
 
 
+async def _send_clock(websocket, clock) -> None:
+    """The feed's clock now (v1.3.0), made fresh for this socket — a cached copy
+    would be stale.  Nothing until the chart has learned it from a live feed."""
+    if clock is None:
+        return
+    try:
+        message = clock()
+        if message is not None:
+            await websocket.send_text(json.dumps(message))
+    except Exception:
+        pass
+
+
 async def _send_access(websocket, editor: bool) -> None:
     """Tell a page what it may do (v1.3.0), after the replayed init."""
     try:
@@ -204,6 +217,8 @@ class ChartServer:
         # Set by Chart to receive browser → Python messages.
         # Signature: on_message(msg: dict) -> None
         self.on_message = None
+        # Set by Chart (v1.3.0): () -> the feed's clock message, or None
+        self.clock = None
 
         # v0.7.1: replay cache — new browsers get the current state immediately
         self._last_init:     dict | None = None
@@ -236,6 +251,7 @@ class ChartServer:
                 except Exception:
                     pass
             await _send_access(websocket, editor)
+            await _send_clock(websocket, self.clock)
             try:
                 while True:
                     raw = await websocket.receive_text()
@@ -428,6 +444,8 @@ class PageServer:
         self.on_message: dict = {}
         # view id → its chart's edit key (v1.3.0); a view without one is open to all
         self.edit_keys: dict[str, str] = {}
+        # view id → () -> its chart's clock message, or None (v1.3.0)
+        self.clocks: dict = {}
 
         self._app = self._build_app()
 
@@ -464,6 +482,7 @@ class PageServer:
                     except Exception:
                         pass
             await _send_access(websocket, editor)
+            await _send_clock(websocket, self.clocks.get(view_id))
 
             try:
                 while True:
