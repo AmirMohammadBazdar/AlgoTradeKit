@@ -636,6 +636,24 @@ body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
     </div>
 
     <div class="sdivider"></div>
+    <div class="sgroup-title">Time zone</div>
+
+    <div class="srow">
+      <label for="sz-source">Times are stamped in</label>
+      <select id="sz-source" onchange="onZoneChange()"></select>
+      <span class="hint" id="sz-source-note"></span>
+    </div>
+    <div class="srow">
+      <label for="sz-display">Show times in</label>
+      <select id="sz-display" onchange="onZoneChange()"></select>
+    </div>
+    <div class="srow">
+      <button class="sreset" onclick="resetZones()">Reset time zones</button>
+      <span class="hint">Kept in this browser, for every chart on this page. The candles do
+        not move: a daily candle still runs from the stamps' midnight.</span>
+    </div>
+
+    <div class="sdivider"></div>
     <div class="sgroup-title">Axis &amp; OHLC</div>
 
     <div class="srow">
@@ -681,6 +699,14 @@ body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
       <label>Font Size — <span class="sval" id="sf-size-val">11px</span></label>
       <input type="range" id="sf-size" min="8" max="20" value="11"
              oninput="document.getElementById('sf-size-val').textContent=this.value+'px'"/>
+    </div>
+
+    <div class="srow">
+      <label for="sf-fib-levels">Fib levels</label>
+      <input type="text" id="sf-fib-levels" value="0, 23.6, 38.2, 50, 61.8, 78.6, 100"
+             onchange="onFibLevelsChange(this.value)"/>
+      <span class="hint">In percent, for a new fib; a fib's own: right-click it → Levels….
+        Kept in this browser.</span>
     </div>
 
     <div class="sdivider"></div>
@@ -759,6 +785,9 @@ body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
   <!-- Rows 3-4: edit actions — hidden when locked -->
   <div class="mi" id="ctx-rename-row" onclick="ctxRename()">✏️ Rename label</div>
   <div class="mi" id="ctx-color-row"  onclick="ctxEditColor()">🎨 Change color</div>
+  <!-- v1.3.0: a fib's levels; the program's items on a drawing you drew -->
+  <div class="mi" id="ctx-levels-row" onclick="ctxFibLevels()">📐 Levels…</div>
+  <div id="ctx-dactions"></div>
   <hr id="ctx-delete-sep"/>
   <!-- Row 5: delete — unless the drawing is not deletable (v1.3.0) -->
   <div class="mi danger" id="ctx-delete-row" onclick="ctxDelete()">🗑 Delete</div>
@@ -835,6 +864,9 @@ const gCtx    = ghostCv.getContext('2d');
 const ctxMenu = document.getElementById('ctx-menu');
 
 const HANDLE_R=5, HIT_R=9;
+// v1.3.0: the fib's end points are bigger, and its levels can be any
+const FIB_HANDLE_R=7;
+const FIB_DEFAULT=[0,.236,.382,.5,.618,.786,1];
 
 // indGroups: groupName → {names: [str], collapsed: bool, hidden: bool}
 const indGroups = {};
@@ -859,11 +891,11 @@ const DARK={layout:{background:{color:'#0d1117'},textColor:'#8b949e'},
   grid:{vertLines:{color:'#1c2333'},horzLines:{color:'#1c2333'}},
   crosshair:{mode:1,vertLine:{color:'#58a6ff44'},horzLine:{color:'#58a6ff44'}},
   rightPriceScale:{borderColor:'#30363d'},
-  timeScale:{borderColor:'#30363d',timeVisible:true,secondsVisible:false}};
+  timeScale:{borderColor:'#30363d',timeVisible:true,secondsVisible:false,rightOffset:8}};
 const LIGHT={layout:{background:{color:'#ffffff'},textColor:'#57606a'},
   grid:{vertLines:{color:'#eaeef2'},horzLines:{color:'#eaeef2'}},
   crosshair:{mode:1},rightPriceScale:{borderColor:'#d0d7de'},
-  timeScale:{borderColor:'#d0d7de',timeVisible:true,secondsVisible:false}};
+  timeScale:{borderColor:'#d0d7de',timeVisible:true,secondsVisible:false,rightOffset:8}};
 // The theme's options with this chart's colours in them, so every pane made
 // or restyled takes the background and the grid from the colours below.
 const tOpts=()=>{
@@ -871,7 +903,10 @@ const tOpts=()=>{
   return {...base,
     layout:{...base.layout, background:{color:chartStyle.background}},
     grid:{vertLines:{...base.grid.vertLines, visible:chartStyle.grid},
-          horzLines:{...base.grid.horzLines, visible:chartStyle.grid}}};
+          horzLines:{...base.grid.horzLines, visible:chartStyle.grid}},
+    // v1.3.0: times in the zone shown, read from the zone the candles are stamped
+    // in — lightweight-charts' own labels while both are UTC
+    ...(zonesActive() ? zonedOptions() : {})};
 };
 
 function toggleTheme(){
@@ -1026,6 +1061,9 @@ function onStyleRelayed(){
   syncStylePanel();
   loadCountdown();                       // v1.3.0: it travels with the colours
   updateCountdown();
+  loadZones();                           // v1.3.0: and so do the time zones
+  applyZones();
+  loadFibLevels();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1234,20 +1272,189 @@ if(embedded){
 //  are painted.
 // ═══════════════════════════════════════════════════════════════
 const SNAP_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// ═══════════════════════════════════════════════════════════════
+//  TIME ZONES (v1.3.0)
+//  A candle's time is the feed's stamp: the wall clock of the zone the feed
+//  stamps in — UTC on Binance, the broker's own time on MetaTrader — written
+//  as if it were UTC. The chart cannot tell which zone that is: the program
+//  says (Chart(source_timezone=)) or the viewer (Settings → «Time zone»). A
+//  label goes stamp → instant (through the source zone) → the wall clock of
+//  the zone shown. The candles never move; only their labels do.
+// ═══════════════════════════════════════════════════════════════
+const ZONES_KEY = 'atk.chart.zones.v1';
+let programZones = {source: null, display: null};   // the init's
+let browserZones = {};                               // what this browser chose
+let zones = {source: 'UTC', display: 'UTC'};         // what the chart uses now
+const _zoneFmts = {};
+
+function validZone(z){
+  if(typeof z !== 'string' || !z) return false;
+  try{ new Intl.DateTimeFormat('en-GB', {timeZone: z}); return true; }catch{ return false; }
+}
+function zoneFmt(z){
+  if(!_zoneFmts[z]){
+    _zoneFmts[z] = new Intl.DateTimeFormat('en-GB', {timeZone: z, year:'numeric',
+      month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit',
+      hourCycle:'h23'});
+  }
+  return _zoneFmts[z];
+}
+function wallParts(z, ms){                           // instant ms → zone z's wall clock
+  const parts = {};
+  zoneFmt(z).formatToParts(new Date(ms)).forEach(p => { parts[p.type] = p.value; });
+  return parts;
+}
+function zoneOffset(z, ms){                          // zone z minus UTC at instant ms
+  if(z === 'UTC') return 0;
+  const p = wallParts(z, ms);
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second)
+         - Math.floor(ms / 1000) * 1000;
+}
+function wallToInstant(z, wallMs){                   // zone z's wall clock → the instant
+  if(z === 'UTC') return wallMs;
+  const guess = wallMs - zoneOffset(z, wallMs);
+  return wallMs - zoneOffset(z, guess);
+}
+function stampToMs(sec){ return wallToInstant(zones.source, sec * 1000); }
+function msToStamp(ms){ return Math.round((ms + zoneOffset(zones.source, ms)) / 1000); }
+function shownParts(sec){ return wallParts(zones.display, stampToMs(sec)); }
+function shownLabel(sec){                            // «2026-10-31 00:15»
+  const p = shownParts(sec);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+}
+
+// lightweight-charts' labels: its own defaults' look, in the zone shown
+function zoneTickLabel(time, type){
+  if(typeof time !== 'number') return null;          // a business day: the default
+  const p = shownParts(time);
+  return type === 0 ? p.year
+       : type === 1 ? SNAP_MONTHS[Number(p.month) - 1]
+       : type === 2 ? String(Number(p.day))
+       : type === 4 ? `${p.hour}:${p.minute}:${p.second}`
+       : `${p.hour}:${p.minute}`;
+}
+function zoneTimeLabel(time){
+  if(typeof time !== 'number') return String(time);
+  const p = shownParts(time);
+  return `${p.day} ${SNAP_MONTHS[Number(p.month) - 1]} '${p.year.slice(2)} ${p.hour}:${p.minute}`;
+}
+
+function readSavedZones(){
+  if(snapshot) return null;
+  try{
+    const all = JSON.parse(window.localStorage.getItem(ZONES_KEY) || '{}') || {};
+    const out = {};
+    ['source', 'display'].forEach(k => { if(validZone(all[k])) out[k] = all[k]; });
+    return out;
+  }catch{ return null; }
+}
+function loadZones(){
+  const saved = readSavedZones();
+  if(saved) browserZones = saved;
+}
+// What the chart uses: this browser's choice, else the program's, else UTC. A
+// picture reads its zones from its address (tz, stz) and nothing else.
+function pickZones(){
+  if(snapshot){
+    zones = {source: validZone(_q.get('stz')) ? _q.get('stz') : 'UTC',
+             display: validZone(_q.get('tz')) ? _q.get('tz') : 'UTC'};
+    return;
+  }
+  const pick = k => browserZones[k] || (validZone(programZones[k]) ? programZones[k] : 'UTC');
+  zones = {source: pick('source'), display: pick('display')};
+}
+// While both zones are UTC the chart keeps lightweight-charts' own labels
+function zonesActive(){ return zones.source !== 'UTC' || zones.display !== 'UTC'; }
+function zonedOptions(){
+  return {localization:{timeFormatter:t => zoneTimeLabel(t)},
+          timeScale:{...(theme === 'dark' ? DARK : LIGHT).timeScale,
+                     tickMarkFormatter:(t, type) => zoneTickLabel(t, type)}};
+}
+let _zonedPanes = false, _toldZones = '';
+function applyZones(){
+  pickZones();
+  if(!snapshot && (zonesActive() || _zonedPanes)){
+    const opts = zonesActive() ? zonedOptions()
+      : {localization:{timeFormatter:undefined}, timeScale:{tickMarkFormatter:undefined}};
+    Object.values(panes).forEach(p => { try{ p.chart.applyOptions(opts); }catch{} });
+    _zonedPanes = zonesActive();
+  }
+  const told = zones.source + '|' + zones.display;        // the page's replay clock,
+  if(told !== _toldZones){                                 // told of a change only
+    _toldZones = told;
+    postToPage({t:'zones', source: zones.source, display: zones.display});
+  }
+  syncZonePanel();
+  updateReplayUI();
+  redrawAll();
+}
+
+// The Settings panel's two lists: UTC, this PC's zone, the program's, then all
+let _zoneListBuilt = false;
+function zoneChoices(){
+  const here = (() => { try{ return Intl.DateTimeFormat().resolvedOptions().timeZone; }
+                        catch{ return null; } })();
+  let all = [];
+  try{ all = Intl.supportedValuesOf('timeZone'); }catch{}
+  const seen = new Set(), out = [];
+  ['UTC', here, programZones.source, programZones.display, ...all].forEach(z => {
+    if(z && !seen.has(z) && validZone(z)){ seen.add(z); out.push(z); }
+  });
+  return out;
+}
+function syncZonePanel(){
+  const src = document.getElementById('sz-source'), shown = document.getElementById('sz-display');
+  if(!src || !shown) return;
+  if(!_zoneListBuilt){
+    zoneChoices().forEach(z => {
+      [src, shown].forEach(sel => {
+        const o = document.createElement('option'); o.value = z; o.textContent = z;
+        sel.appendChild(o);
+      });
+    });
+    _zoneListBuilt = true;
+  }
+  src.value = zones.source;
+  shown.value = zones.display;
+  const note = document.getElementById('sz-source-note');
+  if(note){
+    note.textContent = browserZones.source
+      ? 'You set it. The chart cannot tell which zone the feed stamps its candles in.'
+      : programZones.source
+        ? `Set by the program (${programZones.source}). The chart cannot tell which zone the `
+          + 'feed stamps its candles in: change it if it is wrong.'
+        : 'UTC unless you say otherwise: the chart cannot tell which zone the feed stamps '
+          + 'its candles in (UTC on Binance, the broker\'s own time on MetaTrader).';
+  }
+}
+// A choice is kept only where it differs from what the program said
+function onZoneChange(){
+  loadZones();
+  const src = document.getElementById('sz-source').value;
+  const shown = document.getElementById('sz-display').value;
+  const prog = k => validZone(programZones[k]) ? programZones[k] : 'UTC';
+  browserZones = {};
+  if(validZone(src) && src !== prog('source')) browserZones.source = src;
+  if(validZone(shown) && shown !== prog('display')) browserZones.display = shown;
+  if(!snapshot){ try{ window.localStorage.setItem(ZONES_KEY, JSON.stringify(browserZones)); }catch{} }
+  applyZones();
+  postToPage({t:'style'});
+}
+function resetZones(){
+  browserZones = {};
+  if(!snapshot){ try{ window.localStorage.setItem(ZONES_KEY, '{}'); }catch{} }
+  applyZones();
+  postToPage({t:'style'});
+}
 // The labels the time axis asked for, newest last: what a test reads back.
 const snapTicks = [];
 let snapFormat = null;
 
 function snapParts(sec){
-  if(!snapFormat){
-    const opts = {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit',
-                  minute:'2-digit', second:'2-digit', hourCycle:'h23'};
-    try{ snapFormat = new Intl.DateTimeFormat('en-GB', {...opts, timeZone:_q.get('tz') || 'UTC'}); }
-    catch{ snapFormat = new Intl.DateTimeFormat('en-GB', {...opts, timeZone:'UTC'}); }
-  }
-  const parts = {};
-  snapFormat.formatToParts(new Date(sec * 1000)).forEach(p => { parts[p.type] = p.value; });
-  return parts;
+  // v1.3.0: the picture's zones are its address's: tz shown, stz stamped in
+  if(!snapFormat){ pickZones(); snapFormat = true; }
+  return shownParts(sec);
 }
 
 // lightweight-charts' tickMarkFormatter: the tick's type picks the unit, the zone
@@ -1478,7 +1685,9 @@ function streamBar(bar){
   else allBars.push(bar);
   if(!replay.active) enforceCandleLimit();   // rolling window (v1.0.0)
   document.getElementById('barcnt').textContent=allBars.length+' bars';
-  document.getElementById('lupd').textContent='⟳ '+new Date().toLocaleTimeString();
+  // v1.3.0: this PC's clock, in the zone the chart shows its times in
+  const nowShown=wallParts(zones.display, Date.now());
+  document.getElementById('lupd').textContent=`⟳ ${nowShown.hour}:${nowShown.minute}:${nowShown.second}`;
   // Keep last-close axis label current
   if(!replay.active) updateCursorAxisLabel(null);
 }
@@ -1493,6 +1702,9 @@ function drawingEndTime(d){
   // Latest chart time a drawing occupies; null = never trim.
   // hlines are timeless; live positions extend to "now".
   if(d.type==='live_position') return null;
+  // v1.3.0: a running drawing (no end given) is never trimmed — as on the server
+  if(d.type==='position_box' && d.close_time==null) return null;
+  if('time2' in d && d.time2==null && d.time1!=null) return null;
   if(d.close_time!=null) return d.close_time;
   if(d.time1!=null || d.time2!=null)
     return Math.max(d.time1 ?? -Infinity, d.time2 ?? -Infinity);
@@ -2478,7 +2690,11 @@ function renderOne(d,ctx,W,H){
     if(!p1||!p2){ctx.restore();return;}
     const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
     const range=d.price2-d.price1;
-    (d.levels||[0,.236,.382,.5,.618,.786,1]).forEach((lvl,i,arr)=>{
+    // v1.3.0: the line between its two points, dashed, as a guide
+    ctx.save(); ctx.beginPath(); ctx.strokeStyle=d.color+'99'; ctx.lineWidth=1;
+    ctx.setLineDash([4,4]); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke();
+    ctx.restore();
+    (d.levels||FIB_DEFAULT).forEach((lvl,i,arr)=>{
       const price=d.price1+range*lvl;
       const pt=toXY(d.time1,price); if(!pt) return;
       const isEdge=(i===0||i===arr.length-1);
@@ -2493,8 +2709,12 @@ function renderOne(d,ctx,W,H){
       if(midPt){ ctx.fillStyle=d.color; ctx.textAlign='center';
         ctx.fillText(d.label,(xL+xR)/2,midPt.y-8); ctx.textAlign='left'; }
     }
-    drawHandle(ctx,p1.x,p1.y,d.color,false);
-    drawHandle(ctx,p2.x,p2.y,d.color,false);
+    // v1.3.0: bigger end points, and the other two corners resize it too
+    drawHandle(ctx,p1.x,p1.y,d.color,false,FIB_HANDLE_R);
+    drawHandle(ctx,p2.x,p2.y,d.color,false,FIB_HANDLE_R);
+    const c3=toXY(d.time2,d.price1), c4=toXY(d.time1,d.price2);
+    if(c3) drawHandle(ctx,c3.x,c3.y,d.color,false);
+    if(c4) drawHandle(ctx,c4.x,c4.y,d.color,false);
     if(hl){ const mx=(p1.x+p2.x)/2,my=(p1.y+p2.y)/2; drawHandle(ctx,mx,my,d.color,true); }
   }
 
@@ -2634,7 +2854,9 @@ function renderOne(d,ctx,W,H){
     const openPt = toXY(d.open_time, d.entry_price);
     const x1 = openPt ? openPt.x : 0;
     // A touch past the newest bar; in a picture, to the edge of the room left for it
-    const x2 = snapshot ? W : Math.min(pEntry.x + 8, W);
+    // v1.3.0: to the live edge — five candles past the newest (a picture: to its room)
+    const pLive = toXY(liveEndTime(), d.entry_price);
+    const x2 = snapshot ? W : (pLive ? Math.min(pLive.x, W) : Math.min(pEntry.x + 8, W));
 
     // Entry line (dashed, like the posbox entry line)
     ctx.beginPath(); ctx.strokeStyle='#ffffff66';
@@ -2675,9 +2897,9 @@ function renderOne(d,ctx,W,H){
   ctx.restore();
 }
 
-function drawHandle(ctx,x,y,color,filled){
+function drawHandle(ctx,x,y,color,filled,r=HANDLE_R){
   ctx.save();
-  ctx.beginPath(); ctx.arc(x,y,HANDLE_R,0,Math.PI*2);
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
   ctx.strokeStyle=color; ctx.lineWidth=1.5;
   ctx.fillStyle=filled?color:chartStyle.background;
   ctx.fill(); ctx.stroke();
@@ -2706,7 +2928,7 @@ function _hitTest(cx,cy,includeAll){
   for(const d of Object.values(drawings).reverse()){
     // A drag: only what is unlocked and this page may change (v1.3.0)...
     if(!includeAll && (d.locked || !mayChange(d))) continue;
-    const hit=hitDrawing(d,cx,cy);
+    const hit=hitDrawing(liveEnded(d),cx,cy);     // v1.3.0: a running end as drawn
     if(!hit) continue;
     // ...and only by a handle its `editable` names
     if(!includeAll && !handleAxes(d,hit.handle)) continue;
@@ -2727,13 +2949,18 @@ function hitDrawing(d,cx,cy){
     if(!p1||!p2) return null;
     if(dist(cx,cy,p1.x,p1.y)<HIT_R) return{id:d.id,handle:'p1'};
     if(dist(cx,cy,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'p2'};
+    if(d.type==='fib'){                            // v1.3.0: its other two corners
+      const c3=toXY(d.time2,d.price1), c4=toXY(d.time1,d.price2);
+      if(c3&&dist(cx,cy,c3.x,c3.y)<HIT_R) return{id:d.id,handle:'c3'};
+      if(c4&&dist(cx,cy,c4.x,c4.y)<HIT_R) return{id:d.id,handle:'c4'};
+    }
     const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
     if(dist(cx,cy,mx,my)<HIT_R) return{id:d.id,handle:'body'};
     if(d.type==='trendline'&&distToSeg(cx,cy,p1.x,p1.y,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'body'};
     if(d.type==='fib'){
       const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
       const range=d.price2-d.price1;
-      for(const lvl of (d.levels||[])){
+      for(const lvl of (d.levels||FIB_DEFAULT)){
         const pt=toXY(d.time1,d.price1+range*lvl); if(!pt) continue;
         if(cx>=xL&&cx<=xR&&Math.abs(cy-pt.y)<HIT_R) return{id:d.id,handle:'body'};
       }
@@ -3058,13 +3285,13 @@ document.getElementById('panes').addEventListener('click',e=>{
   const id=activeTool+'_'+Date.now(); let d=null;
   if(activeTool==='tline')
     d={type:'trendline',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
-       color:'#2196f3',lineWidth:1.5,extend:false,label:''};
+       color:'#2196f3',lineWidth:1.5,extend:false,label:'',source:'user'};
   else if(activeTool==='box')
     d={type:'box',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
-       color:'#26a69a',opacity:.15,borderColor:'#26a69a',label:''};
+       color:'#26a69a',opacity:.15,borderColor:'#26a69a',label:'',source:'user'};
   else if(activeTool==='fib')
     d={type:'fib',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
-       color:'#9c27b0',levels:[0,.236,.382,.5,.618,.786,1],label:''};
+       color:'#9c27b0',levels:fibLevels.slice(),label:'',source:'user'};
   if(d){ drawings[d.id]=d; notifyDrawingChanged(d); }
   draftState=null; gCtx.clearRect(0,0,ghostCv.width,ghostCv.height);
   redrawAll(); setTool('cursor');
@@ -3076,7 +3303,9 @@ document.getElementById('panes').addEventListener('click',e=>{
 function onDragMove(cx,cy){
   const coord=fromXY(cx,cy); if(!coord) return;
   const{time,price}=coord;
-  const d=drawings[dragState.id], o=dragState.orig, h=dragState.handle;
+  // v1.3.0: the geometry of a running drawing is the one drawn (its end five
+  // candles out); what a handle does not move is put back as it was — running.
+  const d=drawings[dragState.id], o0=dragState.orig, o=liveEnded(o0), h=dragState.handle;
   const isMove=(h==='body'||h==='interior');
 
   if(d.type==='hline'){
@@ -3085,6 +3314,8 @@ function onDragMove(cx,cy){
   else if(d.type==='trendline'||d.type==='fib'){
     if(h==='p1'){ d.time1=time; d.price1=price; }
     else if(h==='p2'){ d.time2=time; d.price2=price; }
+    else if(h==='c3'){ d.time2=time; d.price1=price; }        // v1.3.0: a fib's corners
+    else if(h==='c4'){ d.time1=time; d.price2=price; }
     else if(isMove){
       const sc=dragState.startCoord;
       d.price1=o.price1+(price-sc.price); d.price2=o.price2+(price-sc.price);
@@ -3136,7 +3367,7 @@ function onDragMove(cx,cy){
       const dPrice = price - sc.price;
       const dTime  = time  - sc.time;
       d.open_time   = o.open_time   + dTime;
-      d.close_time  = o.close_time  + dTime;
+      d.close_time  = o0.close_time == null ? null : o.close_time + dTime;   // running stays
       d.entry_price = o.entry_price + dPrice;
       d.stop_loss   = o.stop_loss   + dPrice;
       d.visual_tp   = (o.visual_tp  || o.entry_price) + dPrice;
@@ -3144,7 +3375,7 @@ function onDragMove(cx,cy){
       _recomputePosBoxZones(d);
     } else if(h==='left'){
       // Drag left edge → change open_time
-      d.open_time = Math.min(time, d.close_time - 1);
+      d.open_time = Math.min(time, (d.close_time ?? o.close_time) - 1);
     } else if(h==='right'){
       // Drag right edge → change close_time
       d.close_time = Math.max(time, d.open_time + 1);
@@ -3168,10 +3399,15 @@ function onDragMove(cx,cy){
   }
   // v1.3.0: what `editable` leaves out stays where it was. A price-only box keeps
   // its time edges whatever is dragged; its corners move vertically only.
+  // v1.3.0: a running end stays running unless this handle moved that end
+  if(o0 && 'time2' in o0 && o0.time2==null && d.time1!=null){
+    const endHandles = d.type==='box' ? ['tr','rc','br'] : ['p2','c3'];
+    if(!endHandles.includes(h)) d.time2=null;
+  }
   const ax=dragState.axes;
   if(ax&&!ax.move){
-    if(!ax.time)  ['time1','time2'].forEach(k=>{ if(o[k]!==undefined) d[k]=o[k]; });
-    if(!ax.price) ['price1','price2'].forEach(k=>{ if(o[k]!==undefined) d[k]=o[k]; });
+    if(!ax.time)  ['time1','time2'].forEach(k=>{ if(o0[k]!==undefined) d[k]=o0[k]; });
+    if(!ax.price) ['price1','price2'].forEach(k=>{ if(o0[k]!==undefined) d[k]=o0[k]; });
   }
   redrawAll();
 }
@@ -3228,6 +3464,12 @@ drawCv.addEventListener('contextmenu',e=>{
   document.getElementById('ctx-rename-row').classList.toggle('disabled', isLocked||!may);
   document.getElementById('ctx-color-row').classList.toggle('disabled',  isLocked||!may);
 
+  // 4. v1.3.0: a fib's levels; the program's items on a drawing you drew
+  const levelsRow=document.getElementById('ctx-levels-row');
+  levelsRow.style.display=d.type==='fib'?'':'none';
+  levelsRow.classList.toggle('disabled', isLocked||!may);
+  renderDrawingActions(d);
+
   ctxMenu.style.left=e.clientX+'px'; ctxMenu.style.top=e.clientY+'px';
   ctxMenu.style.display='block';
 });
@@ -3254,6 +3496,72 @@ function ctxRename(){
   if(d.type==='text') d.text=val; else d.label=val;
   redrawAll(); notifyDrawingChanged(d);
 }
+// v1.3.0: a fib's levels, in percent: «0, 50, 100, 200»
+function parseFibLevels(text){
+  const out = String(text || '').split(/[\s,;]+/).filter(Boolean).map(Number);
+  if(!out.length || out.some(v => !Number.isFinite(v))) return null;
+  return [...new Set(out)].sort((a, b) => a - b).map(v => v / 100);
+}
+function fibLevelsText(levels){
+  return levels.map(v => String(Math.round(v * 1000) / 10)).join(', ');
+}
+function ctxFibLevels(){
+  const d=drawings[ctxTargetId]; if(!d||d.type!=='fib'||d.locked||!mayChange(d)) return;
+  const val=prompt('Levels in %, e.g. 0, 50, 100, 200:', fibLevelsText(d.levels||FIB_DEFAULT));
+  if(val==null) return;
+  const levels=parseFibLevels(val);
+  if(!levels){ flashStatus('Levels: numbers in percent, separated by commas'); return; }
+  d.levels=levels;
+  redrawAll(); notifyDrawingChanged(d);
+}
+
+// The levels a new fib starts with: Settings → «Fib levels», kept in this browser
+const FIB_KEY = 'atk.chart.fib.v1';
+let fibLevels = FIB_DEFAULT.slice();
+function loadFibLevels(){
+  if(snapshot) return;
+  try{
+    const levels = parseFibLevels(window.localStorage.getItem(FIB_KEY));
+    fibLevels = levels || FIB_DEFAULT.slice();
+  }catch{ fibLevels = FIB_DEFAULT.slice(); }
+  const el = document.getElementById('sf-fib-levels');
+  if(el) el.value = fibLevelsText(fibLevels);
+}
+function onFibLevelsChange(text){
+  const levels = parseFibLevels(text);
+  if(!levels){ flashStatus('Fib levels: numbers in percent, separated by commas'); return; }
+  fibLevels = levels;
+  if(!snapshot){ try{ window.localStorage.setItem(FIB_KEY, fibLevelsText(levels)); }catch{} }
+  const el = document.getElementById('sf-fib-levels');
+  if(el) el.value = fibLevelsText(levels);
+  postToPage({t:'style'});
+}
+
+// The program's items on a drawing the viewer drew (Chart.add_drawing_action)
+let drawingActions = [];
+function setDrawingActions(list){
+  drawingActions = Array.isArray(list) ? list.filter(l => typeof l === 'string') : [];
+}
+function renderDrawingActions(d){
+  const box = document.getElementById('ctx-dactions');
+  if(!box) return;
+  box.innerHTML = '';
+  if(!canEdit || !isViewerDrawing(d) || !drawingActions.length) return;
+  box.appendChild(document.createElement('hr'));
+  drawingActions.forEach(label => {
+    const row = document.createElement('div');
+    row.className = 'mi'; row.textContent = label;
+    row.onclick = () => sendDrawingAction(label, d.id);
+    box.appendChild(row);
+  });
+}
+function sendDrawingAction(label, id){
+  const d = drawings[id];
+  if(!d || !canEdit) return;
+  if(ws && ws.readyState === 1) ws.send(JSON.stringify({type:'drawing_action', label, drawing:d}));
+  ctxMenu.style.display = 'none';
+}
+
 function ctxEditColor(){
   const d=drawings[ctxTargetId]; if(!d||d.locked||!mayChange(d)) return;
   const val=prompt('Color (hex):',d.color); if(!val) return;
@@ -3656,16 +3964,44 @@ function drawingStartTime(d){
 
 function replayVisibleDrawings(){
   const all = Object.values(drawings);
-  if(!replay.active || replay.cursor == null) return all;
+  if(!replay.active || replay.cursor == null) return all.map(liveEnded);
   const T = replay.cursor;
   const out = [];
   for(const d of all){
+    // v1.3.0: a drawing the viewer drew tells no future: never hidden or cut
+    if(isViewerDrawing(d)){ out.push(liveEnded(d)); continue; }
     const start = drawingStartTime(d);
     if(start != null && start > T) continue;      // has not happened yet
     const shape = clipDrawingTo(d, T);
-    if(shape) out.push(shape);
+    if(shape) out.push(liveEnded(shape));
   }
   return out;
+}
+
+// v1.3.0: what the viewer drew on this page (a program's drawings say «server»)
+function isViewerDrawing(d){
+  return d.source === 'user' || (d.source == null && /^(tline|box|fib)_\d+$/.test(d.id || ''));
+}
+
+// v1.3.0: where a running drawing ends — five candles past the last one, or past
+// the replay's cursor, on the timeframe shown. A drawing runs when its end is
+// not given: time2 (a box, a line, a fib) or close_time (a position box).
+const LIVE_AHEAD = 5;
+function liveEndTime(){
+  const bars = scaleBars();
+  if(!bars.length) return null;
+  return bars[bars.length - 1].time + LIVE_AHEAD * (displayTfSec() || 60);
+}
+function liveEnded(d){
+  if(!d) return d;
+  if(d.type === 'position_box'){
+    if(d.close_time != null) return d;
+    const t = liveEndTime();
+    return t == null ? d : Object.assign({}, d, {close_time: t});
+  }
+  if(!('time2' in d) || d.time2 != null || d.time1 == null) return d;
+  const t = liveEndTime();
+  return t == null ? d : Object.assign({}, d, {time2: t});
 }
 
 // A shape that runs past the cursor is drawn up to it. A zone that will last
@@ -3679,10 +4015,14 @@ function clipDrawingTo(d, T){
     out[key] = value;
   };
 
-  // A trade still open at the cursor: its label announces how it ends.
-  if(d.close_time != null && d.close_time > T){ set('close_time', T); set('label', ''); }
+  // A trade still open at the cursor: its label announces how it ends — so it
+  // shows the RR it was opened with instead (v1.3.0).
+  if(d.close_time != null && d.close_time > T){
+    set('close_time', T); set('label', d.planned_label || '');
+  }
 
-  // Spans: box, trendline, fib — clip whichever end runs ahead
+  // Spans: box, trendline, fib — clip whichever end runs ahead. A drawing still
+  // running (no end given) is drawn five candles past the cursor (liveEnded).
   if(d.time1 != null && d.time2 != null){
     if(d.time1 > T && d.time2 > T) return null;   // wholly in the future
     if(d.time1 > T) set('time1', T);
@@ -3698,8 +4038,7 @@ function updateReplayUI(){
   const clock = document.getElementById('rp-clock');
   if(!clock) return;
   if(!replay.active || replay.cursor == null){ clock.textContent = ''; return; }
-  const d = new Date(replay.cursor * 1000);
-  clock.textContent = d.toISOString().slice(0,16).replace('T',' ') + ' UTC';
+  clock.textContent = shownLabel(replay.cursor) + ' ' + zones.display;   // v1.3.0
 }
 
 // ── Driven by a ChartPage ──────────────────────────────────────
@@ -3800,13 +4139,15 @@ document.addEventListener('mousedown', e => {
 //  shown as UTC: Binance's UTC, MetaTrader's broker time. The candle that
 //  holds it goes to the middle at the zoom the chart has, under the crosshair.
 // ═══════════════════════════════════════════════════════════════
-function gotoValue(sec){ return new Date(sec * 1000).toISOString().slice(0, 16); }
-function gotoLabel(sec){ return gotoValue(sec).replace('T', ' '); }
+// v1.3.0: in the zone the chart shows its times in
+function gotoValue(sec){ return shownLabel(sec).replace(' ', 'T'); }
+function gotoLabel(sec){ return shownLabel(sec); }
 function gotoParse(value){
   const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value || '');
   if(!m) return null;
-  const ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
-  return Number.isFinite(ms) ? ms / 1000 : null;
+  const wall = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  if(!Number.isFinite(wall)) return null;
+  return msToStamp(wallToInstant(zones.display, wall));
 }
 // What the chart shows: in a replay, only as far as the replay has come
 function gotoBars(){ return replay.active && replay.shown ? replay.shown : allBars; }
@@ -3950,12 +4291,14 @@ function countdownNow(){
 }
 
 // Readable text on the tag's colour, as the price label picks it
+// Black or white, whichever has the higher contrast on *c* (WCAG): black on every
+// yellow and gold, where a brightness threshold had given white (v1.3.0).
 function tagInk(c){
-  const hex = rgbOf(c).slice(1);
-  const n = parseInt(hex, 16);
+  const n = parseInt(rgbOf(c).slice(1), 16);
   if(!Number.isFinite(n)) return '#ffffff';
-  const r = n >> 16 & 255, g = n >> 8 & 255, b = n & 255;
-  return (0.299 * r + 0.587 * g + 0.114 * b) > 160 ? '#000000' : '#ffffff';
+  const lin = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const L = 0.2126 * lin(n >> 16 & 255) + 0.7152 * lin(n >> 8 & 255) + 0.0722 * lin(n & 255);
+  return (L + 0.05) / 0.05 >= 1.05 / (L + 0.05) ? '#000000' : '#ffffff';
 }
 
 function updateCountdown(){
@@ -4053,6 +4396,8 @@ function handleMsg(msg){
       document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
       setChartActions(msg.actions);
       setProgramButtons(msg.buttons);
+      setDrawingActions(msg.drawingActions);              // v1.3.0
+      programZones = {source: msg.sourceTimezone || null, display: msg.timezone || null};
 
       initMain(); resizeOverlays();
       setData(msg.bars||[]);
@@ -4061,6 +4406,7 @@ function handleMsg(msg){
       enforceCandleLimit();   // server already trims; belt-and-braces
       redrawAll(); fitAll();
       syncStylePanel();
+      applyZones();                                       // v1.3.0: the program's zones
       setCanvasInteractive(false);
       if(snapshot) snapshotApply();
       // A timeframe switch mid-replay arrives as a fresh init: re-cut the new
@@ -4114,6 +4460,9 @@ function handleMsg(msg){
       break;
     case 'actions':
       setChartActions(msg.actions);
+      break;
+    case 'drawing_actions':                               // v1.3.0
+      setDrawingActions(msg.actions);
       break;
     case 'buttons':
       setProgramButtons(msg.buttons);
@@ -4388,6 +4737,7 @@ function applyAxisLabelSettings(){
 // ═══════════════════════════════════════════════════════════════
 window.addEventListener('resize',()=>{ resizeOverlays(); redrawAll(); });
 loadSavedStyle(); chartStyle=styleFor(theme); loadCountdown();
+loadZones(); pickZones(); loadFibLevels();               // v1.3.0
 setInterval(updateCountdown, 250);         // v1.3.0: the countdown ticks
 initMain(); resizeOverlays(); wsConnect(); setTool('cursor');
 // Only run the periodic redraw when there are visible drawings or a visible cloud
