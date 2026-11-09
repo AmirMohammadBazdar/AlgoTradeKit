@@ -68,6 +68,23 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
 
 /* ── Timeframe selector (v1.1.0) ─────────────────────────────── */
 #tf-wrap{position:relative;flex-shrink:0}
+/* v1.3.0: the brand is a link to the repository; it looks as it did */
+a#logo{text-decoration:none;cursor:pointer}
+a#logo:hover{text-decoration:underline}
+/* v1.3.0: go to a date and time — fixed under its button, as #tf-menu is */
+#goto-wrap{position:relative;flex-shrink:0}
+#goto-box{display:none;position:fixed;z-index:300;flex-direction:column;gap:6px;
+          background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+          padding:8px;box-shadow:0 8px 24px #000a}
+#goto-box.open{display:flex}
+#goto-box .row{display:flex;gap:6px;align-items:center}
+#goto-at{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;
+         padding:3px 6px;font-family:'Courier New',monospace;font-size:12px;color-scheme:dark}
+body.light #goto-at{color-scheme:light}
+#goto-hint{color:var(--text2);font-size:10px}
+/* v1.3.0: the time to the last candle's close, under its price on the price axis */
+#cd-tag{position:fixed;display:none;z-index:15;pointer-events:none;text-align:center;
+        border-radius:0 0 2px 2px;white-space:nowrap;overflow:hidden}
 #tf-btn{font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em}
 #tf-btn.busy{opacity:.5;pointer-events:none}
 /* Fixed, not absolute: #tbar scrolls horizontally, and an overflow other than
@@ -322,7 +339,8 @@ body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
 <body>
 
 <div id="hdr">
-  <span id="logo">⬡ AlgoTradeKit</span>
+  <a id="logo" href="https://github.com/AmirMohammadBazdar/AlgoTradeKit" target="_blank"
+     rel="noopener noreferrer" title="AlgoTradeKit on GitHub">⬡ AlgoTradeKit</a>
   <span id="chart-title">Chart</span>
   <div id="ohlcv">
     <span id="oi-o"></span><span id="oi-h"></span>
@@ -405,6 +423,26 @@ body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
     <svg width="13" height="12" viewBox="0 0 13 12"><rect x=".5" y=".5" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M4 4v4h4" stroke="currentColor" stroke-width="1" fill="none"/></svg>
     Fit
   </button>
+  <div id="goto-wrap">
+    <button class="tb" id="goto-btn" onclick="toggleGoto()" title="Go to a date and time (Alt+G)"
+            style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em;gap:5px">
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+        <rect x=".6" y="1.8" width="11.8" height="10.6" rx="1.4" stroke="currentColor" stroke-width="1.1"/>
+        <line x1=".6" y1="4.8" x2="12.4" y2="4.8" stroke="currentColor" stroke-width="1"/>
+        <line x1="3.6" y1=".5" x2="3.6" y2="3" stroke="currentColor" stroke-width="1.1"/>
+        <line x1="9.4" y1=".5" x2="9.4" y2="3" stroke="currentColor" stroke-width="1.1"/>
+        <rect x="6.6" y="7.2" width="2.6" height="2.6" fill="currentColor"/>
+      </svg>
+      GO TO
+    </button>
+    <div id="goto-box">
+      <div class="row">
+        <input type="datetime-local" id="goto-at" step="60" onkeydown="onGotoKey(event)"/>
+        <button class="tb" id="goto-go" onclick="gotoSubmit()">Go</button>
+      </div>
+      <span id="goto-hint">The chart's time, as its time axis shows it</span>
+    </div>
+  </div>
   <button class="tb" id="ml" onclick="toggleTheme()" title="Theme">
     <svg width="13" height="13" viewBox="0 0 13 13">
       <circle cx="6.5" cy="6.5" r="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
@@ -672,12 +710,25 @@ body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
       </label>
     </div>
 
+    <div class="stoggle-row">
+      <label class="slabel" for="stog-countdown">
+        Time to the candle's close
+        <small>Under the last price on the price axis, while the chart is live</small>
+      </label>
+      <label class="stog">
+        <input type="checkbox" id="stog-countdown" checked
+               onchange="onCountdownToggle(this.checked)">
+        <span class="stog-slider"></span>
+      </label>
+    </div>
+
     <div class="sdivider"></div>
     <button class="sapply" onclick="applyFonts()">Apply &amp; Close</button>
   </div>
 </div>
 
 <div id="rp-hint">Click a candle to start the replay there</div>
+<div id="cd-tag"></div>
 <div id="panes">
   <canvas id="draw-cv"></canvas>
   <canvas id="ghost-cv"></canvas>
@@ -973,6 +1024,8 @@ function onStyleRelayed(){
   loadSavedStyle();
   applyStyle();
   syncStylePanel();
+  loadCountdown();                       // v1.3.0: it travels with the colours
+  updateCountdown();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1164,7 +1217,9 @@ if(embedded){
       case 'replay-cursor':   replayPageCursor(msg.time);              break;
       case 'replay-exit':     replayExit();                            break;
       case 'replay-info':     postToPage(replayInfo());                break;
-      case 'navigate':        scrollToTime(msg.time);                  break;
+      case 'navigate':        // v1.3.0: «Go to» on another chart keeps each zoom
+                              if(msg.keep) goToTime(msg.time); else scrollToTime(msg.time);
+                              break;
       case 'style':           onStyleRelayed();                        break;
     }
   });
@@ -3735,7 +3790,201 @@ function selectTimeframe(tf){
 document.addEventListener('mousedown', e => {
   const wrap=document.getElementById('tf-wrap');
   if(wrap && !wrap.contains(e.target)) closeTfMenu();
+  const go=document.getElementById('goto-wrap');
+  if(go && go.contains && !go.contains(e.target)) closeGoto();
 });
+
+// ═══════════════════════════════════════════════════════════════
+//  GO TO A DATE AND TIME (v1.3.0)
+//  The time is the chart's own, as its axis shows it — the feed's stamps,
+//  shown as UTC: Binance's UTC, MetaTrader's broker time. The candle that
+//  holds it goes to the middle at the zoom the chart has, under the crosshair.
+// ═══════════════════════════════════════════════════════════════
+function gotoValue(sec){ return new Date(sec * 1000).toISOString().slice(0, 16); }
+function gotoLabel(sec){ return gotoValue(sec).replace('T', ' '); }
+function gotoParse(value){
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value || '');
+  if(!m) return null;
+  const ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  return Number.isFinite(ms) ? ms / 1000 : null;
+}
+// What the chart shows: in a replay, only as far as the replay has come
+function gotoBars(){ return replay.active && replay.shown ? replay.shown : allBars; }
+
+function toggleGoto(open){
+  const box = document.getElementById('goto-box');
+  if(!box) return;
+  const willOpen = open === undefined ? !box.classList.contains('open') : open;
+  if(!willOpen){ closeGoto(); return; }
+  const r = document.getElementById('goto-btn').getBoundingClientRect();
+  box.style.left = r.left + 'px';
+  box.style.top  = (r.bottom + 4) + 'px';
+  const input = document.getElementById('goto-at');
+  const bars = gotoBars();
+  if(bars.length){                            // start from the middle of the view
+    let mid = bars.length - 1;
+    try{
+      const v = mainChart.timeScale().getVisibleLogicalRange();
+      if(v) mid = Math.round((v.from + v.to) / 2);
+    }catch{}
+    input.value = gotoValue(bars[Math.max(0, Math.min(bars.length - 1, mid))].time);
+  }
+  box.classList.add('open');
+  try{ input.focus(); }catch{}
+}
+function closeGoto(){
+  const box = document.getElementById('goto-box');
+  if(box) box.classList.remove('open');
+}
+function onGotoKey(e){
+  if(e.key === 'Enter'){ gotoSubmit(); e.preventDefault(); }
+  else if(e.key === 'Escape'){ closeGoto(); e.preventDefault(); }
+}
+function gotoSubmit(){
+  const t = gotoParse(document.getElementById('goto-at').value);
+  if(t == null){ flashStatus('Go to: that is not a date and a time'); return; }
+  closeGoto();
+  goToTime(t, {announce: true});
+}
+
+// The candle that holds *t* — the last one opening at or before it — and what
+// to say when the chart has none.
+function gotoTarget(bars, t){
+  const first = bars[0], last = bars[bars.length - 1];
+  if(t < first.time){
+    return {i: 0, why: `${gotoLabel(t)} is before the first candle on this chart (${gotoLabel(first.time)})`};
+  }
+  let lo = 0, hi = bars.length - 1;
+  while(lo < hi){
+    const mid = (lo + hi + 1) >> 1;
+    if(bars[mid].time <= t) lo = mid; else hi = mid - 1;
+  }
+  if(lo === bars.length - 1 && t >= last.time + Math.max(displayTfSec() || 0, 1)){
+    return {i: lo, why: replay.active
+      ? `the replay has not reached ${gotoLabel(t)}`
+      : `${gotoLabel(t)} is after the last candle on this chart (${gotoLabel(last.time)})`};
+  }
+  return {i: lo, why: null};
+}
+
+function goToTime(t, opts){
+  if(!mainChart || !mainSeries) return;
+  const bars = gotoBars();
+  if(!bars.length) return;
+  const {i, why} = gotoTarget(bars, t);
+  let half = 50;                               // the zoom the chart has
+  try{
+    const v = mainChart.timeScale().getVisibleLogicalRange();
+    if(v) half = Math.max(5, (v.to - v.from) / 2);
+  }catch{}
+  muteSync(400);                               // a jump, not a user scroll
+  try{ mainChart.timeScale().setVisibleLogicalRange({from: i - half, to: i + half}); }catch{}
+  const bar = bars[i];
+  try{ mainChart.setCrosshairPosition(bar.close, bar.time, mainSeries); }catch{}
+  redrawAll();
+  if(why) flashStatus(why);
+  if(opts && opts.announce) postToPage({t: 'navigate', time: t, keep: true});
+}
+
+document.addEventListener('keydown', e => {
+  if(snapshot) return;
+  if(e.altKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyG' || e.key === 'g' || e.key === 'G')){
+    toggleGoto(true); e.preventDefault();
+  }
+});
+window.addEventListener('resize', closeGoto);
+
+// ═══════════════════════════════════════════════════════════════
+//  TIME TO THE CANDLE'S CLOSE (v1.3.0)
+//  Counted on the feed's clock, which the server learns from the live candles
+//  and sends as {type:'clock', now}: a chart with no live feed shows none.
+//  The switch is kept in this browser and travels with the colours' relay.
+// ═══════════════════════════════════════════════════════════════
+const COUNTDOWN_KEY = 'atk.chart.countdown.v1';
+let countdownOn = true;
+let venueDelta = null;                         // the feed's clock minus this browser's (ms)
+
+function readCountdown(){
+  if(snapshot) return null;
+  try{
+    const v = window.localStorage.getItem(COUNTDOWN_KEY);
+    return v === null ? null : v === '1';
+  }catch{ return null; }
+}
+function loadCountdown(){
+  const v = readCountdown();
+  countdownOn = v === null ? true : v;
+  const el = document.getElementById('stog-countdown');
+  if(el) el.checked = countdownOn;
+}
+function onCountdownToggle(on){
+  countdownOn = !!on;
+  if(!snapshot){ try{ window.localStorage.setItem(COUNTDOWN_KEY, countdownOn ? '1' : '0'); }catch{} }
+  updateCountdown();
+  postToPage({t:'style'});
+}
+
+// 3:48 under an hour, 2:30:11 under a day, 2d 04:20:11 beyond
+function countdownText(ms){
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600);
+  const m = Math.floor(s % 3600 / 60), sec = s % 60;
+  const p2 = n => String(n).padStart(2, '0');
+  if(d) return `${d}d ${p2(h)}:${p2(m)}:${p2(sec)}`;
+  if(h) return `${h}:${p2(m)}:${p2(sec)}`;
+  return `${m}:${p2(sec)}`;
+}
+
+// What the tag says now — {text, bar} — or null when it shows nothing: switched
+// off, a picture, a replay, no feed clock, or the last candle long closed (the
+// market is shut). Between a close and the next candle's first update: 0:00.
+function countdownNow(){
+  if(!countdownOn || snapshot || replay.active || venueDelta == null) return null;
+  if(!mainSeries || !allBars.length) return null;
+  const tf = displayTfSec();
+  if(!tf) return null;
+  const bar = allBars[allBars.length - 1];
+  const left = (bar.time + tf) * 1000 - (Date.now() + venueDelta);
+  if(left < -60000 || left > tf * 1000 + 2000) return null;
+  return {text: countdownText(left), bar};
+}
+
+// Readable text on the tag's colour, as the price label picks it
+function tagInk(c){
+  const hex = rgbOf(c).slice(1);
+  const n = parseInt(hex, 16);
+  if(!Number.isFinite(n)) return '#ffffff';
+  const r = n >> 16 & 255, g = n >> 8 & 255, b = n & 255;
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 160 ? '#000000' : '#ffffff';
+}
+
+function updateCountdown(){
+  const tag = document.getElementById('cd-tag');
+  if(!tag) return;
+  const c = countdownNow();
+  let y = null, scaleW = 0, wr = null;
+  if(c && panes.main){
+    try{ y = mainSeries.priceToCoordinate(c.bar.close); }catch{}
+    try{ scaleW = mainChart.priceScale('right').width(); }catch{}
+    try{ wr = panes.main.paneWrap.getBoundingClientRect(); }catch{}
+  }
+  if(!c || y == null || !scaleW || !wr || y < 0 || y > wr.height){
+    tag.style.display = 'none';
+    return;
+  }
+  const h = axisFontSize + 5;
+  const colour = c.bar.close >= c.bar.open ? chartStyle.upColor : chartStyle.downColor;
+  tag.textContent = c.text;
+  tag.style.font = `${axisFontSize}px ${axisFont}`;
+  tag.style.background = colour;
+  tag.style.color = tagInk(colour);
+  tag.style.left = (wr.right - scaleW) + 'px';
+  tag.style.width = scaleW + 'px';
+  tag.style.top = (wr.top + y + h / 2) + 'px';
+  tag.style.height = h + 'px';
+  tag.style.lineHeight = h + 'px';
+  tag.style.display = 'block';
+}
 // It is placed by viewport coordinates, so a resize would leave it stranded
 window.addEventListener('resize', closeTfMenu);
 
@@ -3853,6 +4102,10 @@ function handleMsg(msg){
       // page had. The viewer's own choice stays on top of it.
       programStyle=fromProgram(msg.style);
       applyStyle(); syncStylePanel();
+      break;
+    case 'clock':
+      // v1.3.0: the feed's clock, fresh on every connection (the countdown's)
+      if(Number.isFinite(Number(msg.now))){ venueDelta = Number(msg.now) - Date.now(); updateCountdown(); }
       break;
     case 'access':
       // v1.3.0: what this page may change. It comes once, after the first init.
@@ -4134,7 +4387,8 @@ function applyAxisLabelSettings(){
 //  BOOT
 // ═══════════════════════════════════════════════════════════════
 window.addEventListener('resize',()=>{ resizeOverlays(); redrawAll(); });
-loadSavedStyle(); chartStyle=styleFor(theme);
+loadSavedStyle(); chartStyle=styleFor(theme); loadCountdown();
+setInterval(updateCountdown, 250);         // v1.3.0: the countdown ticks
 initMain(); resizeOverlays(); wsConnect(); setTool('cursor');
 // Only run the periodic redraw when there are visible drawings or a visible cloud
 // (keeps the chart smooth when no canvas work is needed)
