@@ -13,6 +13,7 @@ so the assertions are about what the code *does*.  Skipped when node is absent
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -2435,3 +2436,209 @@ def test_the_brand_opens_the_repository_in_a_new_tab_on_both_pages():
         assert tag == "a"
         assert attrs["href"] == "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
         assert attrs["target"] == "_blank" and "noopener" in attrs["rel"]
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Part 4c — time zones, the countdown's ink, the replay, running ends,
+# room after the last candle, the fib, the menu on the viewer's own drawings
+# ---------------------------------------------------------------------------
+
+#: 2026-10-30 22:45 as MetaTrader stamps it (EET): 20:45 UTC, 00:15 in Tehran.
+_STAMP = 1_793_400_300
+
+
+def test_the_programs_zones_label_the_times_and_only_then_are_formatters_applied():
+    result = _run(CHART_HTML, f"""
+const init = extra => ev('handleMsg')(Object.assign({{type: 'init', title: 'XAU',
+  bars: [{{time: {_STAMP}, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1}}],
+  indicators: [], drawings: [], timeframes: []}}, extra));
+init({{}});
+out.utc = [ev('zonesActive')(), ev('zoneTickLabel')({_STAMP}, 3)];
+const applied = () => ctx.__applied.flat()
+  .filter(o => o.timeScale && o.timeScale.tickMarkFormatter).length;
+out.formattersAtUtc = applied();
+init({{timezone: 'Asia/Tehran', sourceTimezone: 'Europe/Athens'}});
+out.zoned = [ev('zones'), ev('zoneTickLabel')({_STAMP}, 3), ev('zoneTimeLabel')({_STAMP}),
+             ev('gotoValue')({_STAMP}), ev('gotoParse')('2026-10-31T00:15')];
+out.formattersZoned = applied() > 0;
+out.note = document.getElementById('sz-source-note').textContent;
+ev('streamBar')({{time: {_STAMP}, open: 1, high: 2, low: 0.5, close: 1.6, volume: 2}});
+out.updated = document.getElementById('lupd').textContent;
+""", extra_globals=_RECORD_OPTIONS)
+    assert result["topLevelError"] is None
+    assert result["utc"] == [False, "22:45"]
+    assert result["formattersAtUtc"] == 0
+    zones, tick, cross, field, back = result["zoned"]
+    assert zones == {"source": "Europe/Athens", "display": "Asia/Tehran"}
+    assert (tick, cross, field, back) == ("00:15", "31 Oct '26 00:15", "2026-10-31T00:15", _STAMP)
+    assert result["formattersZoned"] is True
+    assert result["note"].startswith("Set by the program (Europe/Athens).")
+    assert re.fullmatch(r"⟳ \d\d:\d\d:\d\d", result["updated"])   # 24 h, the zone shown
+
+
+def test_a_viewers_zones_are_kept_and_travel_to_the_pages_other_charts():
+    result = _run(CHART_HTML, f"""
+ev('handleMsg')({{type: 'init', title: 'XAU', bars: [{{time: {_STAMP}, open: 1, high: 2,
+  low: 0.5, close: 1.5, volume: 1}}], indicators: [], drawings: [], timeframes: [],
+  sourceTimezone: 'Europe/Athens'}});
+document.getElementById('sz-source').value = 'Europe/Athens';
+document.getElementById('sz-display').value = 'Asia/Tehran';
+ctx.__toParent.length = 0;
+ev('onZoneChange')();
+out.stored = JSON.parse(ctx.__store['atk.chart.zones.v1']);
+out.relayed = ctx.__toParent.filter(m => m.t === 'style').length;
+out.clock = (ev('replay').active = true, ev('replay').cursor = {_STAMP}, ev('updateReplayUI')(),
+             document.getElementById('rp-clock').textContent);
+ctx.__store['atk.chart.zones.v1'] = JSON.stringify({{display: 'UTC'}});
+(docListeners.message || []).forEach(fn => fn({{source: ctx.window.parent, data: {{t: 'style'}}}}));
+out.afterRelay = ev('zones');
+""", extra_globals=_STORAGE + _EMBED_SYNC)
+    assert result["topLevelError"] is None
+    assert result["stored"] == {"display": "Asia/Tehran"}     # the source was the program's
+    assert result["relayed"] == 1
+    assert result["clock"] == "2026-10-31 00:15 Asia/Tehran"
+    assert result["afterRelay"] == {"source": "Europe/Athens", "display": "UTC"}
+
+
+def test_a_picture_reads_its_zones_from_its_address():
+    result = _run(CHART_HTML, f"""
+out.label = ev('snapParts')({_STAMP});
+""", extra_globals="ctx.location.search = '?snapshot=1&from=1&to=2&tz=Asia%2FTehran"
+                   "&stz=Europe%2FAthens';\n")
+    assert (result["label"]["hour"], result["label"]["minute"], result["label"]["day"]) == (
+        "00", "15", "31")
+
+
+def test_the_countdowns_ink_is_the_higher_contrast():
+    result = _run(CHART_HTML, """
+const ink = ev('tagInk');
+out.inks = ['#cca300', '#ffff00', '#d4a017', '#3fb950', '#1f6feb', '#f85149', '#0d1117']
+  .map(c => [c, ink(c)]);
+""")
+    assert dict(result["inks"]) == {"#cca300": "#000000", "#ffff00": "#000000",
+                                    "#d4a017": "#000000", "#3fb950": "#000000",
+                                    "#1f6feb": "#ffffff", "#f85149": "#000000",
+                                    "#0d1117": "#ffffff"}
+
+
+def test_the_chart_keeps_room_after_its_last_candle():
+    result = _run(CHART_HTML, "out.room = [ev('tOpts')().timeScale.rightOffset];")
+    assert result["room"] == [8]
+
+
+def test_in_a_replay_your_drawings_stay_and_an_open_trade_shows_its_planned_rr():
+    result = _edits("""
+init({drawings: [box({id: 'mine', time1: 3100, time2: 3700, source: 'user'}),
+                 {type: 'position_box', id: 'trade', open_time: 1300, close_time: 3400,
+                  entry_price: 90, stop_loss: 89, label: '✓ TP  +2.00R',
+                  planned_label: 'L  1:2.0R'}]});
+ev('replay').active = true; ev('replay').cursor = 2200;
+ev('replay').shown = ctx.__bars.slice(0, 5);
+const vis = Object.fromEntries(ev('replayVisibleDrawings')().map(d => [d.id, d]));
+out.mine = [vis.mine.time1, vis.mine.time2];
+out.trade = [vis.trade.close_time, vis.trade.label];
+""")
+    assert result["mine"] == [3100, 3700]                    # past the cursor, whole
+    assert result["trade"] == [2200, "L  1:2.0R"]            # cut, its plan, not its result
+
+
+def test_a_running_drawing_ends_five_candles_past_the_last_and_keeps_running():
+    result = _edits("""
+init({drawings: [box({editable: ['price'], time2: null})]});
+out.drawnTo = ev('liveEnded')(ev('drawings').zone).time2;   // 3700 + 5 × 300
+press(70, 100); dragTo(70, 80); release();                   // its top edge, up 2
+const d = ev('drawings').zone;
+out.after = [d.time2, d.price1];
+out.trade = ev('liveEnded')({type: 'position_box', open_time: 3000, close_time: null}).close_time;
+""")
+    assert result["drawnTo"] == 5200
+    assert result["after"] == [None, 92]                     # still running, moved
+    assert result["trade"] == 5200
+
+
+def test_a_running_box_stays_running_unless_its_end_is_dragged_and_is_never_trimmed():
+    result = _edits("""
+init({drawings: [box({id: 'run', time2: null, source: 'user'})]});
+press(40, 100); dragTo(40, 80); release();                   // its top edge: a price
+out.top = [ev('drawings').run.time2, ev('drawings').run.price1];
+press(40, 150); dragTo(30, 150); release();                  // inside: moved, still running
+out.moved = [ev('drawings').run.time1, ev('drawings').run.time2];
+out.kept = ev('drawingEndTime')(ev('drawings').run);
+press(140, 150); dragTo(80, 150); release();                 // its right edge (x 140): fixed
+out.ended = ev('drawings').run.time2;
+""")
+    assert result["topLevelError"] is None
+    assert result["top"] == [None, 92]
+    assert result["moved"] == [1300, None]                   # 10 px left = 300 s earlier
+    assert result["kept"] is None
+    assert result["ended"] == 3400                           # x 80
+
+
+def test_a_fib_resizes_from_its_other_corners_and_takes_its_own_levels():
+    result = _edits("""
+init({drawings: [{type: 'fib', id: 'f', time1: 1600, price1: 90, time2: 2800, price2: 80,
+                  color: '#9c27b0', levels: [0, 0.5, 1], source: 'user', locked: false}]});
+out.corner = ev('hitTest(60, 100)');                 // (time2, price1): the 3rd corner
+press(60, 100); dragTo(70, 90); release();
+const f = ev('drawings').f;
+out.afterCorner = [f.time2, f.price1, f.time1, f.price2];
+ctx.prompt = () => '0, 50, 100, 200';
+rightClick('draw-cv', 45, 150);
+out.levelsShown = shown('ctx-levels-row');
+ev('ctxFibLevels')();
+out.levels = ev('drawings').f.levels;
+out.sent = lastSent('drawing_updated').drawing.levels;
+ev('onFibLevelsChange')('0, 61.8, 100');
+out.defaults = [ev('fibLevels'), ctx.__store['atk.chart.fib.v1']];
+out.parsed = [ev('parseFibLevels')('0 50 100 200'), ev('parseFibLevels')('a, 50')];
+""", extra_globals=_STORAGE)
+    assert result["corner"] == {"id": "f", "handle": "c3"}
+    assert result["afterCorner"] == [3100, 91, 1600, 80]     # 10 px up = 1.0
+    assert result["levelsShown"] == ""
+    assert result["levels"] == [0, 0.5, 1, 2] and result["sent"] == [0, 0.5, 1, 2]
+    assert result["defaults"] == [[0, 0.618, 1], "0, 61.8, 100"]
+    assert result["parsed"] == [[0, 0.5, 1, 2], None]
+
+
+def test_the_programs_items_show_on_your_drawings_only_and_send_the_drawing():
+    result = _edits("""
+init({drawingActions: ['Make it a buy POI', 'Make it a sell POI'],
+      drawings: [box({id: 'mine', source: 'user'}),
+                 box({id: 'theirs', time1: 2500, time2: 3700, price1: 70, price2: 60})]});
+const rows = () => document.getElementById('ctx-dactions').children
+  .filter(c => c.className === 'mi').map(c => c.textContent);
+rightClick('draw-cv', 40, 150);                       // mine
+out.mine = rows();
+document.getElementById('ctx-dactions').children.filter(c => c.className === 'mi')[0].onclick();
+const sent = lastSent('drawing_action');
+out.sent = [sent.label, sent.drawing.id];
+rightClick('draw-cv', 70, 350);                       // theirs (x 50–90, y 300–400)
+out.theirs = rows();
+ev('canEdit = false');
+rightClick('draw-cv', 40, 150);
+out.viewer = rows();
+""")
+    assert result["mine"] == ["Make it a buy POI", "Make it a sell POI"]
+    assert result["sent"] == ["Make it a buy POI", "mine"]
+    assert result["theirs"] == []
+    assert result["viewer"] == []
+
+
+def test_the_pages_replay_clock_reads_the_zones_of_the_chart_in_use():
+    result = _run(PAGE_HTML, _SETTLE + f"""
+ev('replayToggle()');
+['v1', 'v2', 'v3'].forEach(id => fromFrame(id, {{t: 'replay-info', first: {_STAMP - 3600},
+                                                 last: {_STAMP + 3600}, step: 300, tf: 300}}));
+fromFrame('v1', {{t: 'replay-pick', time: {_STAMP}}});
+out.utc = document.getElementById('rp-clock').textContent;
+fromFrame('v2', {{t: 'zones', source: 'Europe/Athens', display: 'Asia/Tehran'}});
+fromFrame('v1', {{t: 'zones', source: 'UTC', display: 'UTC'}});
+fromFrame('v1', {{t: 'focus'}});
+out.v1 = document.getElementById('rp-clock').textContent;
+fromFrame('v2', {{t: 'focus'}});
+out.v2 = document.getElementById('rp-clock').textContent;
+""", extra_globals=_LAYOUT)
+    assert result["topLevelError"] is None
+    assert result["utc"] == "2026-10-30 22:45 UTC"
+    assert result["v1"] == "2026-10-30 22:45 UTC"
+    assert result["v2"] == "2026-10-31 00:15 Asia/Tehran"
