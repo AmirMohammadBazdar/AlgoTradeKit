@@ -39,6 +39,7 @@ import json
 import threading
 import time
 import warnings
+from collections import deque
 from pathlib import Path
 from typing import Literal
 
@@ -67,6 +68,16 @@ from .models import (
     VerticalLine,
 )
 from .server import ChartServer
+
+#: The feed's clock (v1.3.0): how many of the newest samples it keeps, and how far it
+#: may move before the open pages are told again.
+_CLOCK_SAMPLES = 10
+_CLOCK_RESEND_MS = 250
+
+
+def _now_ms() -> int:
+    """This machine's clock, in UTC milliseconds."""
+    return int(time.time() * 1000)
 
 # Sentinel for "argument not passed" where None is a meaningful value
 # (e.g. update_live_position(next_tp=None) clears the TP line).
@@ -193,7 +204,18 @@ class Chart:
         self._edit_key = edit_key
         self._server = ChartServer(title=title, port=port, host=host, edit_key=edit_key)
         self._server.on_message = self._handle_browser_message
+        self._server.clock = self._clock_message
         self._shown = False
+
+        # ── The feed's clock (v1.3.0): what the page's countdown counts on ──
+        # Learned from the live candles themselves (``_learn_clock``), so it is the
+        # clock the candles are stamped in — UTC on Binance, the broker's on MT5.
+        self._clock_seen: int | None = None        # the newest streamed opening (s)
+        self._clock_updates = 0                     # updates of that candle seen
+        self._clock_pending: tuple[int, int] | None = None   # (opening, sample)
+        self._clock_samples: deque = deque(maxlen=_CLOCK_SAMPLES)
+        self._clock_offset_ms: int | None = None   # the feed's clock minus ours
+        self._clock_sent_ms: int | None = None     # the offset the pages last heard
 
         # ── Edits from the page (v1.3.0) ──────────────────────────────────
         self._edit_callbacks:   list = []
@@ -341,6 +363,9 @@ class Chart:
         # column names match what the user expects (e.g. 'timestamp' intact).
         self.df      = df.copy()
         self._raw_df = df.copy()
+        # A new data set: the feed's clock is learned again from its live candles
+        # (the samples already learned stay — it is the same feed's clock).
+        self._clock_seen, self._clock_updates, self._clock_pending = None, 0, None
 
         if chart_type is not None:
             self.chart_type = chart_type
@@ -1449,6 +1474,7 @@ class Chart:
 
         bar = {k.lower(): v for k, v in bar.items()}
         bar.setdefault("volume", 0.0)
+        self._learn_clock(int(bar["time"]))
 
         # Timeframe conversion (v1.1.0): a streamed bar is a *source* bar.
         # Fold it into the source frame and hand the browser the display
@@ -1485,6 +1511,51 @@ class Chart:
             self._refresh_init_cache()
 
         return self
+
+    def _learn_clock(self, opening: int) -> None:
+        """The feed's clock (v1.3.0), from a streamed candle opening at *opening*
+        (Unix seconds).
+
+        When a new candle's first update comes, the feed's clock reads about its
+        opening: that is a sample, late by the update's delivery.  It counts only
+        if the candle before it was watched forming (two updates or more) — the
+        first candle after a subscription may be half over, or replayed — and
+        once a second update of the new candle proves it was forming too: a feed
+        of closed candles teaches nothing.  The best of the newest samples wins.
+        """
+        now = _now_ms()
+        seen = self._clock_seen
+        if seen is None:
+            self._clock_seen, self._clock_updates = opening, 1
+            return
+        if opening < seen:
+            return
+        if opening == seen:
+            self._clock_updates += 1
+            pending = self._clock_pending
+            if self._clock_updates == 2 and pending is not None and pending[0] == opening:
+                self._clock_pending = None
+                self._clock_samples.append(pending[1])
+                self._clock_learned(max(self._clock_samples))
+            return
+        watched = self._clock_updates >= 2
+        self._clock_seen, self._clock_updates = opening, 1
+        self._clock_pending = (opening, opening * 1000 - now) if watched else None
+
+    def _clock_learned(self, offset: int) -> None:
+        self._clock_offset_ms = offset
+        sent = self._clock_sent_ms
+        if sent is None or abs(offset - sent) > _CLOCK_RESEND_MS:
+            self._clock_sent_ms = offset
+            if self._shown:
+                self._server.send(self._clock_message())
+
+    def _clock_message(self) -> dict | None:
+        """The feed's clock now, for a page's countdown (v1.3.0) — fresh each time
+        it is asked for; ``None`` until a live feed has taught it."""
+        if self._clock_offset_ms is None:
+            return None
+        return {"type": "clock", "now": _now_ms() + self._clock_offset_ms}
 
     def stream_from_atk(self, candle: dict) -> Chart:
         """
