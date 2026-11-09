@@ -191,6 +191,8 @@ class LiveSimulation:
         here, when the simulation is created, not after the seed.
     chart_edit_key : str | None
         The chart's ``edit_key`` (v1.3.0): only a page with the key may change it.
+    chart_timezone, chart_source_timezone : str | None
+        The chart's ``timezone`` and ``source_timezone`` (v1.3.0).
 
     Threading
     ---------
@@ -219,6 +221,8 @@ class LiveSimulation:
         on_report: Callable[[SimulateReport], None] | None = None,
         chart_style: dict | None = None,
         chart_edit_key: str | None = None,
+        chart_timezone: str | None = None,
+        chart_source_timezone: str | None = None,
     ) -> None:
         if (display_candles is None) == (display_start is None):
             raise ValueError(
@@ -284,6 +288,8 @@ class LiveSimulation:
         self._on_report = on_report
         self._chart_style = chart_style
         self._chart_edit_key = chart_edit_key
+        self._chart_timezone = chart_timezone
+        self._chart_source_timezone = chart_source_timezone
 
         # Rolling window: candles kept in a bounded deque; the strategy
         # frame keeps enough extra tail for the recompute/warmup maths.
@@ -730,6 +736,8 @@ class LiveSimulation:
             candle_count_limit=self._candle_count_limit,
             style=self._chart_style,
             edit_key=self._chart_edit_key,
+            timezone=self._chart_timezone,
+            source_timezone=self._chart_source_timezone,
         )
         # The recipe the pictures of trade messages use too (v1.2.0). Indicators
         # are a seed-time computation, as on the batch chart (not recomputed per
