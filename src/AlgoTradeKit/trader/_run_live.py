@@ -567,6 +567,7 @@ class _PaperView(PairView):
         self.chart_indicators = tuple(dict(spec) for spec in config.chart_indicators)
         self.picture_config = config
         self.chart_style = config.chart_style
+        self.chart_source_timezone = config.chart_source_timezone   # v1.3.0: the pictures
         self.warmup_candles = max(200, int(session.pair.strategy.warmup_period or 0))
 
     @property
@@ -687,6 +688,8 @@ def _attach_sim(session: _PaperSession, initial_balance: float) -> None:
         on_report=session.on_report,
         chart_style=config.chart_style,
         chart_edit_key=config.chart_edit_key,
+        chart_timezone=config.chart_timezone,
+        chart_source_timezone=config.chart_source_timezone,
     )
     bridge.bind(sim)
     session.sim = sim
@@ -701,13 +704,13 @@ def _wire_chart_edits(session: _PaperSession, stop: _StopFlag) -> None:
                          clock=lambda: sim._last_ts)
     chart = sim.chart
     if chart is not None:
-        bridge.wire(chart, strategy.chart_actions)
+        bridge.wire(chart, strategy.chart_actions, strategy.chart_drawing_actions)
         strategy._draw_hook = chart_drawer(chart)
         _offer_rerun(chart, config, stop)
     else:
         strategy._draw_hook = drop_drawing
-    for watched, actions in list(strategy.__dict__.get("_atk_watched", ())):
-        bridge.wire(watched, actions)
+    for watched, actions, drawing_actions in list(strategy.__dict__.get("_atk_watched", ())):
+        bridge.wire(watched, actions, drawing_actions)
     strategy._watch_hook = bridge.wire
     session.chart_bridge = bridge
 
