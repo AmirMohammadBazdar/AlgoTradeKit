@@ -179,7 +179,7 @@ class TrendLine:
     """A line segment between two price/time points."""
     time1:      int
     price1:     float
-    time2:      int
+    time2:      int | None         # None: runs to the live edge (v1.3.0)
     price2:     float
     color:      str  = "#2196f3"
     line_width: int  = 1
@@ -215,7 +215,7 @@ class Box:
     """A filled rectangle between two price/time corners."""
     time1:        int
     price1:       float
-    time2:        int
+    time2:        int | None          # None: runs to the live edge (v1.3.0)
     price2:       float
     color:        str   = "#26a69a"
     opacity:      float = 0.2
@@ -416,7 +416,7 @@ class PositionBox:
     """
 
     open_time:        int           # Unix seconds
-    close_time:       int           # Unix seconds
+    close_time:       int | None    # Unix seconds; None: the live edge (v1.3.0)
     entry_price:      float
     stop_loss:        float
     take_profit:      float | None
@@ -434,6 +434,9 @@ class PositionBox:
     editable:         bool | tuple = True
     deletable:        bool = True
     title:            str | None = None
+    #: The TP the trade was opened with (v1.3.0): a replay shows the RR it gives,
+    #: «L  1:2.0R», on a trade still open at its cursor, never its result.
+    planned_tp:       float | None = None
 
     def to_dict(self) -> dict:
         sl_dist = abs(self.entry_price - self.stop_loss)
@@ -496,12 +499,19 @@ class PositionBox:
             "trade_id":      self.trade_id,
             "rr_ratio":      self.rr_ratio,
             "label":         label,
+            "planned_label": self._planned_label(sl_dist, visual_tp),
             "opacity":       self.opacity,
             "id":            self.id,
             "locked":        self.locked,
             "source":        "server",
             **_edit_fields(self),
         }
+
+    def _planned_label(self, sl_dist: float, visual_tp: float) -> str:
+        """«L  1:2.0R»: the RR of the TP the trade was opened with (v1.3.0)."""
+        tp = self.planned_tp if self.planned_tp is not None else visual_tp
+        rr = abs(tp - self.entry_price) / sl_dist if sl_dist > 0 else 0.0
+        return f"{self.direction[0].upper()}  1:{rr:.1f}R"
 
 
 @dataclass
