@@ -1533,7 +1533,8 @@ class _Adapter:
             first = max(int(stamps.iloc[0]), opened - lead)
             last = max(first, min(last, int(slices[-1].close_time)))
         chart = Chart(title=view.symbol, source_timeframe=view.timeframe or None,
-                      style=getattr(view, "chart_style", None))
+                      style=getattr(view, "chart_style", None),
+                      source_timezone=getattr(view, "chart_source_timezone", None))
         populate_chart(chart, frame, indicators=view.chart_indicators, drawings=view.drawings,
                        trade_markers=markers, open_positions=positions,
                        config=view.picture_config)
