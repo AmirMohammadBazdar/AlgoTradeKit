@@ -172,9 +172,15 @@ class Chart:
         timeframes:         list[str] | None = None,
         style:              dict | None = None,
         edit_key:           str | None = None,
+        timezone:           str | None = None,
+        source_timezone:    str | None = None,
     ) -> None:
         if edit_key is not None and (not isinstance(edit_key, str) or not edit_key):
             raise ValueError(f"edit_key: {edit_key!r} is not a non-empty string")
+        # v1.3.0: the zone times are shown in, and the zone the candles are stamped
+        # in (the chart cannot tell: UTC on Binance, the broker's on MetaTrader).
+        self._timezone = _check_zone(timezone, "timezone")
+        self._source_timezone = _check_zone(source_timezone, "source_timezone")
         self.title          = title
         self.chart_type     = chart_type
         self.theme          = theme
@@ -221,6 +227,7 @@ class Chart:
         self._edit_callbacks:   list = []
         self._delete_callbacks: list = []
         self._actions: dict = {}                 # label → fn, in the menu's order
+        self._drawing_actions: dict = {}         # label → fn: a viewer's drawing's menu
         self._buttons: dict = {}                 # label → (fn, confirm), the toolbar's
         self._events = ChartEvents()             # its thread starts with the first job
         self._unheard_said = False               # «nothing told», once per chart
@@ -1094,7 +1101,7 @@ class Chart:
         self,
         time1:      int,
         price1:     float,
-        time2:      int,
+        time2:      int | None,
         price2:     float,
         color:      str  = "#2196f3",
         line_width: int  = 1,
@@ -1118,7 +1125,7 @@ class Chart:
         self,
         time1:        int,
         price1:       float,
-        time2:        int,
+        time2:        int | None,
         price2:       float,
         color:        str   = "#26a69a",
         opacity:      float = 0.2,
@@ -1132,6 +1139,9 @@ class Chart:
     ) -> Chart:
         """
         A filled rectangle between two corners (times in Unix seconds).
+        ``time2=None`` (v1.3.0): the box runs to the live edge — five candles past
+        the last one, moving with each candle — until it is given an end
+        (:meth:`update_drawing`).  ``add_trendline`` takes it too.
 
         v1.3.0 — ``key``: the program's own name for the box, which makes it report
         the user's edits (:meth:`on_drawing_edit`, :meth:`on_drawing_delete`);
@@ -1246,7 +1256,7 @@ class Chart:
     def add_position_box(
         self,
         open_time:    int,
-        close_time:   int,
+        close_time:   int | None,
         entry_price:  float,
         stop_loss:    float,
         take_profit:  float | None,
@@ -1256,6 +1266,7 @@ class Chart:
         trade_id:     int  = -1,
         rr_ratio:     float = 0.0,
         opacity:      float = 0.15,
+        planned_tp:   float | None = None,
     ) -> Chart:
         """
         Add a TradingView-style position box for one simulated trade.
@@ -1267,7 +1278,8 @@ class Chart:
         Parameters
         ----------
         open_time  : Entry candle time in Unix seconds.
-        close_time : Exit candle time in Unix seconds.
+        close_time : Exit candle time in Unix seconds; ``None`` (v1.3.0) runs to the
+                     live edge, five candles past the last one.
         entry_price: Actual fill price.
         stop_loss  : Initial stop-loss price.
         take_profit: Take-profit price or ``None`` (draws 2R placeholder).
@@ -1277,6 +1289,8 @@ class Chart:
         trade_id   : Sequential trade ID from the simulation.
         rr_ratio   : Actual R multiple of the trade.
         opacity    : Box fill opacity (default 0.15).
+        planned_tp : The TP the trade was opened with (v1.3.0): a replay shows its RR,
+                     «L  1:2.0R», on the trade while it is open at the cursor.
         """
         d = PositionBox(
             open_time=open_time,
@@ -1290,6 +1304,7 @@ class Chart:
             trade_id=trade_id,
             rr_ratio=rr_ratio,
             opacity=opacity,
+            planned_tp=planned_tp,
         )
         self._add_drawing(d)
         return self
@@ -1744,6 +1759,53 @@ class Chart:
             self._server.send({"type": "actions", "actions": list(self._actions)})
             self._refresh_init_cache()
 
+    def add_drawing_action(self, label: str, fn) -> Chart:
+        """
+        Put *label* in the right-click menu of every drawing **the viewer drew** on
+        the page (v1.3.0) — a box, a line, a fib.  Picking it calls ``fn(action)``
+        on the chart's thread with a :class:`ChartAction` whose ``drawing`` is that
+        drawing's dict and whose ``time`` is its left edge (UTC ms).  Only a page
+        that may change the chart has the menu.  Labels are unique per chart.
+        """
+        if not isinstance(label, str) or not label:
+            raise ValueError(f"drawing action label {label!r} is not a non-empty string")
+        if not callable(fn):
+            raise TypeError(f"add_drawing_action takes a function, got {type(fn).__name__}")
+        if label in self._drawing_actions:
+            raise ValueError(f"drawing action {label!r} is already on this chart")
+        self._drawing_actions[label] = fn
+        self._send_drawing_actions()
+        return self
+
+    def remove_drawing_action(self, label: str) -> Chart:
+        """Take *label* out of the drawings' menu."""
+        if label not in self._drawing_actions:
+            raise ValueError(f"no drawing action {label!r} on this chart")
+        del self._drawing_actions[label]
+        self._send_drawing_actions()
+        return self
+
+    @property
+    def drawing_actions(self) -> list[str]:
+        """The labels of the menu on a viewer's own drawings, in its order."""
+        return list(self._drawing_actions)
+
+    def _send_drawing_actions(self) -> None:
+        if self._shown:
+            self._server.send({"type": "drawing_actions",
+                               "actions": list(self._drawing_actions)})
+            self._refresh_init_cache()
+
+    @property
+    def timezone(self) -> str | None:
+        """The zone the page shows times in, as the program set it (v1.3.0)."""
+        return self._timezone
+
+    @property
+    def source_timezone(self) -> str | None:
+        """The zone the candles are stamped in, as the program set it (v1.3.0)."""
+        return self._source_timezone
+
     def add_button(self, label: str, fn, *, confirm: str | None = None) -> Chart:
         """
         A button in the chart's toolbar (v1.3.0), shown to a page that may change
@@ -1904,6 +1966,29 @@ class Chart:
 
         self._events.put(run)
 
+    def _queue_drawing_action(self, msg: dict) -> None:
+        """A label picked in the menu of a drawing the viewer drew (v1.3.0)."""
+        label = msg.get("label")
+        fn = self._drawing_actions.get(label) if isinstance(label, str) else None
+        drawing = msg.get("drawing")
+        if fn is None or not isinstance(drawing, dict):
+            return
+        drawing = dict(drawing)
+        left = drawing.get("time1", drawing.get("open_time", drawing.get("time")))
+        if not isinstance(left, (int, float)) or isinstance(left, bool):
+            return
+        action = ChartAction(chart=self, label=label, time=int(left) * 1000, price=None,
+                             drawing=drawing)
+
+        def run() -> None:
+            try:
+                fn(action)
+            except Exception as exc:
+                print(f"[AlgoTradeKit] chart: drawing action {label!r} failed — "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+
+        self._events.put(run)
+
     # -----------------------------------------------------------------------
     # Rolling candle window (v1.0.0)
     # -----------------------------------------------------------------------
@@ -1975,6 +2060,11 @@ class Chart:
         payload = drawing.to_dict() if hasattr(drawing, "to_dict") else dict(drawing)
         if payload.get("type") == "live_position":
             return None
+        # v1.3.0: a drawing whose end is the live edge runs to "now" too
+        if payload.get("type") == "position_box" and payload.get("close_time") is None:
+            return None
+        if "time2" in payload and payload.get("time2") is None:
+            return None
         if payload.get("close_time") is not None:
             return payload["close_time"]
         t1, t2 = payload.get("time1"), payload.get("time2")
@@ -1993,7 +2083,7 @@ class Chart:
     #: program's drawings, pick an action, or change what every viewer sees.
     _EDITOR_ONLY = frozenset({
         "drawing_updated", "drawing_deleted", "drawing_lock_changed", "chart_action",
-        "set_timeframe", "compute_indicator", "remove_indicator", "button",
+        "set_timeframe", "compute_indicator", "remove_indicator", "button", "drawing_action",
     })
 
     def _handle_browser_message(self, msg: dict) -> None:
@@ -2025,6 +2115,9 @@ class Chart:
 
         elif msg_type == "chart_action":
             self._queue_action(msg)
+
+        elif msg_type == "drawing_action":
+            self._queue_drawing_action(msg)
 
         elif msg_type == "button":
             self._queue_button(msg)
@@ -2495,19 +2588,25 @@ class Chart:
         if not self._bars:
             raise ValueError("the chart has no candles to photograph")
         zone_name, zone = _snapshot_zone(timezone)
+        source = self._source_timezone              # v1.3.0: the stamps' own zone
         first = self._bars[0]["time"] if start is None else self._parse_range_time(start)
         last = self._bars[-1]["time"] if end is None else self._parse_range_time(end)
         inside = [bar["time"] for bar in self._bars if first <= bar["time"] <= last]
         if not inside:
             raise ValueError(
-                f"no candle between {_span_moment(first, zone)} and {_span_moment(last, zone)}"
+                f"no candle between {_span_moment(first, zone, source)} and "
+                f"{_span_moment(last, zone, source)}"
             )
         tf = self._display_tf or self._source_tf
         title = " · ".join(
-            part for part in (self.title, tf, _span_text(inside[0], inside[-1], zone)) if part
+            part for part in (self.title, tf, _span_text(inside[0], inside[-1], zone, source))
+            if part
         )
-        return urlencode({"snapshot": 1, "from": inside[0], "to": inside[-1],
-                          "tz": zone_name, "title": title})
+        query = {"snapshot": 1, "from": inside[0], "to": inside[-1], "tz": zone_name,
+                 "title": title}
+        if source and source != "UTC":
+            query["stz"] = source
+        return urlencode(query)
 
     # -----------------------------------------------------------------------
     # Pictures (v1.2.0)
@@ -2591,7 +2690,10 @@ class Chart:
             "displayTimeframe": self._display_tf,
             "timeframes":       list(self._timeframes),
             "actions":          list(self._actions),
+            "drawingActions":   list(self._drawing_actions),
             "buttons":          self._button_list(),
+            "timezone":         self._timezone,
+            "sourceTimezone":   self._source_timezone,
             "bars":             self._bars,
             "indicators":       [i.to_dict() for i in self._indicators],
             "drawings":         [d.to_dict() for d in self._drawings],
@@ -2686,10 +2788,35 @@ def _snapshot_zone(timezone) -> tuple[str, object | None]:
     )
 
 
-def _local(seconds: int, zone):
+def _local(seconds: int, zone, source: str | None = None):
+    """A candle stamp as a moment in *zone*.  A stamp is its *source* zone's wall
+    clock written as UTC (v1.3.0); without a source it is UTC itself."""
     import datetime as _dt
 
+    if source and source != "UTC":
+        from zoneinfo import ZoneInfo
+
+        wall = _dt.datetime.fromtimestamp(int(seconds), tz=_dt.timezone.utc).replace(tzinfo=None)
+        return wall.replace(tzinfo=ZoneInfo(source)).astimezone(zone or _dt.timezone.utc)
     return _dt.datetime.fromtimestamp(int(seconds), tz=zone or _dt.timezone.utc)
+
+
+def _check_zone(name, what: str) -> str | None:
+    """An IANA zone name, checked (v1.3.0); ``None`` stays ``None``."""
+    if name is None:
+        return None
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"{what}: {name!r} is not a time zone name such as 'Asia/Tehran'")
+    name = name.strip()
+    if name.upper() == "UTC":
+        return "UTC"
+    from zoneinfo import ZoneInfo
+
+    try:
+        ZoneInfo(name)
+    except Exception:
+        raise ValueError(f"{what}: unknown time zone {name!r}") from None
+    return name
 
 
 def _zone_label(moment, zone) -> str:
@@ -2701,13 +2828,13 @@ def _zone_label(moment, zone) -> str:
     return f"(UTC{sign}{abs(offset) // 60:02d}:{abs(offset) % 60:02d})"
 
 
-def _span_moment(seconds: int, zone) -> str:
-    moment = _local(seconds, zone)
+def _span_moment(seconds: int, zone, source: str | None = None) -> str:
+    moment = _local(seconds, zone, source)
     return f"{moment:%Y-%m-%d %H:%M} {_zone_label(moment, zone)}"
 
 
-def _span_text(first: int, last: int, zone) -> str:
+def _span_text(first: int, last: int, zone, source: str | None = None) -> str:
     """«2026-10-14 08:00 – 14:00 UTC»; a span over two dates writes both."""
-    start, end = _local(first, zone), _local(last, zone)
+    start, end = _local(first, zone, source), _local(last, zone, source)
     tail = f"{end:%H:%M}" if start.date() == end.date() else f"{end:%Y-%m-%d %H:%M}"
     return f"{start:%Y-%m-%d %H:%M} – {tail} {_zone_label(start, zone)}"
