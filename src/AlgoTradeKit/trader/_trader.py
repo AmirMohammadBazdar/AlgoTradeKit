@@ -730,9 +730,10 @@ class _PairWorker:
                              followers=followers, draw_hook=self._draw_target,
                              clock=lambda: self._last_committed_ts or None)
         if chart is not None:
-            bridge.wire(chart, self.strategy.chart_actions)
-        for watched, actions in list(self.strategy.__dict__.get("_atk_watched", ())):
-            bridge.wire(watched, actions)
+            bridge.wire(chart, self.strategy.chart_actions, self.strategy.chart_drawing_actions)
+        for watched, actions, drawing_actions in list(
+                self.strategy.__dict__.get("_atk_watched", ())):
+            bridge.wire(watched, actions, drawing_actions)
         self.strategy._watch_hook = bridge.wire
         self.chart_bridge = bridge
 
@@ -1220,6 +1221,7 @@ class _LiveView(PairView):
         self.chart_indicators = tuple(dict(spec) for spec in worker.config.chart_indicators)
         self.picture_config = worker.config
         self.chart_style = worker.config.chart_style
+        self.chart_source_timezone = worker.config.chart_source_timezone   # v1.3.0
         self.warmup_candles = max(200, int(worker.strategy.warmup_period or 0))
 
     @property
