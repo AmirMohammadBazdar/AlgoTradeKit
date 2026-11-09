@@ -153,6 +153,11 @@ class BaseStrategy(ABC):
     #: (v1.3.0): picking one calls :meth:`on_chart_action`.
     chart_actions: tuple[str, ...] = ()
 
+    #: The labels of the menu on a drawing **the viewer drew** on a live session's
+    #: chart (v1.3.0): picking one calls :meth:`on_chart_action` with the drawing's
+    #: dict as ``action.drawing`` — «Make it a zone» from a box the viewer drew.
+    chart_drawing_actions: tuple[str, ...] = ()
+
     #: What the user changed on the chart in earlier runs (v1.3.0): the records of
     #: ``TraderConfig.chart_edits_path``, set by a live session before ``setup()``
     #: so the strategy can apply them as each object appears.  An ``"edit"`` record
@@ -369,25 +374,31 @@ class BaseStrategy(ABC):
         as :meth:`on_chart_edit` is; it is saved too.
         """
 
-    def watch_chart(self, chart, actions=()) -> None:
+    def watch_chart(self, chart, actions=(), drawing_actions=()) -> None:
         """
         Route a chart of the strategy's own — one it builds and draws on itself —
         to :meth:`on_chart_edit` and :meth:`on_chart_action` as well, with *actions*
-        in its candle menu (v1.3.0).  Called before the live session exists, it is
+        in its candle menu and *drawing_actions* in the menu of a drawing the viewer
+        drew on it (v1.3.0).  Called before the live session exists, it is
         remembered and wired when the session starts; during one, at once.  A second
         call for the same chart adds its actions.
         """
-        actions = tuple(actions)
+        actions, drawing_actions = tuple(actions), tuple(drawing_actions)
         watched = self.__dict__.setdefault("_atk_watched", [])
-        for i, (known, labels) in enumerate(watched):
+        for i, (known, labels, on_drawings) in enumerate(watched):
             if known is chart:
-                watched[i] = (chart, labels + tuple(a for a in actions if a not in labels))
+                watched[i] = (chart, labels + tuple(a for a in actions if a not in labels),
+                              on_drawings + tuple(a for a in drawing_actions
+                                                  if a not in on_drawings))
                 break
         else:
-            watched.append((chart, actions))
+            watched.append((chart, actions, drawing_actions))
         hook = self._watch_hook
         if hook is not None:
-            hook(chart, actions)
+            if drawing_actions:
+                hook(chart, actions, drawing_actions)
+            else:
+                hook(chart, actions)
 
     def draw(self, drawing: dict) -> None:
         """
@@ -400,8 +411,11 @@ class BaseStrategy(ABC):
 
         A ``key`` — the object's own name — makes it the user's to change, and
         :meth:`on_chart_edit` hears what they do; drawing again with the same key
-        replaces it.  In a backtest, and in a live session's seed, the drawings are
-        collected and :meth:`run` returns them in ``StrategyResult.drawings``.  In
+        replaces it.  ``"time2": None`` (a box, a line, a fib) runs it to the live
+        edge, five candles past the last candle (v1.3.0): a zone still in play.
+        Draw it again with its end once it has one.  In a backtest, and in a live
+        session's seed, the drawings are collected and :meth:`run` returns them in
+        ``StrategyResult.drawings``.  In
         ``run_live`` and a ``Trader``'s display, after the seed, each goes on the
         session's chart at once.  Without a chart it does nothing.
         """
