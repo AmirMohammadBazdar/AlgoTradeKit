@@ -46,13 +46,16 @@ class ChartAction:
 
     ``time`` is the opening of the candle under the pointer, in UTC milliseconds
     (to the right of the last candle, the opening of a candle not there yet), and
-    ``price`` the pointer's price.
+    ``price`` the pointer's price.  An action picked on a drawing the viewer drew
+    (``Chart.add_drawing_action``) carries that drawing's dict as ``drawing``, and
+    its left edge as ``time``; ``None`` otherwise.
     """
 
     chart: Any
     label: str
     time: int
     price: float | None
+    drawing: dict | None = None
 
 
 class EditRefused(Exception):
