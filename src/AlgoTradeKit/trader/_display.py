@@ -629,6 +629,8 @@ class _DisplayBridge:
             open_browser=config.display_open_browser,
             chart_style=config.chart_style,
             chart_edit_key=config.chart_edit_key,
+            chart_timezone=config.chart_timezone,
+            chart_source_timezone=config.chart_source_timezone,
             # No on_event/on_report: the [LIVE] terminal stream is the
             # trader's voice — a parallel [SIM] log would be noise.
         )
@@ -730,6 +732,8 @@ class _DisplayBridge:
             candle_count_limit=config.candle_count_limit,
             style=config.chart_style,
             edit_key=config.chart_edit_key,
+            timezone=config.chart_timezone,
+            source_timezone=config.chart_source_timezone,
         )
         chart.set_data(df)
         chart.show(open_browser=config.display_open_browser, block=False)
