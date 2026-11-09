@@ -31,6 +31,11 @@ What to try
 5. Right-click it → `Delete`: the page asks first, and this terminal prints it.
 6. Right-click a candle, away from any drawing → `Mark here`: a vertical line
    appears on that candle.
+7. `GO TO` in the toolbar (or `Alt+G`) → a date and a time, as the chart's time
+   axis shows it → `Go`: the candle that holds that time comes to the middle, at
+   the zoom you had, under the crosshair (v1.3.0). A time outside the data goes
+   to the first or the last candle and the status bar says so.
+8. `⬡ AlgoTradeKit` at the top left opens the project's page in a new tab.
 """
 from __future__ import annotations
 
