@@ -2224,3 +2224,214 @@ def test_a_view_address_without_its_view_opens_the_page():
     assert keyed["to"] == "/?key=s%203"
     assert bare["to"] == "/"
     assert framed["to"] is None and alone["to"] is None
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Part 4b — go to a date and time, the brand, the countdown
+# ---------------------------------------------------------------------------
+
+#: 200 five-minute candles from T0; `chart` is the main chart's stub.
+_TOOLS_INIT = """
+const T0 = 1793000100;
+const bars = [];
+for (let i = 0; i < 200; i++) {
+  bars.push({time: T0 + i * 300, open: 1, high: 2, low: 0.5, close: 1.5 + (i % 2) * 0.1,
+             volume: 1});
+}
+ev('handleMsg')({type: 'init', title: 'BTC', bars, indicators: [], drawings: [],
+                 timeframes: ['5m'], sourceTimeframe: '5m', displayTimeframe: '5m'});
+const chart = mainChartStub();
+let cross = null;
+chart.setCrosshairPosition = (price, time) => { cross = [price, time]; };
+const status = () => document.getElementById('sbmsg').textContent;
+"""
+
+
+def _utc_minute(sec: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(sec, timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def test_go_to_centres_the_candle_that_holds_the_time_at_the_zoom_the_chart_has():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+chart._state.logical = {from: 10, to: 70};             // a view 60 candles wide
+ctx.__toParent.length = 0;
+ev('goToTime')(T0 + 120 * 300 + 170, {announce: true});  // 2 min 50 s into candle 120
+out.range = chart._state.logical;
+out.cross = cross;
+out.told = ctx.__toParent.filter(m => m.t === 'navigate');
+out.status = status();
+""", extra_globals=_EMBED_SYNC)
+    t0 = 1793000100
+    assert result["topLevelError"] is None
+    assert result["range"] == {"from": 90, "to": 150}          # candle 120 in the middle
+    assert result["cross"] == [1.5, t0 + 120 * 300]           # the crosshair on it
+    assert result["told"] == [{"view": "v2", "t": "navigate", "time": t0 + 120 * 300 + 170,
+                               "keep": True}]
+    assert result["status"] == ""
+
+
+def test_go_to_before_the_first_after_the_last_and_past_the_replay():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+ev('goToTime')(T0 - 86400);
+out.before = [chart._state.logical, status()];
+ev('goToTime')(T0 + 400 * 300);
+out.after = [chart._state.logical, status()];
+ev('replay').active = true;
+ev('replay').shown = bars.slice(0, 50);
+ev('goToTime')(T0 + 80 * 300);
+out.replay = [chart._state.logical, status()];
+""")
+    t0 = 1793000100
+    before, after, replay = result["before"], result["after"], result["replay"]
+    assert before == [{"from": -50, "to": 50},
+                      f"{_utc_minute(t0 - 86400)} is before the first candle on this chart "
+                      f"({_utc_minute(t0)})"]
+    assert after == [{"from": 149, "to": 249},
+                     f"{_utc_minute(t0 + 400 * 300)} is after the last candle on this chart "
+                     f"({_utc_minute(t0 + 199 * 300)})"]
+    assert replay == [{"from": -1, "to": 99},
+                      f"the replay has not reached {_utc_minute(t0 + 80 * 300)}"]
+
+
+def test_a_go_to_relayed_by_the_shell_keeps_this_charts_zoom_and_is_not_sent_back():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+chart._state.logical = {from: 0, to: 20};
+ctx.__toParent.length = 0;
+(docListeners.message || []).forEach(fn => fn({source: ctx.window.parent,
+  data: {t: 'navigate', time: T0 + 100 * 300, keep: true}}));
+out.range = chart._state.logical;
+out.sentBack = ctx.__toParent.filter(m => m.t === 'navigate');
+""", extra_globals=_EMBED_SYNC)
+    assert result["range"] == {"from": 90, "to": 110}
+    assert result["sentBack"] == []
+
+
+def test_the_shell_relays_a_go_to_with_keep():
+    result = _run(PAGE_HTML, _SETTLE + """
+clearAll();
+fromFrame('v1', {t: 'navigate', time: 1700001234, keep: true});
+out.v2 = win('v2')._posted.slice();
+""", extra_globals=_LAYOUT)
+    assert result["v2"] == [{"t": "navigate", "time": 1700001234, "keep": True}]
+
+
+def test_alt_g_opens_go_to_at_the_middle_of_the_view_and_enter_goes():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+chart._state.logical = {from: 40, to: 60};
+const box = document.getElementById('goto-box');
+const input = document.getElementById('goto-at');
+fire('keydown', document.body, {altKey: true, code: 'KeyG', key: 'g', preventDefault() {}});
+out.open = box.classList.contains('open');
+out.value = input.value;
+input.value = ev('gotoValue')(T0 + 30 * 300 + 60);
+ev('onGotoKey')({key: 'Enter', preventDefault() {}});
+out.afterEnter = [box.classList.contains('open'), chart._state.logical];
+fire('keydown', document.body, {altKey: true, code: 'KeyG', key: 'g', preventDefault() {}});
+ev('onGotoKey')({key: 'Escape', preventDefault() {}});
+out.afterEscape = box.classList.contains('open');
+input.value = 'not a time';
+ev('gotoSubmit')();
+out.bad = status();
+out.parsed = [ev('gotoParse')('2026-10-26T18:00'), ev('gotoParse')('')];
+""")
+    t0 = 1793000100
+    assert result["open"] is True
+    assert result["value"] == _utc_minute(t0 + 50 * 300).replace(" ", "T")
+    assert result["afterEnter"] == [False, {"from": 20, "to": 40}]   # candle 30, 20 wide
+    assert result["afterEscape"] is False
+    assert result["bad"] == "Go to: that is not a date and a time"
+    assert result["parsed"] == [1793037600, None]
+
+
+def test_the_countdown_reads_minutes_hours_and_days():
+    result = _run(CHART_HTML, """
+const f = ev('countdownText');
+out.texts = [f(228000), f(9011000), f(((2 * 24 + 4) * 3600 + 20 * 60 + 11) * 1000),
+             f(0), f(-5000), f(59999)];
+""")
+    assert result["texts"] == ["3:48", "2:30:11", "2d 04:20:11", "0:00", "0:00", "0:59"]
+
+
+_COUNTDOWN_STAGE = """
+const last = bars[bars.length - 1];
+const closeMs = (last.time + 300) * 1000;
+const clockAt = left => ev('handleMsg')({type: 'clock', now: closeMs - left});
+ev('mainChart').priceScale = () => ({width: () => 60});
+ev('mainSeries').priceToCoordinate = () => 120;
+ev('panes').main.paneWrap.getBoundingClientRect =
+  () => ({left: 0, top: 40, right: 800, bottom: 440, width: 800, height: 400});
+const tag = document.getElementById('cd-tag');
+const look = () => { ev('updateCountdown')();
+  return tag.style.display === 'block' ? [tag.textContent, tag.style.left, tag.style.top,
+                                           tag.style.width, tag.style.background] : null; };
+"""
+
+
+def test_the_countdown_shows_under_the_last_price_once_the_feeds_clock_is_known():
+    result = _run(CHART_HTML, _TOOLS_INIT + _COUNTDOWN_STAGE + """
+out.noClock = look();
+clockAt(228500);                                  // 3:48 left, with half a second to spare
+out.shown = look();
+clockAt(-30000);                                  // closed 30 s ago, no new candle yet
+out.justClosed = look();
+clockAt(-90000);                                  // closed a minute and a half ago: shut
+out.shut = look();
+clockAt(228500);
+ev('onCountdownToggle')(false);
+out.off = [look(), ctx.__store['atk.chart.countdown.v1']];
+ev('onCountdownToggle')(true);
+ev('replay').active = true;
+out.replay = look();
+""", extra_globals=_STORAGE + _EMBED_SYNC)
+    assert result["topLevelError"] is None
+    assert result["noClock"] is None
+    # 1.6 is the last close, over its open: the up colour; 12px font → 17px tall
+    assert result["shown"] == ["3:48", "740px", "168.5px", "60px", "#3fb950"]
+    assert result["justClosed"][0] == "0:00"
+    assert result["shut"] is None
+    assert result["off"] == [None, "0"]
+    assert result["replay"] is None
+
+
+def test_the_countdown_switch_is_kept_and_travels_with_the_colours():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+out.atStart = [ev('countdownOn'), document.getElementById('stog-countdown').checked];
+ctx.__store['atk.chart.countdown.v1'] = '1';      // another chart of the page switched it on
+(docListeners.message || []).forEach(fn => fn({source: ctx.window.parent,
+  data: {t: 'style'}}));
+out.relayed = ev('countdownOn');
+""", extra_globals=_STORAGE + _EMBED_SYNC + "ctx.__store['atk.chart.countdown.v1'] = '0';\n")
+    assert result["atStart"] == [False, False]
+    assert result["relayed"] is True
+
+
+def test_a_picture_never_shows_the_countdown():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+ev('handleMsg')({type: 'clock', now: (bars[199].time + 100) * 1000});
+out.now = ev('countdownNow')();
+""", extra_globals="ctx.location.search = '?snapshot=1&from=1&to=2&tz=UTC';\n")
+    assert result["now"] is None
+
+
+def test_the_brand_opens_the_repository_in_a_new_tab_on_both_pages():
+    from html.parser import HTMLParser
+
+    class Find(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.logo = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id") == "logo":
+                self.logo = (tag, attrs)
+
+    for page in (CHART_HTML, PAGE_HTML):
+        finder = Find()
+        finder.feed(page.read_text(encoding="utf-8"))
+        tag, attrs = finder.logo
+        assert tag == "a"
+        assert attrs["href"] == "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
+        assert attrs["target"] == "_blank" and "noopener" in attrs["rel"]
