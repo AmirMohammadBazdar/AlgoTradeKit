@@ -260,6 +260,15 @@ class TraderConfig:
         records stops the start.  With a fixed ``chart_port``, ``run_live``'s chart
         offers «Re-run with edits», which also works once the session has ended
         and its pages stay up.  ``None`` (default) — nothing is saved.
+    chart_timezone : str | None
+        The zone the charts show times in (v1.3.0), an IANA name such as
+        ``"Asia/Tehran"``; a viewer can change it in the chart's Settings.
+        ``None`` (default) — UTC.
+    chart_source_timezone : str | None
+        The zone the venue stamps its candles in (v1.3.0): UTC on Binance, the
+        broker's own time on MetaTrader (``"Europe/Athens"`` for an EET broker).
+        The chart cannot tell; the page says it was set by the program, and the
+        pictures of trade messages read it too.  ``None`` (default) — UTC.
     max_daily_loss : float | str | None
         Per-pair daily-loss limit: a number = account-currency $, a
         string like ``"2%"`` = percent of the UTC-day-start balance.
@@ -353,6 +362,8 @@ class TraderConfig:
     chart_style: dict | None = None
     chart_edit_key: str | None = None
     chart_edits_path: str | None = None
+    chart_timezone: str | None = None
+    chart_source_timezone: str | None = None
 
     # ------------------------------------------------------------------
     # Safety
@@ -472,6 +483,13 @@ class TraderConfig:
             from ..visual._style import check_style
 
             self.chart_style = check_style(self.chart_style, where="TraderConfig.chart_style")
+        if self.chart_timezone is not None or self.chart_source_timezone is not None:
+            from ..visual.chart import _check_zone
+
+            self.chart_timezone = _check_zone(self.chart_timezone,
+                                              "TraderConfig.chart_timezone")
+            self.chart_source_timezone = _check_zone(self.chart_source_timezone,
+                                                     "TraderConfig.chart_source_timezone")
         if self.chart_edit_key is not None and (
             not isinstance(self.chart_edit_key, str) or not self.chart_edit_key
         ):
