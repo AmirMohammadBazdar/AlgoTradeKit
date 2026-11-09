@@ -155,11 +155,12 @@ class ChartBridge:
         self.clock = clock
         self._wired: dict[int, Any] = {}
 
-    def wire(self, chart, actions=()) -> None:
-        """Route *chart*'s edits, deletes and *actions* to the strategy.  A chart is
-        wired once; a label it already has is left as it is."""
-        actions = tuple(actions)
-        for label in actions:
+    def wire(self, chart, actions=(), drawing_actions=()) -> None:
+        """Route *chart*'s edits, deletes, *actions* and *drawing_actions* (the menu
+        of a drawing the viewer drew, v1.3.0) to the strategy.  A chart is wired
+        once; a label it already has is left as it is."""
+        actions, drawing_actions = tuple(actions), tuple(drawing_actions)
+        for label in actions + drawing_actions:
             if not isinstance(label, str) or not label:
                 raise ValueError(f"chart action label {label!r} is not a non-empty string")
         if id(chart) not in self._wired:
@@ -169,6 +170,9 @@ class ChartBridge:
         for label in actions:
             if label not in chart.actions:
                 chart.add_action(label, self._on_action)
+        for label in drawing_actions:
+            if label not in chart.drawing_actions:
+                chart.add_drawing_action(label, self._on_action)
 
     # ── the hooks, on the chart's thread ─────────────────────────────────────
 
@@ -201,8 +205,12 @@ class ChartBridge:
         with self.lock, self._armed():
             self.strategy.on_chart_action(action)
             self._tell_followers("on_chart_action", action)
-            self._save({"type": "action", "chart": action.chart.title, "label": action.label,
-                        "time": action.time, "price": action.price})
+            record = {"type": "action", "chart": action.chart.title, "label": action.label,
+                      "time": action.time, "price": action.price}
+            drawing = getattr(action, "drawing", None)
+            if drawing is not None:
+                record["drawing"] = drawing        # v1.3.0: what the viewer drew
+            self._save(record)
 
     def _tell_followers(self, hook: str, event) -> None:
         for follower, lock in self.followers:
