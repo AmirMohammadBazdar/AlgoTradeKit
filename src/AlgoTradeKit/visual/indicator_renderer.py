@@ -617,6 +617,7 @@ def draw_trade_group(
         trade_id     = first["trade_id"],
         rr_ratio     = rr,
         opacity      = opacity,
+        planned_tp   = first.get("take_profit"),
     )
 
     # ---- Dynamic SL/TP lines (v0.7.4) ----
