@@ -2642,3 +2642,40 @@ out.v2 = document.getElementById('rp-clock').textContent;
     assert result["utc"] == "2026-10-30 22:45 UTC"
     assert result["v1"] == "2026-10-30 22:45 UTC"
     assert result["v2"] == "2026-10-31 00:15 Asia/Tehran"
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Part 4d — the zone lists: the offset first, then the city, by offset
+# ---------------------------------------------------------------------------
+
+def test_the_zone_lists_show_the_offset_first_and_go_by_it():
+    result = _run(CHART_HTML, f"""
+ev('handleMsg')({{type: 'init', title: 'XAU', bars: [{{time: {_STAMP}, open: 1, high: 2,
+  low: 0.5, close: 1.5, volume: 1}}], indicators: [], drawings: [], timeframes: [],
+  sourceTimezone: 'Europe/Athens'}});
+const list = ev('zoneChoices')({_STAMP} * 1000);              // 2026-10-30
+const label = z => (list.find(c => c.zone === z) || {{}}).label;
+out.labels = ['UTC', 'Asia/Tehran', 'Europe/Athens', 'America/St_Johns', 'Asia/Kathmandu',
+              'America/Argentina/Buenos_Aires', 'Asia/Dubai', 'Europe/Kyiv'].map(label);
+out.oldNames = list.filter(c => /Kiev|Calcutta|Katmandu|Saigon/.test(c.label + c.zone)).length;
+out.bratislava = label('Europe/Bratislava');          // its own city, though Prague's rules
+out.inOrder = list.every((c, i) => i === 0 || list[i - 1].offset < c.offset
+  || (list[i - 1].offset === c.offset && list[i - 1].city.localeCompare(c.city) <= 0));
+out.ends = [list[0].label.slice(0, 3), list[list.length - 1].label.slice(0, 6)];
+out.beforeSettings = document.getElementById('sz-source').children.length;   // not yet
+ev('toggleSettings')();
+const options = document.getElementById('sz-source').children;
+const tehran = options.find(o => o.value === 'Asia/Tehran');
+out.option = [options.length === list.length, tehran.textContent.slice(7), tehran.title,
+              document.getElementById('sz-source').value];
+""")
+    assert result["topLevelError"] is None
+    assert result["labels"] == ["+00:00 UTC", "+03:30 Tehran", "+02:00 Athens",
+                                "-02:30 St Johns", "+05:45 Kathmandu", "-03:00 Buenos Aires",
+                                "+04:00 Dubai", "+02:00 Kyiv"]
+    assert result["oldNames"] == 0                       # ICU's old names, shown as today's
+    assert result["bratislava"] == "+01:00 Bratislava"
+    assert result["inOrder"] is True
+    assert result["ends"] == ["-11", "+14:00"]
+    assert result["beforeSettings"] == 0                 # filled when Settings first opens
+    assert result["option"] == [True, "Tehran", "Asia/Tehran", "Europe/Athens"]
