@@ -216,6 +216,37 @@ function setActive(id){
   activeView = id;
   document.querySelectorAll('.cell').forEach(c =>
     c.classList.toggle('active', c.id === 'cell-' + id));
+  replayClock();                          // v1.3.0: in the chart in use's zones
+}
+
+// ── Time zones (v1.3.0) ────────────────────────────────────────
+// Each chart tells the page the zones it uses now (the one its candles are
+// stamped in, the one it shows times in); the replay's clock reads the chart in
+// use's. A stamp is the source zone's wall clock written as if it were UTC.
+const viewZones = {};
+function zoneWall(z, ms){
+  const parts = {};
+  new Intl.DateTimeFormat('en-GB', {timeZone: z, year:'numeric', month:'2-digit',
+    day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit', hourCycle:'h23'})
+    .formatToParts(new Date(ms)).forEach(p => { parts[p.type] = p.value; });
+  return parts;
+}
+function zoneShift(z, ms){
+  if(z === 'UTC') return 0;
+  const p = zoneWall(z, ms);
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second)
+         - Math.floor(ms / 1000) * 1000;
+}
+function zoneLabel(sec, z){
+  z = z || {source: 'UTC', display: 'UTC'};
+  try{
+    const wall = sec * 1000;
+    const instant = wall - zoneShift(z.source, wall - zoneShift(z.source, wall));
+    const p = zoneWall(z.display, instant);
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute} ${z.display}`;
+  }catch{
+    return new Date(sec * 1000).toISOString().slice(0,16).replace('T',' ') + ' UTC';
+  }
 }
 
 // ── Sync ───────────────────────────────────────────────────────
@@ -287,8 +318,14 @@ function replaySeek(t){
   if(replay.last  != null) t = Math.min(replay.last,  t);
   replay.cursor = t;
   broadcast(null, {t:'replay-cursor', time:t});
-  const clock = document.getElementById('rp-clock');
-  clock.textContent = new Date(t * 1000).toISOString().slice(0,16).replace('T',' ') + ' UTC';
+  replayClock();
+}
+
+function replayClock(){
+  if(!replay.active || replay.cursor == null) return;
+  const known = Object.keys(viewZones);
+  const z = viewZones[activeView] || (known.length ? viewZones[known[0]] : null);
+  document.getElementById('rp-clock').textContent = zoneLabel(replay.cursor, z);
 }
 
 function replayStep(dir){
@@ -397,6 +434,13 @@ window.addEventListener('message', ev => {
       // in the browser's storage, which every frame of the page shares: the
       // others read them again. Never back to the sender.
       broadcast(id, {t: 'style'});
+      break;
+    case 'zones':
+      // The zones a chart uses now (v1.3.0), for the replay's clock
+      if(typeof msg.source === 'string' && typeof msg.display === 'string'){
+        viewZones[id] = {source: msg.source, display: msg.display};
+        replayClock();
+      }
       break;
   }
 });
