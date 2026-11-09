@@ -189,6 +189,7 @@ class ChartPage:
         chart._server = proxy
         chart._shown  = self._shown
         self._server.on_message[vid] = chart._handle_browser_message
+        self._server.clocks[vid] = chart._clock_message         # v1.3.0
         if chart._edit_key is not None:              # v1.3.0: each view its own key
             self._server.edit_keys[vid] = chart._edit_key
 
