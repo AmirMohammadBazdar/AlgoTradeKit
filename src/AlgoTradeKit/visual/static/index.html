@@ -226,6 +226,7 @@ body.light #goto-at{color-scheme:light}
              padding:4px 0;z-index:300;box-shadow:0 8px 28px #000a;min-width:160px;display:none}
 #candle-menu .mi{padding:6px 14px;font-size:12px;cursor:pointer;transition:background .1s}
 #candle-menu .mi:hover{background:var(--bg3)}
+#candle-menu hr{border:none;border-top:1px solid var(--border);margin:3px 0}
 /* A page without the edit key (v1.3.0): what would change every viewer's chart */
 body.no-edit #tf-btn,body.no-edit #ind-btn,body.no-edit .il-btn.remove,
 body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
@@ -787,6 +788,8 @@ body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
   <div class="mi" id="ctx-color-row"  onclick="ctxEditColor()">🎨 Change color</div>
   <!-- v1.3.0: a fib's levels; the program's items on a drawing you drew -->
   <div class="mi" id="ctx-levels-row" onclick="ctxFibLevels()">📐 Levels…</div>
+  <!-- v1.3.0: a copy for Ctrl+V, or for «Paste here» on a right-click on the chart -->
+  <div class="mi" id="ctx-copy-row" onclick="ctxCopy()">📋 Copy</div>
   <div id="ctx-dactions"></div>
   <hr id="ctx-delete-sep"/>
   <!-- Row 5: delete — unless the drawing is not deletable (v1.3.0) -->
@@ -1259,6 +1262,11 @@ if(embedded){
                               if(msg.keep) goToTime(msg.time); else scrollToTime(msg.time);
                               break;
       case 'style':           onStyleRelayed();                        break;
+      case 'paste': {         // v1.3.0: a Ctrl+V the page passed to the chart in use
+        const shape = readClipText(msg.text);
+        if(shape) pasteCopied(shape);
+        break;
+      }
     }
   });
 }
@@ -3037,8 +3045,10 @@ function hitDrawing(d,cx,cy){
     if(alongX&&Math.abs(cy-(y+h))<HIT_R) return{id:d.id,handle:'bc'};
     if(alongY&&Math.abs(cx-x)<HIT_R)     return{id:d.id,handle:'lc'};
     if(alongY&&Math.abs(cx-(x+w))<HIT_R) return{id:d.id,handle:'rc'};
-    const ez=HIT_R+2;
-    if(cx>x+ez&&cx<x+w-ez&&cy>y+ez&&cy<y+h-ez) return{id:d.id,handle:'interior'};
+    // v1.3.0: the rest of the inside moves it. It kept 11 px clear of every edge,
+    // which left a box 18–22 px tall a band across its middle that nothing could
+    // grab or select (the edges take 9 px).
+    if(cx>x&&cx<x+w&&cy>y&&cy<y+h) return{id:d.id,handle:'interior'};
   }
   else if(d.type==='signal'){
     const price=d.price||(d.side==='buy'?findBarLow(d.time):findBarHigh(d.time));
@@ -3255,7 +3265,13 @@ drawCv.addEventListener('mousedown',e=>{
   if(e.button!==0) return;
   const r=document.getElementById('panes').getBoundingClientRect();
   const cx=e.clientX-r.left, cy=e.clientY-r.top;
-  const hit=hitTest(cx,cy); if(!hit) return;
+  const hit=hitTest(cx,cy);
+  if(!hit){
+    // v1.3.0: one this page may not drag is selected all the same, for Ctrl+C
+    const any=hitTestAny(cx,cy);
+    if(any&&selectedId!==any.id){ selectedId=any.id; redrawAll(); }
+    return;
+  }
   e.stopPropagation();
   selectedId=hit.id; hoverId=hit.id;
   dragState={id:hit.id,handle:hit.handle,startX:cx,startY:cy,
@@ -3263,6 +3279,15 @@ drawCv.addEventListener('mousedown',e=>{
              axes:handleAxes(drawings[hit.id],hit.handle)};
   redrawAll();
 });
+
+// v1.3.0: a press on the chart away from every drawing ends the selection, so
+// Ctrl+C copies what was clicked last, never an old selection
+document.getElementById('panes').addEventListener('mousedown',e=>{
+  if(e.button!==0||selectedId==null||activeTool!=='cursor') return;
+  const r=document.getElementById('panes').getBoundingClientRect();
+  if(hitTestAny(e.clientX-r.left, e.clientY-r.top)) return;
+  selectedId=null; redrawAll();
+}, true);
 
 document.addEventListener('mousemove',e=>{
   if(!dragState) return;
@@ -3523,6 +3548,8 @@ drawCv.addEventListener('contextmenu',e=>{
   const levelsRow=document.getElementById('ctx-levels-row');
   levelsRow.style.display=d.type==='fib'?'':'none';
   levelsRow.classList.toggle('disabled', isLocked||!may);
+  // 5. v1.3.0: the six kinds you can draw may be copied, the program's too
+  document.getElementById('ctx-copy-row').style.display=COPYABLE[d.type]?'':'none';
   renderDrawingActions(d);
 
   ctxMenu.style.left=e.clientX+'px'; ctxMenu.style.top=e.clientY+'px';
@@ -3648,6 +3675,229 @@ function notifyDrawingChanged(d){
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  COPY AND PASTE (v1.3.0)
+//  A copied drawing goes to the PC's clipboard as one line of text, and to this
+//  browser's memory for the page's address (every chart of a page, its tabs).
+//  A page served over plain http has no clipboard API, but the copy and paste
+//  events of Ctrl+C and Ctrl+V carry text both ways: Ctrl+V reads the PC's
+//  clipboard, so a drawing goes from one page to another, another port too. A
+//  menu cannot read it: «Paste here» takes the drawing last copied on this
+//  address. A copy is the viewer's own — no key, no title, no lock, no limits
+//  from the program — and lands where the original is, or at a click.
+// ═══════════════════════════════════════════════════════════════
+const CLIP_KEY = 'atk.chart.clipboard.v1';
+// What may be copied — the six kinds the toolbar draws — with the name the status
+// bar gives it, the prefix of a copy's id, and what a copy keeps of it
+const COPYABLE = {
+  box:          {name: 'box', prefix: 'box',
+                 keep: ['time1','price1','time2','price2','color','opacity','borderColor','label']},
+  trendline:    {name: 'trend line', prefix: 'tline',
+                 keep: ['time1','price1','time2','price2','color','lineWidth','extend','label']},
+  fib:          {name: 'Fibonacci', prefix: 'fib',
+                 keep: ['time1','price1','time2','price2','color','levels','label']},
+  hline:        {name: 'horizontal line', prefix: 'hline',
+                 keep: ['price','color','lineWidth','lineStyle','label']},
+  text:         {name: 'text label', prefix: 'txt',
+                 keep: ['time','price','text','color','fontSize']},
+  position_box: {name: 'position box', prefix: 'posbox',
+                 keep: ['open_time','close_time','entry_price','stop_loss','visual_tp',
+                        'profit_color','loss_color','opacity']},
+};
+// Fields that hold a number. An end may be null: the drawing runs to the live edge.
+const CLIP_NUMBERS = new Set(['time1','price1','time2','price2','time','price','open_time',
+  'close_time','entry_price','stop_loss','visual_tp','opacity','lineWidth','lineStyle','fontSize']);
+const CLIP_RUNNING = new Set(['time2','close_time']);
+// What a drawing of each kind cannot be without
+const CLIP_NEEDS = {
+  box: ['time1','price1','time2','price2'], trendline: ['time1','price1','time2','price2'],
+  fib: ['time1','price1','time2','price2'], hline: ['price'], text: ['time','price','text'],
+  position_box: ['open_time','close_time','entry_price','stop_loss','visual_tp'],
+};
+let clipMemory = null;            // the last copy, for a browser that keeps nothing
+let _menuCopy = null;             // what the menu's «Copy» is putting on the clipboard
+
+// A drawing as a copy keeps it, or null when it is not one the page copies. It
+// reads the PC's clipboard too, so every field is checked: a number is a finite
+// number, a text a string of reasonable length, a Fib's levels numbers.
+function clipShape(raw){
+  if(!raw || typeof raw !== 'object') return null;
+  const kind = COPYABLE[raw.type];
+  if(!kind) return null;
+  const d = {type: raw.type};
+  for(const k of kind.keep){
+    const v = raw[k];
+    if(v === undefined) continue;
+    if(CLIP_NUMBERS.has(k)){
+      if(v === null && CLIP_RUNNING.has(k)) d[k] = null;
+      else if(typeof v === 'number' && Number.isFinite(v)) d[k] = v;
+    }
+    else if(k === 'levels'){
+      if(Array.isArray(v) && v.length && v.length <= 40
+         && v.every(x => typeof x === 'number' && Number.isFinite(x))) d.levels = v.slice();
+    }
+    else if(k === 'extend') d.extend = v === true;
+    else if(typeof v === 'string' && v.length <= (k === 'text' ? 2000 : 200)) d[k] = v;
+  }
+  if(raw.type === 'position_box'){        // a trade's box names its stop and target by side
+    const long = raw.direction !== 'short';
+    const take = (k, alt) => {
+      if(d[k] == null && typeof raw[alt] === 'number' && Number.isFinite(raw[alt])) d[k] = raw[alt];
+    };
+    take('visual_tp', long ? 'profit_top' : 'profit_bottom');
+    take('stop_loss', long ? 'loss_bottom' : 'loss_top');
+  }
+  if(!CLIP_NEEDS[raw.type].every(k => k in d)) return null;
+  if(raw.type === 'text' && !d.text) return null;
+  return d;
+}
+
+// The line a copy is on the PC's clipboard: {"atk":"drawing","v":1,"drawing":{…}}
+function clipText(shape){ return JSON.stringify({atk: 'drawing', v: 1, drawing: shape}); }
+function readClipText(text){
+  if(typeof text !== 'string' || !text || text.length > 200000) return null;
+  let msg = null;
+  try{ msg = JSON.parse(text); }catch{ return null; }
+  if(!msg || typeof msg !== 'object' || msg.atk !== 'drawing' || msg.v !== 1) return null;
+  return clipShape(msg.drawing);
+}
+
+// This browser's memory of the last copy, for every chart of this address
+function rememberCopy(shape){
+  clipMemory = shape;
+  if(snapshot) return;
+  try{ window.localStorage.setItem(CLIP_KEY, clipText(shape)); }catch{}
+}
+function rememberedCopy(){
+  try{
+    const shape = readClipText(window.localStorage.getItem(CLIP_KEY));
+    if(shape) return shape;
+  }catch{}
+  return clipMemory;
+}
+
+// Copy drawing *id* into this browser's memory; the copy event that asked for it
+// puts it on the PC's clipboard. Returns what was copied, or null.
+function copyDrawing(id){
+  const shape = id != null && drawings[id] ? clipShape(drawings[id]) : null;
+  if(!shape) return null;
+  rememberCopy(shape);
+  flashStatus(`Copied: ${COPYABLE[shape.type].name} — Ctrl+V pastes it; `
+              + 'right-click the chart → Paste here');
+  return shape;
+}
+
+// «📋 Copy» on a drawing's menu. A click may start a copy event (never read the
+// clipboard), so the copy reaches the PC's clipboard here as well.
+function ctxCopy(){
+  ctxMenu.style.display = 'none';
+  const shape = copyDrawing(ctxTargetId);
+  if(!shape) return;
+  _menuCopy = shape;
+  try{ if(document.execCommand) document.execCommand('copy'); }catch{}
+  _menuCopy = null;
+}
+
+// A new drawing's id, as the toolbar names them: box_1793…
+function newDrawingId(prefix){
+  let n = Date.now();
+  while(drawings[`${prefix}_${n}`]) n++;
+  return `${prefix}_${n}`;
+}
+
+// The point of a copy that goes to a click: a box's top-left corner, a line's or
+// a Fib's left end, a horizontal line's price, a text's point, a position box's
+// entry at its opening. The rest keeps its distance from that point; an end that
+// runs to the live edge still runs.
+function moveCopyTo(d, at){
+  if(d.type === 'hline'){ d.price = at.price; return; }
+  if(d.type === 'text'){ d.time = at.time; d.price = at.price; return; }
+  if(d.type === 'position_box'){
+    const dt = at.time - d.open_time, dp = at.price - d.entry_price;
+    d.open_time = at.time;
+    if(d.close_time != null) d.close_time += dt;
+    d.entry_price = at.price; d.stop_loss += dp; d.visual_tp += dp;
+    return;
+  }
+  const running = d.time2 == null;
+  const leftIs1 = running || d.time1 <= d.time2;
+  const at1 = d.type === 'box' ? d.price1 >= d.price2 : leftIs1;   // whose price goes there
+  const dt = at.time - (leftIs1 ? d.time1 : d.time2);
+  const dp = at.price - (at1 ? d.price1 : d.price2);
+  d.time1 += dt;
+  if(!running) d.time2 += dt;
+  if(at1){ d.price1 = at.price; d.price2 += dp; } else { d.price2 = at.price; d.price1 += dp; }
+}
+
+// A copy of *shape* on this chart: where the original is (at null), or with one of
+// its points at a click (at = {time, price}). It is the viewer's own, selected, so
+// the next drag moves it.
+function pasteDrawing(shape, at){
+  if(snapshot) return null;
+  const kind = shape && COPYABLE[shape.type];
+  if(!kind) return null;
+  if(activeTool !== 'cursor') setTool('cursor');       // a half-made drawing goes
+  const d = JSON.parse(JSON.stringify(shape));
+  if(at) moveCopyTo(d, at);
+  d.id = newDrawingId(kind.prefix);
+  d.locked = false;
+  d.source = 'user';
+  if(d.type === 'position_box'){                        // a plan, not a trade
+    Object.assign(d, {net_pnl: 0, close_reason: '', trade_id: -1, rr_ratio: 0});
+    _recomputePosBoxZones(d);
+  }
+  drawings[d.id] = d;
+  selectedId = d.id;
+  redrawAll(); notifyDrawingChanged(d);
+  flashStatus(`Pasted: ${kind.name}`);
+  return d;
+}
+
+// The drawing Ctrl+V brought here: it is now this address's copy too
+function pasteCopied(shape){
+  rememberCopy(shape);
+  return pasteDrawing(shape, null);
+}
+
+// Text keeps its keys: in a text field, or (for Ctrl+C) with text selected on the
+// page, the browser copies and pastes as it always does
+function keysBelongToText(e, paste){
+  const t = e && e.target;
+  if(t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable)) return true;
+  if(paste) return false;
+  try{
+    const sel = window.getSelection ? window.getSelection() : null;
+    if(sel && !sel.isCollapsed && String(sel)) return true;
+  }catch{}
+  return false;
+}
+
+// Ctrl+C (⌘C): the selected drawing
+document.addEventListener('copy', e => {
+  if(snapshot) return;
+  let shape = _menuCopy;
+  if(!shape){
+    if(keysBelongToText(e, false)) return;
+    shape = copyDrawing(selectedId);
+  }
+  if(!shape) return;                        // nothing to copy: the browser's own copy
+  try{ e.clipboardData.setData('text/plain', clipText(shape)); e.preventDefault(); }catch{}
+});
+
+// Ctrl+V (⌘V): the drawing on the PC's clipboard, where the original is. In a page
+// of several charts it goes to the chart the pointer is on: this one passes it to
+// the page when the pointer has left it.
+document.addEventListener('paste', e => {
+  if(snapshot || keysBelongToText(e, true)) return;
+  let text = '';
+  try{ text = e.clipboardData.getData('text/plain'); }catch{}
+  const shape = readClipText(text);
+  if(!shape) return;                        // not a drawing: the browser's own paste
+  e.preventDefault();
+  if(embedded && !hasPointer){ postToPage({t: 'paste', text}); return; }
+  pasteCopied(shape);
+});
+
+// ═══════════════════════════════════════════════════════════════
 //  THE CANDLE MENU (v1.3.0)
 //  The program's actions (chart.add_action), on a right-click on the price
 //  pane away from any drawing. With none, a right-click does what it did.
@@ -3676,7 +3926,12 @@ function candleTimeAt(cx){
 }
 
 function openCandleMenu(e){
-  if(snapshot||!chartActions.length||!canEdit) return false;
+  if(snapshot) return false;
+  // The program's items, for a page with the key; v1.3.0: «Paste here» for any
+  // page, while this browser holds a drawing copied on this address
+  const actions=canEdit?chartActions:[];
+  const copied=rememberedCopy();
+  if(!actions.length&&!copied) return false;
   const band=mainPaneBand(); if(!band) return false;
   const r=document.getElementById('panes').getBoundingClientRect();
   const cx=e.clientX-r.left, cy=e.clientY-r.top;
@@ -3686,9 +3941,18 @@ function openCandleMenu(e){
   if(time==null) return false;
   let price=null;
   try{ price=mainSeries.coordinateToPrice(cy-band.top); }catch{}
+  const paste=!!copied&&typeof price==='number'&&Number.isFinite(price);
+  if(!paste&&!actions.length) return false;
   ctxMenu.style.display='none';
   candleMenu.innerHTML='';
-  chartActions.forEach(label=>{
+  if(paste){
+    const item=document.createElement('div');
+    item.className='mi'; item.textContent='📋 Paste here';
+    item.onclick=()=>{ closeCandleMenu(); pasteDrawing(copied, {time, price}); };
+    candleMenu.appendChild(item);
+    if(actions.length) candleMenu.appendChild(document.createElement('hr'));
+  }
+  actions.forEach(label=>{
     const item=document.createElement('div');
     item.className='mi'; item.textContent=label;
     item.onclick=()=>{ closeCandleMenu(); sendMsg({type:'chart_action', label, time, price}); };
