@@ -39,6 +39,11 @@ What to try (from the address printed with `?key=…`; over an SSH tunnel to
 9. Settings → «Time zone» → «Show times in»: your own zone. The candles are
    stamped in UTC on Binance; on MetaTrader set
    `TraderConfig(chart_source_timezone=...)` to the broker's zone.
+10. Click a zone and press Ctrl+C (⌘C), or right-click it → `📋 Copy`. Ctrl+V
+    puts a copy on top of it: yours, so drag it anywhere — the strategy never
+    hears of it, and `Make it a zone` works on it as on a box you drew.
+    Right-click the chart away from drawings → `📋 Paste here` puts one at the
+    click. Ctrl+V on another chart page, in any window, pastes it there too.
 """
 from __future__ import annotations
 
