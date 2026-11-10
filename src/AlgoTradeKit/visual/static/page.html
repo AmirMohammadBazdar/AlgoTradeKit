@@ -442,7 +442,36 @@ window.addEventListener('message', ev => {
         replayClock();
       }
       break;
+    case 'paste':
+      // v1.3.0: a Ctrl+V in a chart the pointer has left belongs to the chart in use
+      pasteInto(msg.text);
+      break;
   }
+});
+
+// ── Paste (v1.3.0) ────────────────────────────────────────────
+// Ctrl+V pastes a copied drawing into the chart the pointer is on — the one marked
+// in use — whichever document has the keyboard: a chart passes on a paste that is
+// not its own, and the page's own (its header had the keyboard) goes there too.
+function pasteInto(text){
+  const id = activeView || Object.keys(frames)[0];
+  const win = id ? frames[id] : null;
+  if(!win || typeof text !== 'string') return;
+  try{ win.postMessage({t: 'paste', text}, '*'); }catch{}
+}
+function isCopiedDrawing(text){
+  try{
+    const m = JSON.parse(text);
+    return !!m && typeof m === 'object' && m.atk === 'drawing';
+  }catch{ return false; }
+}
+document.addEventListener('paste', e => {
+  if(e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName || '')) return;
+  let text = '';
+  try{ text = e.clipboardData.getData('text/plain'); }catch{}
+  if(!isCopiedDrawing(text)) return;         // anything else: the browser's own paste
+  e.preventDefault();
+  pasteInto(text);
 });
 
 loadLayout();
