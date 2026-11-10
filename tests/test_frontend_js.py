@@ -2679,3 +2679,386 @@ out.option = [options.length === list.length, tehran.textContent.slice(7), tehra
     assert result["ends"] == ["-11", "+14:00"]
     assert result["beforeSettings"] == 0                 # filled when Settings first opens
     assert result["option"] == [True, "Tehran", "Asia/Tehran", "Europe/Athens"]
+
+
+# ---------------------------------------------------------------------------
+# index.html / page.html — copy and paste a drawing (v1.3.0, Part 4f)
+# ---------------------------------------------------------------------------
+# Ctrl+C and Ctrl+V reach a page as copy and paste events whose clipboardData
+# carries text both ways; a page served over plain http has no clipboard API.
+# `clip.text` stands for the PC's clipboard. The example is QUESTIONS-copy-paste.md
+# Q4f.1's: XAUUSD 5m on 2026-11-10, candle i at x = 10 i, price p at
+# y = (4060 - p) * 10.
+
+_CLIP = """
+const clip = {text: ''};
+const clipEvent = (type, target) => {
+  const e = {prevented: false};
+  fire(type, target || document.body, {
+    clipboardData: {setData: (t, v) => { if (t === 'text/plain') clip.text = v; },
+                    getData: t => (t === 'text/plain' ? clip.text : '')},
+    preventDefault: () => { e.prevented = true; },
+  });
+  return e;
+};
+const copyKey = target => clipEvent('copy', target);
+const pasteKey = target => clipEvent('paste', target);
+const mine = () => Object.values(ev('drawings')).filter(d => d.source === 'user');
+const status = () => document.getElementById('sbmsg').textContent;
+const T0 = Date.UTC(2026, 10, 10, 6, 0) / 1000;                  // 06:00
+const at = (h, m) => T0 + ((h - 6) * 60 + m) * 60;
+const xOf = (h, m) => (at(h, m) - T0) / 30;
+const yOf = p => (4060 - p) * 10;
+const xau = [];
+for (let i = 0; i < 84; i++) xau.push({time: T0 + i * 300, open: 4025, high: 4030, low: 4020,
+                                       close: 4026, volume: 1});
+const stage = (drawings, extra = {}) => {
+  init(Object.assign({bars: xau, drawings}, extra));
+  const chart = mainChartStub();
+  chart._state.barTimes = xau.map(b => b.time);
+  const scale = chart.timeScale();
+  scale.coordinateToTime = x => {
+    const i = Math.round(x / 10);
+    return i >= 0 && i < xau.length ? xau[i].time : null;
+  };
+  scale.coordinateToLogical = x => x / 10;
+  const series = ev('mainSeries');
+  series.priceToCoordinate = p => (4060 - p) * 10;
+  series.coordinateToPrice = y => 4060 - y / 10;
+};
+// The program's sell POI from 08:00 to 09:00, 4,010.20–4,015.80: locked, keyed
+const poi = (extra = {}) => Object.assign({type: 'box', id: 'poi', time1: at(8, 0),
+  price1: 4015.80, time2: at(9, 0), price2: 4010.20, color: '#f85149', borderColor: '#f85149',
+  opacity: 0.2, label: 'Sell POI', title: 'Sell POI 4010.2–4015.8', key: 'poi:sell:1',
+  locked: true, editable: ['price'], deletable: false, source: 'server'}, extra);
+const r2 = v => Math.round(v * 100) / 100;
+"""
+
+
+def _clip(body: str, extra_globals: str = "") -> dict:
+    return _edits(_CLIP + body, extra_globals=_STORAGE + extra_globals)
+
+
+def test_ctrl_c_copies_the_selected_drawing_and_ctrl_v_pastes_it_where_it_was():
+    result = _clip("""
+stage([poi()]);
+out.nothingSelected = copyKey().prevented;
+press(xOf(8, 30), yOf(4013));                    // inside the POI: locked, but selected
+out.selected = ev('selectedId');
+out.copied = copyKey().prevented;
+out.text = JSON.parse(clip.text);
+out.stored = ctx.__store['atk.chart.clipboard.v1'] === clip.text;
+out.copyStatus = status();
+const p = pasteKey();
+out.pasted = p.prevented;
+const copy = mine()[0];
+out.copy = copy;
+out.copySelected = ev('selectedId') === copy.id;
+out.told = lastSent('drawing_updated').drawing.id === copy.id;
+out.pasteStatus = status();
+ev("setTool('fib')"); ev("draftState = {tool: 'fib', time1: 1794294000, price1: 4040}");
+pasteKey();                                      // a half-made Fib goes first
+out.tool = [ev('activeTool'), ev('draftState')];
+out.copies = mine().map(d => d.id);
+out.original = ['key', 'title', 'locked', 'source'].map(k => ev('drawings').poi[k]);
+""")
+    assert result["topLevelError"] is None
+    assert result["nothingSelected"] is False            # the browser's own copy
+    assert result["selected"] == "poi"
+    assert result["copied"] is True
+    assert result["text"] == {"atk": "drawing", "v": 1, "drawing": {
+        "type": "box", "time1": 1794297600, "price1": 4015.8, "time2": 1794301200,
+        "price2": 4010.2, "color": "#f85149", "opacity": 0.2, "borderColor": "#f85149",
+        "label": "Sell POI"}}                            # 08:00–09:00: its look, not its key
+    assert result["stored"] is True
+    assert result["copyStatus"] == ("Copied: box — Ctrl+V pastes it; right-click the chart → "
+                                    "Paste here")
+    assert result["pasted"] is True
+    copy = result["copy"]
+    assert re.fullmatch(r"box_\d+", copy["id"])
+    assert {k: copy[k] for k in ("time1", "price1", "time2", "price2", "locked", "source")} == {
+        "time1": 1794297600, "price1": 4015.8, "time2": 1794301200, "price2": 4010.2,
+        "locked": False, "source": "user"}               # where it was, yours
+    assert not {"key", "title", "editable", "deletable"} & set(copy)
+    assert result["copySelected"] is True and result["told"] is True
+    assert result["pasteStatus"] == "Pasted: box"
+    assert result["tool"] == ["cursor", None]
+    assert len(set(result["copies"])) == 2               # each paste a new copy
+    assert result["original"] == ["poi:sell:1", "Sell POI 4010.2–4015.8", True, "server"]
+
+
+def test_paste_here_puts_each_kind_at_the_click_and_keeps_its_size():
+    """Q4f.1 (c): a right-click at 11:27 and 4,031.00 → «📋 Paste here»."""
+    result = _clip("""
+stage([poi(),
+  {type: 'fib', id: 'fib', time1: at(6, 0), price1: 4050, time2: at(7, 30), price2: 4000,
+   color: '#9c27b0', levels: [0, 0.382, 0.618, 1], source: 'user', locked: false},
+  {type: 'hline', id: 'level', price: 4045, color: '#ef5350', lineWidth: 1, lineStyle: 2,
+   label: 'H', source: 'user', locked: false},
+  {type: 'text', id: 'note', time: at(7, 0), price: 4055, text: 'look', color: '#e6edf3',
+   fontSize: 12, source: 'user', locked: false},
+  {type: 'position_box', id: 'plan', open_time: at(9, 30), close_time: at(10, 30),
+   entry_price: 4040, stop_loss: 4035, visual_tp: 4050, profit_color: '#3fb950',
+   loss_color: '#f85149', opacity: 0.15, direction: 'long', label: 'L  1:2.0R',
+   source: 'user', locked: false},
+  {type: 'trendline', id: 'order', time1: at(10, 0), price1: 4045, time2: null, price2: 4035,
+   color: '#2196f3', lineWidth: 1, label: 'SL', source: 'server', locked: true}]);
+const pasteHere = id => {
+  ev('copyDrawing')(id);
+  rightClick('panes', xOf(11, 27), yOf(4031));
+  const items = document.getElementById('candle-menu').children;
+  out.item = items[0].textContent;
+  items[0].onclick();
+  const d = ev('drawings')[ev('selectedId')];
+  ev(`delete drawings[${JSON.stringify(d.id)}]`);        // out of the next click's way
+  return d;
+};
+const zone = pasteHere('poi');
+out.box = [zone.time1 - at(11, 25), zone.time2 - at(12, 25), r2(zone.price1), r2(zone.price2)];
+const fib = pasteHere('fib');
+out.fib = [fib.time1 - at(11, 25), fib.time2 - at(12, 55), r2(fib.price1), r2(fib.price2),
+           r2(fib.price1 + (fib.price2 - fib.price1) * 0.618), fib.levels];
+out.hline = pasteHere('level').price;
+const note = pasteHere('note');
+out.text = [note.time - at(11, 25), note.price, note.text];
+const plan = pasteHere('plan');
+out.plan = [plan.open_time - at(11, 25), plan.close_time - at(12, 25), plan.entry_price,
+            plan.stop_loss, plan.visual_tp, plan.label];
+const order = pasteHere('order');
+out.order = [order.time1 - at(11, 25), order.time2, order.price1, order.price2, order.source];
+""")
+    assert result["topLevelError"] is None
+    assert result["item"] == "📋 Paste here"
+    assert result["box"] == [0, 0, 4031.0, 4025.4]          # 11:25–12:25, its top at the click
+    assert result["fib"] == [0, 0, 4031.0, 3981.0, 4000.1, [0, 0.382, 0.618, 1]]
+    assert result["hline"] == 4031
+    assert result["text"] == [0, 4031, "look"]
+    assert result["plan"] == [0, 0, 4031, 4026, 4041, "L  1:2.0R"]
+    assert result["order"] == [0, None, 4031, 4021, "user"]   # still runs to the live edge
+
+
+def test_paste_here_needs_no_key_and_sits_above_the_programs_items():
+    result = _clip("""
+stage([poi({id: 'mine', source: 'user', key: undefined, title: undefined, locked: false})],
+      {actions: ['Mark here']});
+const items = () => document.getElementById('candle-menu').children
+  .map(c => c.tagName === 'HR' ? '—' : c.textContent);
+rightClick('panes', xOf(11, 27), yOf(4031));
+out.before = items();                                      // nothing copied yet
+ev('copyDrawing')('mine');
+rightClick('panes', xOf(11, 27), yOf(4031));
+out.editor = items();
+ev('handleMsg')({type: 'access', edit: false});
+const e = rightClick('panes', xOf(11, 27), yOf(4031));
+out.viewer = [items(), e.prevented];
+document.getElementById('candle-menu').children[0].onclick();
+out.pasted = mine().length;
+""")
+    assert result["topLevelError"] is None
+    assert result["before"] == ["Mark here"]
+    assert result["editor"] == ["📋 Paste here", "—", "Mark here"]
+    assert result["viewer"] == [["📋 Paste here"], True]   # a page without the key pastes too
+    assert result["pasted"] == 2
+
+
+def test_the_menu_copies_any_of_the_six_kinds_and_a_copy_keeps_only_its_look():
+    result = _clip("""
+document.execCommand = cmd => { if (cmd === 'copy') copyKey(); return true; };
+stage([
+  {type: 'position_box', id: 'trade', open_time: at(9, 30), close_time: at(10, 30),
+   entry_price: 4040, stop_loss: 4035, visual_tp: 4050, profit_top: 4050,
+   profit_bottom: 4040, loss_top: 4040, loss_bottom: 4035, profit_color: '#3fb950',
+   loss_color: '#f85149', opacity: 0.15, direction: 'long', net_pnl: 12.5,
+   close_reason: 'tp', trade_id: 7, rr_ratio: 2, label: '✓ TP  +2.00R', planned_tp: 4050,
+   locked: true, source: 'server'},
+  {type: 'trendline', id: 'dotted', time1: at(10, 0), price1: 4045, time2: null, price2: 4045,
+   color: '#2196f3', lineWidth: 1, dots: true, alpha: 0.45, key: 'order:1', locked: true,
+   source: 'server'},
+  {type: 'vline', id: 'restart', time: at(7, 0), label: 'RESTART_AT', source: 'server'},
+  {type: 'signal', id: 'sig', time: at(8, 0), side: 'buy', price: 4021, source: 'server'}],
+  {drawingActions: ['Make it a buy POI', 'Make it a sell POI']});
+rightClick('draw-cv', xOf(10, 15), yOf(4047));             // the trade box, inside
+out.tradeRow = shown('ctx-copy-row');
+ev('ctxCopy')();
+out.tradeText = JSON.parse(clip.text).drawing;
+pasteKey();
+const trade = mine()[0];
+out.tradeCopy = [trade.label, trade.net_pnl, trade.trade_id, trade.close_reason,
+                 trade.direction, trade.profit_top, trade.loss_bottom];
+rightClick('draw-cv', xOf(10, 15), yOf(4047));             // the copy, on top of it
+out.programsItems = document.getElementById('ctx-dactions').children
+  .filter(c => c.className === 'mi').map(c => c.textContent);
+out.badge = document.getElementById('ctx-source-badge').textContent;
+ev('ctxCopy')(); ev('ctxTargetId = "dotted"'); ev('ctxCopy')();
+out.lineText = JSON.parse(clip.text).drawing;
+rightClick('draw-cv', xOf(7, 0), yOf(4040));               // the vertical line
+out.vlineRow = shown('ctx-copy-row');
+clip.text = 'unchanged';
+out.vlineKey = copyKey().prevented;
+rightClick('draw-cv', xOf(8, 0), yOf(4021) + 5);          // the signal arrow
+out.signalRow = shown('ctx-copy-row');
+out.after = clip.text;
+""")
+    assert result["topLevelError"] is None
+    assert result["tradeRow"] == ""
+    assert result["tradeText"] == {
+        "type": "position_box", "open_time": 1794303000, "close_time": 1794306600,
+        "entry_price": 4040, "stop_loss": 4035, "visual_tp": 4050, "profit_color": "#3fb950",
+        "loss_color": "#f85149", "opacity": 0.15}         # no result, no trade number
+    assert result["tradeCopy"] == ["L  1:2.0R", 0, -1, "", "long", 4050, 4035]
+    assert result["programsItems"] == ["Make it a buy POI", "Make it a sell POI"]
+    assert result["badge"] == "User"
+    assert result["lineText"] == {"type": "trendline", "time1": 1794304800, "price1": 4045,
+                                  "time2": None, "price2": 4045, "color": "#2196f3",
+                                  "lineWidth": 1}         # running; cbc's dots stay with cbc
+    assert result["vlineRow"] == "none" and result["vlineKey"] is False
+    assert result["signalRow"] == "none"
+    assert result["after"] == "unchanged"
+
+
+def test_what_is_not_a_drawing_and_text_fields_are_left_to_the_browser():
+    result = _clip("""
+stage([poi({id: 'mine', source: 'user', locked: false, key: undefined})]);
+const tries = {
+  words: 'hello',
+  json: '{"a": 1}',
+  badTime: JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'box', time1: 'x',
+    price1: 1, time2: 2, price2: 3}}),
+  vline: JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'vline', time: 5}}),
+  later: JSON.stringify({atk: 'drawing', v: 2, drawing: {type: 'hline', price: 4031}}),
+};
+out.refused = Object.fromEntries(Object.entries(tries).map(([k, text]) => {
+  clip.text = text;
+  return [k, pasteKey().prevented];
+}));
+clip.text = JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'fib', time1: 10,
+  price1: 4050, time2: 20, price2: 4000, levels: [0, 'x'], color: 5, label: 'F'}});
+pasteKey();
+const fib = mine().find(d => d.type === 'fib');
+out.fib = [fib.levels, fib.color, fib.label];             // what is wrong is left out
+out.count = mine().length;
+
+press(xOf(8, 30), yOf(4013));                             // select the box
+clip.text = 'before';
+out.inField = copyKey({tagName: 'INPUT'}).prevented;
+ctx.window.getSelection = () => ({isCollapsed: false, toString: () => 'Sell POI'});
+out.withText = copyKey().prevented;
+ctx.window.getSelection = () => ({isCollapsed: true, toString: () => ''});
+out.clip = clip.text;
+out.selectedOnly = copyKey().prevented;
+out.pasteInField = pasteKey({tagName: 'TEXTAREA'}).prevented;
+out.countAfter = mine().length;
+""")
+    assert result["topLevelError"] is None
+    assert result["refused"] == {"words": False, "json": False, "badTime": False,
+                                 "vline": False, "later": False}
+    assert result["fib"] == [None, None, "F"]
+    assert result["count"] == 2
+    assert result["inField"] is False and result["withText"] is False
+    assert result["clip"] == "before"
+    assert result["selectedOnly"] is True
+    assert result["pasteInField"] is False
+    assert result["countAfter"] == 2
+
+
+def test_a_click_selects_any_drawing_and_a_click_away_ends_the_selection():
+    result = _clip("""
+stage([poi()]);
+ev('handleMsg')({type: 'access', edit: false});
+press(xOf(8, 30), yOf(4013));                             // the program's, on a viewer's page
+out.selected = [ev('selectedId'), ev('dragState')];
+const away = {button: 0, clientX: xOf(11, 0), clientY: yOf(4031)};
+ctx.__fireOn('panes', 'mousedown', Object.assign({}, away, {button: 2}));
+out.rightKept = ev('selectedId');
+ctx.__fireOn('panes', 'mousedown', away);
+out.cleared = ev('selectedId');
+clip.text = 'kept';
+out.copied = [copyKey().prevented, clip.text];
+""")
+    assert result["topLevelError"] is None
+    assert result["selected"] == ["poi", None]               # selected, never dragged
+    assert result["rightKept"] == "poi"
+    assert result["cleared"] is None
+    assert result["copied"] == [False, "kept"]               # no old selection copied
+
+
+def test_in_a_page_a_chart_passes_ctrl_v_to_the_chart_the_pointer_is_on():
+    result = _clip("""
+stage([poi()]);
+ctx.__toParent.length = 0;
+clip.text = JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'hline', price: 4031,
+  color: '#ef5350'}});
+const passed = pasteKey();
+out.passed = [passed.prevented, mine().length, ctx.__toParent.slice()];
+(docListeners.message || []).forEach(fn =>
+  fn({source: ctx.window.parent, data: {t: 'paste', text: clip.text}}));
+out.fromPage = mine().map(d => [d.type, d.price]);
+ev('hasPointer = true');
+pasteKey();
+out.here = mine().length;
+out.toParent = ctx.__toParent.length;
+""", extra_globals=_EMBED_SYNC)
+    assert result["topLevelError"] is None
+    text = ('{"atk":"drawing","v":1,"drawing":{"type":"hline","price":4031,'
+            '"color":"#ef5350"}}')
+    assert result["passed"] == [True, 0, [{"view": "v2", "t": "paste", "text": text}]]
+    assert result["fromPage"] == [["hline", 4031]]
+    assert result["here"] == 2 and result["toParent"] == 1
+
+
+def test_the_page_passes_a_paste_to_the_chart_in_use():
+    result = _run(PAGE_HTML, _SETTLE + """
+const text = JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'hline', price: 4031}});
+const posted = () => Object.fromEntries(['v1', 'v2', 'v3'].map(id =>
+  [id, win(id)._posted.filter(m => m.t === 'paste').length]));
+fromFrame('v3', {t: 'focus'});
+clearAll();
+fromFrame('v1', {t: 'paste', text});                 // v1 had the keyboard, v3 the pointer
+out.relayed = [posted(), win('v3')._posted[0]];
+clearAll();
+const own = (data, target) => {
+  let prevented = false;
+  fire('paste', target || document.body, {clipboardData: {getData: () => data},
+                                          preventDefault: () => { prevented = true; }});
+  return prevented;
+};
+out.own = [own(text), posted()];
+clearAll();
+out.words = [own('hello'), own(text, {tagName: 'INPUT'}), posted()];
+""", extra_globals=_LAYOUT)
+    assert result["topLevelError"] is None
+    text = '{"atk":"drawing","v":1,"drawing":{"type":"hline","price":4031}}'
+    assert result["relayed"] == [{"v1": 0, "v2": 0, "v3": 1}, {"t": "paste", "text": text}]
+    assert result["own"] == [True, {"v1": 0, "v2": 0, "v3": 1}]
+    assert result["words"] == [False, False, {"v1": 0, "v2": 0, "v3": 0}]
+
+
+def test_a_picture_never_copies_or_pastes():
+    result = _run(CHART_HTML, _CLIP.split("const T0")[0] + """
+ev('handleMsg')({type: 'init', title: 'XAU', bars: [{time: 1794290400, open: 1, high: 2,
+  low: 0.5, close: 1.5, volume: 1}], indicators: [], drawings: [{type: 'hline', id: 'h',
+  price: 1.2, color: '#fff', source: 'user'}]});
+ev('selectedId = "h"');
+clip.text = JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'hline', price: 1.4}});
+out.keys = [copyKey().prevented, pasteKey().prevented];
+out.drawings = Object.keys(ev('drawings'));
+""", extra_globals="ctx.location.search = '?snapshot=1&from=1794290400&to=1794290460';")
+    assert result["topLevelError"] is None
+    assert result["keys"] == [False, False]
+    assert result["drawings"] == ["h"]
+
+
+def test_a_box_20_px_tall_can_be_grabbed_and_selected_in_its_middle():
+    """Its inside kept 11 px clear of each edge and the edges reach 9 px: a box 18 to
+    22 px tall had a band across its middle that no click reached (Part 4f, found in
+    Chromium on a running zone 21.7 px tall)."""
+    result = _edits("""
+init({drawings: [box({price1: 90, price2: 88, locked: false})]});    // y 100 to 120
+out.middle = ev('hitTest(40, 110)');
+out.edge = ev('hitTest(40, 111)');                  // 11 px below the top: in the band
+out.top = ev('hitTest(40, 101)');
+""")
+    assert result["topLevelError"] is None
+    assert result["middle"] == {"id": "zone", "handle": "interior"}
+    assert result["edge"] == {"id": "zone", "handle": "interior"}
+    assert result["top"] == {"id": "zone", "handle": "tc"}
