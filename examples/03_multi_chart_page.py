@@ -26,6 +26,10 @@ What to try
    chart on the page follows. Your browser keeps the choice for the next visit;
    «Reset colours» brings back each chart's own. ☀ shows the light theme, whose
    colours are kept apart from the dark theme's.
+8. Draw a box on the 5m chart (▭), click it and press Ctrl+C (⌘C). Point at the
+   3m chart and press Ctrl+V: the same box lands there, at the same times and
+   prices (v1.3.0). Right-click any chart away from drawings → `📋 Paste here`
+   puts a copy at the click. Fibs, lines, texts and position boxes copy too.
 """
 from __future__ import annotations
 
