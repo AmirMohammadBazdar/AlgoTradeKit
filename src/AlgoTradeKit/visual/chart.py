@@ -1729,7 +1729,8 @@ class Chart:
         drawing, opens it.  Picking it calls ``fn(action)`` on the chart's thread
         with a :class:`ChartAction`: ``chart``, ``label``, ``time`` (the opening of
         the candle under the pointer, UTC ms) and ``price`` (the pointer's).  An
-        open page gets the new menu at once.  Labels are unique per chart.
+        open page gets the new menu at once.  Labels are unique per chart.  ``fn``
+        may raise :class:`EditRefused`: the pages then say «Refused: <why>» (v1.3.0).
         """
         if not isinstance(label, str) or not label:
             raise ValueError(f"action label {label!r} is not a non-empty string")
@@ -1766,6 +1767,8 @@ class Chart:
         on the chart's thread with a :class:`ChartAction` whose ``drawing`` is that
         drawing's dict and whose ``time`` is its left edge (UTC ms).  Only a page
         that may change the chart has the menu.  Labels are unique per chart.
+        ``fn`` may raise :class:`EditRefused`: every open page's status bar then
+        says «Refused: <its message>».
         """
         if not isinstance(label, str) or not label:
             raise ValueError(f"drawing action label {label!r} is not a non-empty string")
@@ -1960,6 +1963,8 @@ class Chart:
         def run() -> None:
             try:
                 fn(action)
+            except EditRefused as exc:            # v1.3.0: the page says why
+                self._tell_refused("", str(exc) or f"{label} refused")
             except Exception as exc:
                 print(f"[AlgoTradeKit] chart: action {label!r} failed — "
                       f"{type(exc).__name__}: {exc}", flush=True)
@@ -1983,6 +1988,9 @@ class Chart:
         def run() -> None:
             try:
                 fn(action)
+            except EditRefused as exc:            # the page says why; the drawing stays
+                self._tell_refused(str(drawing.get("id") or ""),
+                                   str(exc) or f"{label} refused")
             except Exception as exc:
                 print(f"[AlgoTradeKit] chart: drawing action {label!r} failed — "
                       f"{type(exc).__name__}: {exc}", flush=True)
@@ -2587,6 +2595,8 @@ class Chart:
 
         if not self._bars:
             raise ValueError("the chart has no candles to photograph")
+        if timezone is None:
+            timezone = self._timezone                # v1.3.0: as the chart shows its times
         zone_name, zone = _snapshot_zone(timezone)
         source = self._source_timezone              # v1.3.0: the stamps' own zone
         first = self._bars[0]["time"] if start is None else self._parse_range_time(start)
@@ -2634,7 +2644,9 @@ class Chart:
 
         ``timezone`` — an IANA name such as ``"Asia/Tehran"``, or a ``ZoneInfo`` —
         changes the time axis, the crosshair label and the title line; the
-        interactive chart stays UTC.
+        interactive chart stays as it is.  Without it the picture shows the
+        chart's own ``timezone`` (v1.3.0; UTC when the chart has none), reading
+        the candles in its ``source_timezone``.
 
         A chart that is not shown is served for the picture, with no browser tab,
         and stopped after it; a shown one stays as it is.  A chart on a
