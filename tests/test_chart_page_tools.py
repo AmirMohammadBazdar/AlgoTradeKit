@@ -20,7 +20,7 @@ from test_chart_edits import ZONES, Stepped, Zones, built, config  # noqa: F401
 from test_trader import _p_flat
 
 from AlgoTradeKit.trader import TraderConfig, run_live
-from AlgoTradeKit.visual import Chart, ChartAction
+from AlgoTradeKit.visual import Chart, ChartAction, EditRefused
 from AlgoTradeKit.visual.chart import _local, _span_text
 
 #: 2026-10-30 22:45 as MetaTrader stamps it (the broker's clock, written as UTC):
@@ -196,3 +196,52 @@ class TestDrawingActions:
         strategy._watch_hook = lambda chart, actions: heard.append((chart, actions))
         strategy.watch_chart(own, actions=("Mark",))       # a two-argument hook still works
         assert heard == [(own, ("Mark",))]
+
+
+class TestRefusalsAndPictures:
+    """v1.3.0 Part 4e: what a program refuses on the page says why; a picture shows
+    the chart's own zone."""
+
+    @staticmethod
+    def _sent(chart: Chart) -> list:
+        sent: list = []
+        chart._server = type("S", (), {"send": staticmethod(sent.append),
+                                       "_last_init": None})()
+        chart._shown = True
+        return sent
+
+    def test_a_refused_drawing_action_says_why_on_the_page(self):
+        chart = Chart(title="c")
+        sent = self._sent(chart)
+
+        def refuse(action):
+            raise EditRefused("a POI starts on a candle")
+
+        chart.add_drawing_action("Make it a zone", refuse)
+        chart._handle_browser_message({"type": "drawing_action", "label": "Make it a zone",
+                                       "drawing": {"type": "box", "id": "box_3", "time1": 60}})
+        assert chart._events.wait_idle(10)
+        assert {"type": "edit_refused", "id": "box_3",
+                "message": "a POI starts on a candle"} in sent
+
+    def test_a_refused_candle_action_says_why_too(self):
+        chart = Chart(title="c")
+        sent = self._sent(chart)
+
+        def refuse(action):
+            raise EditRefused("not on this candle")
+
+        chart.add_action("Mark here", refuse)
+        chart._handle_browser_message({"type": "chart_action", "label": "Mark here",
+                                       "time": 60, "price": 1.0})
+        assert chart._events.wait_idle(10)
+        assert [m for m in sent if m.get("type") == "edit_refused"] == [
+            {"type": "edit_refused", "id": "", "message": "not on this candle"}]
+
+    def test_a_picture_shows_the_charts_own_zone_unless_told_another(self):
+        chart = Chart(title="XAU", timezone="Asia/Tehran", source_timezone="Europe/Athens")
+        chart.set_data(_frame())
+        query = parse_qs(chart._snapshot_query())
+        assert query["tz"] == ["Asia/Tehran"] and query["stz"] == ["Europe/Athens"]
+        assert query["title"][0].endswith("2026-10-31 00:15 (UTC+03:30)")
+        assert parse_qs(chart._snapshot_query(timezone="UTC"))["tz"] == ["UTC"]
