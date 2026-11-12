@@ -2588,11 +2588,20 @@ class Chart:
         """Stop the server and close the browser connection."""
         self._server.stop()
 
-    def _snapshot_query(self, start=None, end=None, timezone=None) -> str:
+    #: The empty candles a picture leaves after its last candle (v1.3.0): what
+    #: :meth:`screenshot` uses when its ``right_room`` is not given.  Set it on one
+    #: chart, or on the class — ``Chart.picture_room = 4`` — for every picture,
+    #: the notifiers' included.  0: the last candle at the picture's right edge.
+    picture_room: int = 10
+
+    def _snapshot_query(self, start=None, end=None, timezone=None, room=None) -> str:
         """The screenshot page's query for *start*–*end*: the candles' range, the
-        zone and the title line."""
+        zone, the title line and the room after the last candle."""
         from urllib.parse import urlencode
 
+        room = self.picture_room if room is None else room
+        if isinstance(room, bool) or not isinstance(room, int) or not 0 <= room <= 1000:
+            raise ValueError(f"right_room: {room!r} is not a whole number of candles, 0–1000")
         if not self._bars:
             raise ValueError("the chart has no candles to photograph")
         if timezone is None:
@@ -2613,7 +2622,7 @@ class Chart:
             if part
         )
         query = {"snapshot": 1, "from": inside[0], "to": inside[-1], "tz": zone_name,
-                 "title": title}
+                 "title": title, "room": room}
         if source and source != "UTC":
             query["stz"] = source
         return urlencode(query)
@@ -2630,6 +2639,7 @@ class Chart:
         width:    int = 1280,
         height:   int = 720,
         timezone=None,
+        right_room: int | None = None,
     ) -> bytes:
         """
         A PNG of this chart from *start* to *end*, photographed by a headless
@@ -2648,6 +2658,12 @@ class Chart:
         chart's own ``timezone`` (v1.3.0; UTC when the chart has none), reading
         the candles in its ``source_timezone``.
 
+        ``right_room`` — the empty candles after the last one (v1.3.0), so the
+        newest candle does not sit on the picture's edge.  ``None`` takes the
+        chart's ``picture_room``: 10 unless it was changed, on the chart or on the
+        class.  ``0`` puts the last candle at the right edge, as before 1.3.0.  An
+        open position's lines get at least an eighth of the candles shown, and 8.
+
         A chart that is not shown is served for the picture, with no browser tab,
         and stopped after it; a shown one stays as it is.  A chart on a
         :class:`ChartPage` is photographed from the page's server (v1.3.0), so the
@@ -2664,7 +2680,7 @@ class Chart:
             raise SnapshotError(
                 "the chart is on a ChartPage that is not shown — call page.show() first"
             )
-        query = self._snapshot_query(start, end, timezone)
+        query = self._snapshot_query(start, end, timezone, right_room)
         with _SCREENSHOT_LOCK:
             started_here = not self._shown
             if started_here:
