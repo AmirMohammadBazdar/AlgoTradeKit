@@ -7,6 +7,92 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [1.3.0] — 2026-11-12
+
+Edits on the chart. A chart page takes the viewer's changes — a zone moved,
+deleted or made — and a live session hands them to the strategy between two
+candles. The page grows with it: colours, time zones, a countdown, copy and
+paste, and a layout for phones. Nothing changes for code that asks for none,
+except pictures, which now leave room after their last candle.
+
+### Added
+
+- **Keyed drawings report their edits** — `key=`, `editable=` (`True`,
+  `False`, or a tuple of `"price"`, `"time"` and `"move"`), `deletable=` and
+  `title=` on every drawing. `Chart.on_drawing_edit(fn)` and
+  `Chart.on_drawing_delete(fn)` call `fn` with a `DrawingEdit` (`chart`,
+  `drawing_id`, `key`, `before`, `after`) on the chart's own thread. A callback
+  that raises `EditRefused` puts the drawing back on every open page, whose
+  status bar says «Refused: …».
+- **Menus and buttons** — `Chart.add_action(label, fn)` in the candle menu (a
+  right-click on the chart) and `Chart.add_drawing_action(label, fn)` on a
+  drawing the viewer drew, both with a `ChartAction` (`chart`, `label`, `time`,
+  `price`, `drawing`); `Chart.add_button(label, fn, confirm=)` in the toolbar;
+  `Chart.add_vline(time, …)`, a vertical line across the price pane.
+- **The edit key** — `Chart(edit_key=…)` and `TraderConfig(chart_edit_key=…)`:
+  only a page opened with `?key=…` may change the chart. Any other page looks,
+  scrolls, replays and draws its own lines, and changes nothing another viewer
+  sees.
+- **Edits reach the strategy** — `BaseStrategy.on_chart_edit(edit)` (return
+  `False` to refuse), `on_chart_action(action)`, `chart_actions`,
+  `chart_drawing_actions`, `watch_chart(chart, actions=, drawing_actions=)`, and
+  `draw(dict)` / `erase(key)` for the strategy's own drawings on a live
+  session's chart. `run_live` and `Trader` call the hooks between candles, under
+  the session's step lock; a backtest never does.
+- **Saved edits and «Re-run with edits»** — `TraderConfig(chart_edits_path=…)`
+  keeps every edit, delete and action the strategy accepts and hands them back
+  as `chart_edits` before `setup()`. With a fixed `chart_port`, `run_live`'s
+  chart offers «Re-run with edits»: the program starts again — the same
+  address, the same key — and walks the history with them.
+- **Colours** — `Chart(style={…})` with `background`, `up_color`, `down_color`
+  and `grid`; `Chart.set_style(…)`; `TraderConfig(chart_style=…)`; and Settings
+  → Colours, each browser's own, for each theme apart.
+- **Time zones** — `Chart(timezone=, source_timezone=)` and
+  `TraderConfig(chart_timezone=, chart_source_timezone=)`: the zone the candles
+  are stamped in, and the one the axis, the crosshair, GO TO and pictures read
+  in. Settings → Time zone lists them offset first («+03:30 Tehran»), sorted by
+  the offset.
+- **On the page** — GO TO (Alt+G); a countdown to the candle's close on the
+  feed's own clock; room after the last candle; the brand links to the
+  repository. A drawing with `time2=None` (a position box with
+  `close_time=None`) runs to the live edge, five candles past the last. A Fib
+  resizes from all four corners and takes its own levels. The replay keeps the
+  viewer's drawings and shows an open trade's planned RR.
+- **Copy and paste** — Ctrl+C / Ctrl+V, «📋 Copy» and «📋 Paste here»: a
+  drawing goes to another chart of the page, or another page, as the viewer's
+  own.
+- **`ChartPage` on a phone** — on a screen taller than wide, a row's charts
+  stack (`ChartPage(stack_upright=False)` keeps them side by side). ⊞ LAYOUT
+  lets each viewer arrange the charts as they like, kept in their browser for
+  wide and upright screens apart. The dividers drag with a finger.
+- **Pictures leave room** — 10 empty candles after the last one:
+  `Chart.picture_room`, on one chart or on the class for every picture, and
+  `Chart.screenshot(right_room=)`.
+- **Runnable example 10** — edits on the chart reach a paper strategy.
+
+### Changed
+
+- **MetaTrader's clock** — `clock_offset_ms()` reads the trade server's clock
+  from its newest tick, rounded to a quarter hour, and `server_time()` is on
+  that clock. Candle closes fire when they happen on the server, and the live
+  seeds keep the last closed candle; a broker two hours ahead of UTC used to
+  fire them two hours late.
+- A picture reads its times in the chart's own `timezone` unless told
+  otherwise.
+- An action that raises `EditRefused` says why on every open page.
+
+### Fixed
+
+- A page reload showed a stale chart; a chart added after `ChartPage.show()`
+  never got its candles; a picture of a `ChartPage`'s chart always failed.
+- Browser edits of a strategy's drawings were not kept.
+- A box that reached past the last candle could not be resized, and one 18–22
+  px tall could not be clicked in its middle.
+- A view's address without its view (`/view?key=…`) opened a blank chart; it
+  opens the page now.
+
+---
+
 ## [1.2.0] — 2026-10-23
 
 Notifications. A trading session's events, chart pictures, price alerts and a

@@ -29,34 +29,40 @@ python examples/09_other_backends.py           # Discord, e-mail, a webhook (the
 python examples/10_chart_edits.py              # edits on the chart reach a paper strategy
 ```
 
-> ### 🔔 New in v1.2.0 — notifications
+> ### ✏️ New in v1.3.0 — the chart talks back
 >
-> Your strategy's trades, a picture of the chart with each, price alerts and a
-> backtest's report, sent to Telegram, and commands back from your phone:
+> Move, resize or delete a strategy's zone on its live chart, and the strategy
+> hears it between two candles:
 >
 > ```python
-> from AlgoTradeKit import run_live
-> from AlgoTradeKit.broker import Broker
-> from AlgoTradeKit.notify import TelegramNotifier
-> from AlgoTradeKit.trader import TraderConfig
+> class Zones(BaseStrategy):
+>     def on_chart_edit(self, edit):            # edit.key, edit.before, edit.after
+>         if edit.after is None:                # deleted on the chart
+>             self.zones.pop(edit.key, None)
+>         elif too_tall(edit.after):
+>             return False                      # refused: it goes back, the page says why
+>         else:
+>             self.zones[edit.key] = edit.after
 >
-> bot = TelegramNotifier(token, {"me": 123456789},   # your private chat with the bot
->                        images={"open", "close"},   # chart pictures: the [notify] extra
->                        commanders=[123456789])     # /status, /chart, /stop from your phone
-> config = TraderConfig(symbol="BTCUSDT", min_candles=200, notifiers=[bot])
-> run_live(strategy=MyStrategy(), broker=Broker("binance-spot"), config=config)
+> config = TraderConfig(symbol="BTCUSDT", min_candles=200, chart_port=8710,
+>                       chart_edit_key="a-long-secret",       # only ?key=… may change it
+>                       chart_edits_path="chart_edits.json")  # kept, and «Re-run with edits»
 > ```
 >
-> * **Trading events** — signals, opens, closes, the start, the stop and the day,
->   from `run_live` and `Trader` alike. A trade's messages reply to its first one,
->   and trading never waits for a message.
-> * **Chart pictures** on trade messages, or on demand with `send_chart` and
->   `send_report`.
-> * **Price alerts** with no strategy: `bot.watch(broker, "BTCUSDT", above=65_000)`.
-> * **Commands**: `/status`, `/positions`, `/chart`, `/stop` and `/help`.
-> * **Discord, e-mail and webhooks** get the same messages.
+> * **Edits, menus and buttons** — keyed drawings report every change; candle and
+>   drawing menus, toolbar buttons and the edit key.
+> * **The chart page** — colours, time zones, GO TO, a countdown, Fib levels, and
+>   copy and paste.
+> * **On a phone** — charts stack when the screen is upright, and ⊞ LAYOUT
+>   arranges them your way.
+> * **Pictures** leave room after the last candle, and MetaTrader's clock is read
+>   from its ticks.
 >
-> See [`notify`](#notify--notifications-v120).
+> See [`strategy`](#edits-from-the-chart-v130) and [`visual`](#visual--interactive-chart).
+>
+> **v1.2.0** brought notifications: trades, chart pictures, price alerts and
+> commands on Telegram, Discord, e-mail and webhooks. See
+> [`notify`](#notify--notifications-v120).
 >
 > **v1.1.0** grew the chart: timeframe switching, several synced charts on one
 > page, and bar replay. See [`visual`](#visual--interactive-chart).
