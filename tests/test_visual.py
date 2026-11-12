@@ -1246,6 +1246,8 @@ class TestPushProtocolE2E:
                 assert init["type"] == "init"
                 assert init["candleCountLimit"] is None
                 assert len(init["bars"]) == 10
+                # v1.3.0: every page is then told what it may change
+                assert json.loads(ws.recv(timeout=5)) == {"type": "access", "edit": True}
 
                 # 1. Trade opens → add_drawing(live_position)
                 pid = c.add_live_position(ANCHOR_S + 9 * ONE_DAY_S,
@@ -1327,3 +1329,502 @@ class TestFrontendWiring:
         # streamBar must call the window enforcement on every new bar
         stream_fn = html.split("function streamBar")[1].split("function ")[0]
         assert "enforceCandleLimit()" in stream_fn
+
+
+# ===========================================================================
+# Colours (v1.3.0): Chart(style=), set_style, the layout file
+# ===========================================================================
+
+import re  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from AlgoTradeKit.visual._style import check_style  # noqa: E402
+from AlgoTradeKit.visual.indicator_renderer import add_strategy_drawings  # noqa: E402
+
+_STYLE = {"background": "#101820", "up_color": "#ffffff", "down_color": "#808080",
+          "grid": False}
+
+
+def _refused(style, where="style") -> str:
+    with pytest.raises(ValueError) as raised:
+        check_style(style, where=where)
+    return str(raised.value)
+
+
+class TestCheckStyle:
+    def test_its_three_sentences(self):
+        assert _refused({"background": "black"}) == (
+            "style['background']: 'black' is not a colour — use '#rrggbb'")
+        assert _refused({"grid": "off"}) == "style['grid']: 'off' is not True or False"
+        assert _refused({"bg": "#000000"}) == (
+            "style: unknown key 'bg' — known: background, up_color, down_color, grid")
+
+    def test_a_style_that_is_not_a_dict(self):
+        assert _refused("dark") == (
+            "style: 'dark' is not a dict of background, up_color, down_color and grid")
+
+    def test_the_message_names_where_the_style_came_from(self):
+        assert _refused({"background": "black"}, where="TraderConfig.chart_style") == (
+            "TraderConfig.chart_style['background']: 'black' is not a colour — use '#rrggbb'")
+
+    def test_three_six_or_eight_hex_digits_kept_as_written(self):
+        style = {"background": "#ABC", "up_color": "#11223344", "down_color": "#ff0000",
+                 "grid": True}
+        assert check_style(style) == style
+        for bad in ("#12345", "#1234567", "rgb(0,0,0)", "101820", 0x101820):
+            assert "is not a colour" in _refused({"up_color": bad})
+
+    def test_grid_is_a_bool_not_a_number(self):
+        assert _refused({"grid": 1}) == "style['grid']: 1 is not True or False"
+
+    def test_none_is_not_set(self):
+        assert check_style(None) == {}
+        assert check_style({"background": None, "grid": False}) == {"grid": False}
+
+
+class TestChartStyle:
+    def test_a_bad_style_is_refused_when_the_chart_is_made(self):
+        with pytest.raises(ValueError, match=re.escape(
+                "style['background']: 'black' is not a colour — use '#rrggbb'")):
+            Chart(style={"background": "black"})
+
+    def test_the_init_carries_only_the_keys_set(self):
+        assert Chart(style={"background": "#101820"})._build_init_payload()["style"] == {
+            "background": "#101820"}
+        assert Chart()._build_init_payload()["style"] == {}
+
+    def test_style_is_a_copy_both_ways(self):
+        given = dict(_STYLE)
+        c = Chart(style=given)
+        given["background"] = "#000000"
+        c.style["grid"] = True
+        assert c.style == _STYLE
+
+    def test_from_csv_takes_a_style(self, tmp_path):
+        path = tmp_path / "candles.csv"
+        _make_ohlcv_df(5, use_timestamp_col=True).to_csv(path, index=False)
+        assert Chart.from_csv(str(path), style=_STYLE).style == _STYLE
+
+    def test_set_style_merges_and_tells_the_open_page(self):
+        c = _shown_chart(style={"background": "#101820"})
+        c.set_style(up_color="#ffffff", grid=False)
+        expected = {"background": "#101820", "up_color": "#ffffff", "grid": False}
+        assert c.style == expected
+        assert _sent(c) == [{"type": "style", "style": expected}]
+        assert c._server._last_init["style"] == expected     # and a reload shows it
+
+    def test_none_brings_back_the_themes_colour(self):
+        c = _shown_chart(style=_STYLE)
+        c.set_style(background=None)
+        assert "background" not in c.style
+        assert _sent(c)[-1]["style"] == {k: v for k, v in _STYLE.items() if k != "background"}
+
+    def test_a_bad_field_changes_nothing(self):
+        c = _shown_chart(style={"background": "#101820"})
+        with pytest.raises(ValueError, match="unknown key 'bg'"):
+            c.set_style(bg="#000000")
+        assert c.style == {"background": "#101820"} and _sent(c) == []
+
+    def test_before_show_it_only_changes_the_init(self):
+        c = _make_chart()
+        c._server = _FakeServer()
+        c.set_style(grid=False)
+        assert c._server.sent == []
+        assert c._build_init_payload()["style"] == {"grid": False}
+
+    def test_the_layout_file_keeps_the_style(self, tmp_path):
+        path = tmp_path / "layout.json"
+        Chart(style=_STYLE).save_layout(str(path))
+        assert json.loads(path.read_text())["style"] == _STYLE
+        restored = Chart()
+        restored.load_layout(str(path))
+        assert restored.style == _STYLE
+
+    def test_a_layout_file_without_a_style_leaves_it(self, tmp_path):
+        path = tmp_path / "old.json"
+        path.write_text(json.dumps({"title": "Old", "indicators": [], "drawings": []}))
+        c = Chart(style={"up_color": "#ffffff"})
+        c.load_layout(str(path))
+        assert c.style == {"up_color": "#ffffff"}
+
+
+# ===========================================================================
+# Gap 1 (v1.3.0): a strategy's drawing keeps what the browser did to it
+# ===========================================================================
+
+class TestStrategyDrawingEdits:
+    @staticmethod
+    def _chart_with_zone() -> Chart:
+        c = _shown_chart()
+        add_strategy_drawings(c, SimpleNamespace(drawings=[
+            {"type": "box", "id": "zone", "time1": ANCHOR_S, "time2": ANCHOR_S + ONE_DAY_S,
+             "price1": 100.0, "price2": 104.0, "color": "#26a69a", "label": "Zone"},
+        ]))
+        _sent(c).clear()
+        return c
+
+    def test_an_edit_reaches_a_fresh_init(self):
+        c = self._chart_with_zone()
+        c._handle_browser_message({"type": "drawing_updated", "drawing": {
+            "id": "zone", "type": "box", "time1": ANCHOR_S, "time2": ANCHOR_S + 3 * ONE_DAY_S,
+            "price1": 98.0, "price2": 104.0, "color": "#ff9800", "label": "Moved"}})
+        (zone,) = c._build_init_payload()["drawings"]
+        assert (zone["time2"], zone["price1"]) == (ANCHOR_S + 3 * ONE_DAY_S, 98.0)
+        assert (zone["color"], zone["label"]) == ("#ff9800", "Moved")
+        assert zone["id"] == "zone" and zone["source"] == "server"
+        assert c._server._last_init["drawings"] == [zone]     # what a reload is sent
+
+    def test_a_lock_change_reaches_a_fresh_init(self):
+        c = self._chart_with_zone()
+        c._handle_browser_message({"type": "drawing_lock_changed", "id": "zone",
+                                   "locked": False})
+        (zone,) = c._server._last_init["drawings"]
+        assert zone["locked"] is False
+        assert not hasattr(c._drawings[0], "locked")          # the payload, not the wrapper
+
+    def test_the_librarys_own_drawings_are_edited_as_before(self):
+        c = _shown_chart()
+        c.add_box(ANCHOR_S, 100.0, ANCHOR_S + ONE_DAY_S, 104.0)
+        box = c._drawings[-1]
+        c._handle_browser_message({"type": "drawing_updated", "drawing": {
+            "id": box.id, "price1": 98.0, "made_up": 1}})
+        c._handle_browser_message({"type": "drawing_lock_changed", "id": box.id,
+                                   "locked": True})
+        assert (box.price1, box.locked) == (98.0, True)
+        assert not hasattr(box, "made_up")
+
+
+# ===========================================================================
+# Edits on the page reach Python (v1.3.0, Part 2)
+# ===========================================================================
+
+import threading  # noqa: E402
+
+from AlgoTradeKit.visual import ChartAction, EditRefused  # noqa: E402
+
+_EDIT_FIELDS = ("key", "editable", "deletable", "title")
+
+
+def _keyed_box_chart(**chart_kwargs):
+    c = _shown_chart(**chart_kwargs)
+    c.add_box(ANCHOR_S, 100.0, ANCHOR_S + ONE_DAY_S, 104.0, key="zone:1", title="Zone 1")
+    _sent(c).clear()
+    return c, c._drawings[-1]
+
+
+def _moved(drawing, **fields) -> dict:
+    """What a page sends after a drag: the whole drawing as it holds it."""
+    return {"type": "drawing_updated", "drawing": {**drawing.to_dict(), **fields}}
+
+
+def _refuse(why: str):
+    def callback(edit):
+        raise EditRefused(why)
+    return callback
+
+
+class TestDrawingEditFields:
+    def test_every_drawing_says_how_it_may_be_changed(self):
+        c = _make_chart()
+        c.add_hline(1.0)
+        c.add_trendline(ANCHOR_S, 1.0, ANCHOR_S + ONE_DAY_S, 2.0)
+        c.add_box(ANCHOR_S, 1.0, ANCHOR_S + ONE_DAY_S, 2.0)
+        c.add_signal(ANCHOR_S, "buy")
+        c.add_text(ANCHOR_S, 1.0, "note")
+        c.add_fib(ANCHOR_S, 1.0, ANCHOR_S + ONE_DAY_S, 2.0)
+        c.add_position_box(ANCHOR_S, ANCHOR_S + ONE_DAY_S, 100.0, 95.0, 110.0, "long", 5.0)
+        c.add_live_position(ANCHOR_S, 100.0, 95.0, "long")
+        drawings = c._build_init_payload()["drawings"]
+        assert len(drawings) == 8
+        for d in drawings:
+            assert {k: d[k] for k in _EDIT_FIELDS} == {
+                "key": None, "editable": True, "deletable": True, "title": None}, d["type"]
+
+    def test_the_add_methods_take_them_by_name_only(self):
+        c = _make_chart()
+        c.add_hline(1.0, key="level", editable=("price",), deletable=False, title="Level")
+        d = c._build_init_payload()["drawings"][-1]
+        assert [d[k] for k in _EDIT_FIELDS] == ["level", ["price"], False, "Level"]
+        with pytest.raises(TypeError):
+            c.add_hline(2.0, "#fff", 1, 0, "", "level2")      # a sixth positional argument
+        c.add_box(ANCHOR_S, 1.0, ANCHOR_S + ONE_DAY_S, 2.0, editable=["price", "time"])
+        assert c._drawings[-1].editable == ("price", "time")  # as JSON gives it back
+
+    @pytest.mark.parametrize(("fields", "message"), [
+        ({"editable": ("size",)}, "editable: 'size' is not 'price', 'time' or 'move'"),
+        ({"editable": ()}, "editable: () names no handle — use False"),
+        ({"editable": "yes"},
+         "editable: 'yes' is not True, False or a tuple of 'price', 'time' and 'move'"),
+        ({"key": ""}, "key: '' is not a non-empty string"),
+        ({"deletable": "no"}, "deletable: 'no' is not True or False"),
+        ({"title": 5}, "title: 5 is not a string"),
+    ])
+    def test_what_is_refused(self, fields, message):
+        c = _make_chart()
+        with pytest.raises(ValueError) as raised:
+            c.add_box(ANCHOR_S, 1.0, ANCHOR_S + ONE_DAY_S, 2.0, **fields)
+        assert str(raised.value) == message
+        assert c._drawings == []
+
+    def test_a_key_is_unique_on_its_chart(self):
+        c = _make_chart()
+        add_strategy_drawings(c, SimpleNamespace(drawings=[
+            {"type": "box", "id": "strat_17", "key": "poi:sell:1793030100000", "time1": ANCHOR_S,
+             "time2": ANCHOR_S + ONE_DAY_S, "price1": 2.0, "price2": 1.0}]))
+        with pytest.raises(ValueError) as raised:
+            c.add_box(ANCHOR_S, 1.0, ANCHOR_S + ONE_DAY_S, 2.0, key="poi:sell:1793030100000")
+        assert str(raised.value) == (
+            "key 'poi:sell:1793030100000' is already used by drawing 'strat_17'")
+        c.add_hline(1.0, key="level")
+        level = c._drawings[-1]
+        with pytest.raises(ValueError, match="key 'level' is already used"):
+            c.update_drawing("strat_17", key="level")
+        c.remove_drawing(level.id)
+        c.add_hline(2.0, key="level")                         # free again once it is gone
+
+    def test_edit_key_is_a_non_empty_string(self):
+        for bad in ("", 5):
+            with pytest.raises(ValueError) as raised:
+                Chart(edit_key=bad)
+            assert str(raised.value) == f"edit_key: {bad!r} is not a non-empty string"
+
+    def test_a_vertical_line(self, tmp_path):
+        c = _make_chart()
+        vid = c.add_vline(ANCHOR_S + 3600, label="Restart", style="solid", key="restart:1",
+                          title="Restart 01:00")
+        assert c._drawings[-1].to_dict() == {
+            "type": "vline", "time": ANCHOR_S + 3600, "color": "#e3b341", "label": "Restart",
+            "style": "solid", "id": vid, "locked": True, "source": "server", "key": "restart:1",
+            "editable": False, "deletable": True, "title": "Restart 01:00"}
+        with pytest.raises(ValueError, match="style: 'dotted' is not 'dashed' or 'solid'"):
+            c.add_vline(ANCHOR_S, style="dotted")
+        path = tmp_path / "layout.json"
+        c.save_layout(str(path))
+        restored = _make_chart()
+        restored.load_layout(str(path))
+        assert [d.to_dict() for d in restored._drawings] == [d.to_dict() for d in c._drawings]
+
+
+class TestEditCallbacks:
+    def test_edits_reach_every_callback_in_order_on_the_chart_thread(self):
+        c, box = _keyed_box_chart()
+        calls = []
+        for name in ("first", "second"):
+            c.on_drawing_edit(lambda e, name=name: calls.append(
+                (name, threading.current_thread().name, e.before["price1"], e.after["price1"])))
+        c._handle_browser_message(_moved(box, price1=98.0))
+        c._handle_browser_message(_moved(box, price1=97.0))
+        assert c._events.wait_idle(5)
+        assert calls == [("first", "atk-chart-events", 100.0, 98.0),
+                         ("second", "atk-chart-events", 100.0, 98.0),
+                         ("first", "atk-chart-events", 98.0, 97.0),
+                         ("second", "atk-chart-events", 98.0, 97.0)]
+
+    def test_the_edit_names_its_drawing(self):
+        c, box = _keyed_box_chart()
+        got = []
+        record = got.append
+        assert c.on_drawing_edit(record) is record                 # it returns fn
+        c._handle_browser_message(_moved(box, label="Moved"))
+        assert c._events.wait_idle(5)
+        (edit,) = got
+        assert (edit.chart, edit.drawing_id, edit.key) == (c, box.id, "zone:1")
+        assert (edit.before["label"], edit.after["label"]) == ("", "Moved")
+
+    def test_a_press_that_moves_nothing_and_a_lock_report_nothing(self):
+        c, box = _keyed_box_chart()
+        calls = []
+        c.on_drawing_edit(calls.append)
+        c._handle_browser_message(_moved(box))
+        c._handle_browser_message({"type": "drawing_lock_changed", "id": box.id,
+                                   "locked": False})
+        assert c._events.wait_idle(5)
+        assert calls == [] and box.locked is False
+
+    def test_a_drawing_without_a_key_calls_nothing(self):
+        c = _shown_chart()
+        c.add_box(ANCHOR_S, 100.0, ANCHOR_S + ONE_DAY_S, 104.0)
+        box = c._drawings[-1]
+        calls = []
+        c.on_drawing_edit(calls.append)
+        c.on_drawing_delete(calls.append)
+        c._handle_browser_message(_moved(box, price1=98.0))
+        c._handle_browser_message({"type": "drawing_deleted", "id": box.id})
+        assert c._events.wait_idle(5)
+        assert calls == [] and box.price1 == 98.0 and c._drawings == []
+
+    def test_edit_refused_puts_the_drawing_back_and_tells_the_page(self):
+        c, box = _keyed_box_chart()
+        c.on_drawing_edit(_refuse("too tall"))
+        c._handle_browser_message(_moved(box, price1=120.0))
+        assert box.price1 == 120.0                              # stored at once ...
+        assert c._events.wait_idle(5)
+        assert box.price1 == 100.0                              # ... and put back
+        update, refused = _sent(c)
+        assert update["type"] == "update_drawing" and update["drawing"]["price1"] == 100.0
+        assert refused == {"type": "edit_refused", "id": box.id, "message": "too tall"}
+        assert c._server._last_init["drawings"][-1]["price1"] == 100.0   # and a reload
+
+    def test_any_other_error_is_printed_and_undoes_the_edit(self, capsys):
+        c, box = _keyed_box_chart()
+        c.on_drawing_edit(lambda edit: 1 / 0)
+        c._handle_browser_message(_moved(box, price2=110.0))
+        assert c._events.wait_idle(5)
+        assert box.price2 == 104.0
+        assert ("[AlgoTradeKit] chart: on_drawing_edit failed — ZeroDivisionError: division by "
+                "zero") in capsys.readouterr().out
+        assert _sent(c)[-1] == {"type": "edit_refused", "id": box.id,
+                                "message": "division by zero"}
+
+    def test_a_strategy_drawing_is_put_back_too(self):
+        c = _shown_chart()
+        add_strategy_drawings(c, SimpleNamespace(drawings=[
+            {"type": "box", "id": "poi", "key": "poi:sell:1", "time1": ANCHOR_S,
+             "time2": ANCHOR_S + ONE_DAY_S, "price1": 104.0, "price2": 100.0}]))
+        payload = c._drawings[0]._payload
+        c.on_drawing_edit(_refuse("no"))
+        c._handle_browser_message({"type": "drawing_updated",
+                                   "drawing": {**payload, "price1": 106.0, "extra": 1}})
+        assert c._events.wait_idle(5)
+        assert payload["price1"] == 104.0 and "extra" not in payload
+
+    def test_a_delete_reaches_its_callback_with_after_none(self):
+        c, box = _keyed_box_chart()
+        got = []
+        c.on_drawing_delete(got.append)
+        c._handle_browser_message({"type": "drawing_deleted", "id": box.id})
+        assert box not in c._drawings                           # gone at once
+        assert c._events.wait_idle(5)
+        (edit,) = got
+        assert (edit.drawing_id, edit.key, edit.after) == (box.id, "zone:1", None)
+        assert edit.before["price1"] == 100.0
+
+    def test_a_refused_delete_puts_the_drawing_back_where_it_was(self):
+        c = _shown_chart()
+        c.add_hline(1.0)
+        c.add_box(ANCHOR_S, 100.0, ANCHOR_S + ONE_DAY_S, 104.0, key="zone:1")
+        c.add_hline(2.0)
+        box = c._drawings[1]
+        c.on_drawing_delete(_refuse("keep it"))
+        _sent(c).clear()
+        c._handle_browser_message({"type": "drawing_deleted", "id": box.id})
+        assert c._events.wait_idle(5)
+        assert c._drawings[1] is box
+        add, refused = _sent(c)
+        assert add == {"type": "add_drawing", "drawing": box.to_dict()}
+        assert refused == {"type": "edit_refused", "id": box.id, "message": "keep it"}
+        assert box.id in [d["id"] for d in c._server._last_init["drawings"]]
+
+
+class TestChartActions:
+    def test_an_action_gets_its_candle_in_ms_on_the_chart_thread(self):
+        c = _shown_chart()
+        got = []
+        c.add_action("Mark here", lambda a: got.append((threading.current_thread().name, a)))
+        c._handle_browser_message({"type": "chart_action", "label": "Mark here",
+                                   "time": ANCHOR_S, "price": 101.5})
+        c._handle_browser_message({"type": "chart_action", "label": "Unknown",
+                                   "time": ANCHOR_S, "price": 1.0})
+        assert c._events.wait_idle(5)
+        assert got == [("atk-chart-events", ChartAction(chart=c, label="Mark here",
+                                                        time=ANCHOR_S * 1000, price=101.5))]
+
+    def test_labels_are_unique_and_the_page_hears_the_menu(self):
+        c = _shown_chart()
+        c.add_action("Mark here", print)
+        with pytest.raises(ValueError, match="action 'Mark here' is already on this chart"):
+            c.add_action("Mark here", print)
+        c.add_action("Restart here", print)
+        assert _sent(c)[-1] == {"type": "actions", "actions": ["Mark here", "Restart here"]}
+        c.remove_action("Mark here")
+        assert _sent(c)[-1] == {"type": "actions", "actions": ["Restart here"]}
+        assert c._server._last_init["actions"] == ["Restart here"]
+        with pytest.raises(ValueError, match="no action 'Mark here' on this chart"):
+            c.remove_action("Mark here")
+
+    def test_an_action_that_raises_is_printed(self, capsys):
+        c = _shown_chart()
+
+        def broken(action):
+            raise RuntimeError("no room")
+
+        c.add_action("Mark here", broken)
+        c._handle_browser_message({"type": "chart_action", "label": "Mark here",
+                                   "time": ANCHOR_S, "price": None})
+        assert c._events.wait_idle(5)
+        assert ("[AlgoTradeKit] chart: action 'Mark here' failed — RuntimeError: no room"
+                in capsys.readouterr().out)
+
+
+class TestEditKey:
+    def test_a_page_without_the_key_changes_nothing_anyone_sees(self):
+        c, box = _keyed_box_chart()
+        removed, ran = [], []
+        c.on_indicator_removed = removed.append
+        c.add_indicator_spec({"kind": "ema", "period": 3})
+        c.add_action("Mark here", ran.append)
+        _sent(c).clear()
+        before = (box.to_dict(), c.display_timeframe, [i.name for i in c._indicators])
+        stranger = {"_editor": False}
+        for msg in ({"type": "drawing_updated", "drawing": {**box.to_dict(), "price1": 1.0}},
+                    {"type": "drawing_lock_changed", "id": box.id, "locked": False},
+                    {"type": "drawing_deleted", "id": box.id},
+                    {"type": "chart_action", "label": "Mark here", "time": ANCHOR_S,
+                     "price": 1.0},
+                    {"type": "set_timeframe", "tf": "3d"},
+                    {"type": "compute_indicator", "params": {"kind": "sma", "period": 3}},
+                    {"type": "remove_indicator", "name": c._indicators[0].name}):
+            c._handle_browser_message({**msg, **stranger})
+        c._handle_browser_message({"type": "replay_arm", **stranger})   # replay is its own
+        assert c._events.wait_idle(5)
+        assert (box.to_dict(), c.display_timeframe, [i.name for i in c._indicators]) == before
+        assert box in c._drawings and removed == [] and ran == []
+        assert [m["type"] for m in _sent(c)] == ["replay_data"]
+
+    def test_two_browsers_one_with_the_key(self):
+        from websockets.sync.client import connect
+
+        c = Chart(title="Keyed", edit_key="s3cret")
+        c.set_data(_make_ohlcv_df(10))
+        c.add_box(ANCHOR_S, 100.0, ANCHOR_S + ONE_DAY_S, 104.0, key="zone:1")
+        box_id = c._drawings[0].id
+        deleted = []
+        c.on_drawing_delete(deleted.append)
+        c.show(open_browser=False)
+        try:
+            url = f"ws://127.0.0.1:{c._server.port}/ws"
+            with connect(url + "?key=s3cret") as owner, connect(url) as stranger:
+                for ws in (owner, stranger):
+                    assert json.loads(ws.recv(timeout=5))["type"] == "init"
+                assert json.loads(owner.recv(timeout=5)) == {"type": "access", "edit": True}
+                assert json.loads(stranger.recv(timeout=5)) == {"type": "access", "edit": False}
+
+                stranger.send(json.dumps({"type": "drawing_deleted", "id": box_id}))
+                stranger.send(json.dumps({"type": "replay_arm"}))     # answered after it
+                for ws in (stranger, owner):
+                    assert json.loads(ws.recv(timeout=5))["type"] == "replay_data"
+                assert [d.id for d in c._drawings] == [box_id]        # a forged delete: nothing
+
+                owner.send(json.dumps({"type": "drawing_deleted", "id": box_id}))
+                owner.send(json.dumps({"type": "replay_arm"}))
+                assert json.loads(owner.recv(timeout=5))["type"] == "replay_data"
+                assert c._drawings == []
+            assert c._events.wait_idle(5)
+            (edit,) = deleted
+            assert (edit.key, edit.after) == ("zone:1", None)
+        finally:
+            c.stop()
+
+    def test_show_opens_the_address_with_the_key(self, monkeypatch):
+        import webbrowser
+
+        opened = []
+        monkeypatch.setattr(webbrowser, "open", opened.append)
+        c = Chart(title="Keyed", edit_key="a b&c")
+        c.set_data(_make_ohlcv_df(5))
+        c.show(open_browser=True)
+        try:
+            assert opened == [f"{c.url}/?title=Keyed&key=a%20b%26c"]
+            assert c.url == f"http://127.0.0.1:{c._server.port}"      # unchanged
+        finally:
+            c.stop()

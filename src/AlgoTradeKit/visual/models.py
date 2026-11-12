@@ -21,6 +21,13 @@ LivePosition — an OPEN (still running) trade rendered as horizontal lines
                zone) and optional green next-TP line.  Updated live over
                the WebSocket as the SL trails / jumps to break-even / the
                next multi-RR target changes.
+
+v1.3.0 additions
+-----------------
+Every drawing — ``key``, ``editable``, ``deletable`` and ``title``: what the
+page lets a user change, and what a keyed drawing reports to the program
+(``visual/_edits.py``).
+VerticalLine — a moment, drawn across the price pane.
 """
 
 import itertools
@@ -32,6 +39,24 @@ _id_counter = itertools.count(1)
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{next(_id_counter)}"
+
+
+def _edit_fields(drawing) -> dict:
+    """What the page needs to know to let a drawing be changed (v1.3.0).
+
+    ``key`` — the program's own name for it: a keyed drawing reports its edits;
+    ``editable`` — which handles move once unlocked: ``True`` (all), ``False``
+    (it never unlocks) or a tuple of ``"price"``, ``"time"`` and ``"move"``;
+    ``deletable`` — whether its menu offers Delete; ``title`` — what the menu and
+    the confirmation call it.
+    """
+    editable = drawing.editable
+    return {
+        "key":       drawing.key,
+        "editable":  list(editable) if isinstance(editable, (tuple, list)) else editable,
+        "deletable": drawing.deletable,
+        "title":     drawing.title,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +154,10 @@ class HorizontalLine:
     label:       str = ""
     locked:      bool = True      # server-created lines are locked by default
     id:          str = field(default_factory=lambda: _new_id("hline"))
+    key:         str | None = None
+    editable:    bool | tuple = True
+    deletable:   bool = True
+    title:       str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -141,6 +170,7 @@ class HorizontalLine:
             "id":        self.id,
             "locked":    self.locked,
             "source":    "server",
+            **_edit_fields(self),
         }
 
 
@@ -149,7 +179,7 @@ class TrendLine:
     """A line segment between two price/time points."""
     time1:      int
     price1:     float
-    time2:      int
+    time2:      int | None         # None: runs to the live edge (v1.3.0)
     price2:     float
     color:      str  = "#2196f3"
     line_width: int  = 1
@@ -157,6 +187,10 @@ class TrendLine:
     label:      str  = ""
     locked:     bool = True
     id:         str  = field(default_factory=lambda: _new_id("tline"))
+    key:        str | None = None
+    editable:   bool | tuple = True
+    deletable:  bool = True
+    title:      str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -172,6 +206,7 @@ class TrendLine:
             "id":        self.id,
             "locked":    self.locked,
             "source":    "server",
+            **_edit_fields(self),
         }
 
 
@@ -180,7 +215,7 @@ class Box:
     """A filled rectangle between two price/time corners."""
     time1:        int
     price1:       float
-    time2:        int
+    time2:        int | None          # None: runs to the live edge (v1.3.0)
     price2:       float
     color:        str   = "#26a69a"
     opacity:      float = 0.2
@@ -188,6 +223,10 @@ class Box:
     label:        str   = ""
     locked:       bool  = True
     id:           str   = field(default_factory=lambda: _new_id("box"))
+    key:          str | None = None
+    editable:     bool | tuple = True
+    deletable:    bool = True
+    title:        str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -203,6 +242,7 @@ class Box:
             "id":          self.id,
             "locked":      self.locked,
             "source":      "server",
+            **_edit_fields(self),
         }
 
 
@@ -220,6 +260,10 @@ class Signal:
     color:  str  = ""            # auto-coloured if empty
     locked: bool = True
     id:     str  = field(default_factory=lambda: _new_id("sig"))
+    key:    str | None = None
+    editable:bool | tuple = True
+    deletable:bool = True
+    title:  str | None = None
 
     def to_dict(self) -> dict:
         auto_color = "#3fb950" if self.side == "buy" else "#f85149"
@@ -233,6 +277,7 @@ class Signal:
             "id":     self.id,
             "locked": self.locked,
             "source": "server",
+            **_edit_fields(self),
         }
 
 
@@ -246,6 +291,10 @@ class TextLabel:
     font_size: int = 12
     locked:    bool = True
     id:        str  = field(default_factory=lambda: _new_id("txt"))
+    key:       str | None = None
+    editable:  bool | tuple = True
+    deletable: bool = True
+    title:     str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -258,6 +307,7 @@ class TextLabel:
             "id":       self.id,
             "locked":   self.locked,
             "source":   "server",
+            **_edit_fields(self),
         }
 
 
@@ -292,6 +342,10 @@ class FibRetracement:
     label:  str  = ""
     locked: bool = True
     id:     str  = field(default_factory=lambda: _new_id("fib"))
+    key:    str | None = None
+    editable:bool | tuple = True
+    deletable:bool = True
+    title:  str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -306,6 +360,7 @@ class FibRetracement:
             "id":     self.id,
             "locked": self.locked,
             "source": "server",
+            **_edit_fields(self),
         }
 
 
@@ -361,7 +416,7 @@ class PositionBox:
     """
 
     open_time:        int           # Unix seconds
-    close_time:       int           # Unix seconds
+    close_time:       int | None    # Unix seconds; None: the live edge (v1.3.0)
     entry_price:      float
     stop_loss:        float
     take_profit:      float | None
@@ -375,6 +430,13 @@ class PositionBox:
     opacity:          float = 0.15
     locked:           bool  = True
     id:               str   = field(default_factory=lambda: _new_id("posbox"))
+    key:              str | None = None
+    editable:         bool | tuple = True
+    deletable:        bool = True
+    title:            str | None = None
+    #: The TP the trade was opened with (v1.3.0): a replay shows the RR it gives,
+    #: «L  1:2.0R», on a trade still open at its cursor, never its result.
+    planned_tp:       float | None = None
 
     def to_dict(self) -> dict:
         sl_dist = abs(self.entry_price - self.stop_loss)
@@ -437,11 +499,19 @@ class PositionBox:
             "trade_id":      self.trade_id,
             "rr_ratio":      self.rr_ratio,
             "label":         label,
+            "planned_label": self._planned_label(sl_dist, visual_tp),
             "opacity":       self.opacity,
             "id":            self.id,
             "locked":        self.locked,
             "source":        "server",
+            **_edit_fields(self),
         }
+
+    def _planned_label(self, sl_dist: float, visual_tp: float) -> str:
+        """«L  1:2.0R»: the RR of the TP the trade was opened with (v1.3.0)."""
+        tp = self.planned_tp if self.planned_tp is not None else visual_tp
+        rr = abs(tp - self.entry_price) / sl_dist if sl_dist > 0 else 0.0
+        return f"{self.direction[0].upper()}  1:{rr:.1f}R"
 
 
 @dataclass
@@ -494,6 +564,10 @@ class LivePosition:
     label:       str  = ""
     locked:      bool = True
     id:          str  = field(default_factory=lambda: _new_id("livepos"))
+    key:         str | None = None
+    editable:    bool | tuple = True
+    deletable:   bool = True
+    title:       str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -510,4 +584,44 @@ class LivePosition:
             "id":          self.id,
             "locked":      self.locked,
             "source":      "server",
+            **_edit_fields(self),
+        }
+
+
+@dataclass
+class VerticalLine:
+    """
+    A moment on the chart (v1.3.0): a vertical line across the price pane,
+    ``dashed`` or ``solid``, its label at the top.
+
+    ``time`` is in Unix seconds; a time between two candles sits on the candle
+    that holds it, on every timeframe.  A vertical line is never dragged:
+    ``editable`` is always ``False``.  It can still be deleted from its menu,
+    unless ``deletable=False``.
+    """
+    time:      int
+    color:     str = "#e3b341"
+    label:     str = ""
+    style:     str = "dashed"         # "dashed" | "solid"
+    locked:    bool = True
+    id:        str = field(default_factory=lambda: _new_id("vline"))
+    key:       str | None = None
+    deletable: bool = True
+    title:     str | None = None
+
+    #: Not a field: a vertical line never unlocks.
+    editable = False
+
+    def to_dict(self) -> dict:
+        return {
+            "type":   "vline",
+            "time":   self.time,
+            "color":  self.color,
+            "label":  self.label,
+            "style":  self.style,
+            "id":     self.id,
+            "locked": self.locked,
+            "source": "server",
+            **_edit_fields(self),
+            "editable": False,
         }

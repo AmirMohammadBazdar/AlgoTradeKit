@@ -6996,3 +6996,56 @@ class TestTraderCombinedDisplay:
         _d_start(single)
         assert single._maybe_start_combined() is None
         assert self._FakeCombined.instances == []
+
+
+# ===========================================================================
+# v1.3.0 — TraderConfig.chart_style reaches every chart
+# ===========================================================================
+
+class TestChartStyle:
+    def test_a_bad_style_is_refused_naming_the_field(self):
+        with pytest.raises(ValueError) as raised:
+            _t_cfg(chart_style={"background": "black"})
+        assert str(raised.value) == (
+            "TraderConfig.chart_style['background']: 'black' is not a colour — use '#rrggbb'")
+        with pytest.raises(ValueError) as raised:
+            _t_cfg(chart_style={"bg": "#000000"})
+        assert str(raised.value) == ("TraderConfig.chart_style: unknown key 'bg' — known: "
+                                     "background, up_color, down_color, grid")
+
+    def test_none_by_default_and_kept_checked(self):
+        assert _t_cfg().chart_style is None
+        cfg = _t_cfg(chart_style={"background": "#101820", "grid": None})
+        assert cfg.chart_style == {"background": "#101820"}
+
+    def test_run_live_gives_it_to_the_paper_simulation(self, monkeypatch):
+        made = []
+        real = run_live_module.LiveSimulation
+
+        def recording(*args, **kwargs):
+            made.append(real(*args, **kwargs))
+            return made[-1]
+
+        monkeypatch.setattr(run_live_module, "LiveSimulation", recording)
+        broker, strategy = _tp_lifecycle()
+        run_live(strategy=strategy, broker=broker,
+                 config=_paper_cfg(chart_style={"background": "#101820"}))
+        (sim,) = made
+        assert sim._chart_style == {"background": "#101820"}
+
+    @pytest.mark.parametrize("trades", ["real", "sim", "both"])
+    def test_the_traders_chart_has_it(self, d21, monkeypatch, trades):
+        import AlgoTradeKit.visual as visual_pkg
+
+        recording = visual_pkg.Chart          # the d21 stand-in
+
+        class _Styled(recording):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.style = kwargs.get("style")
+
+        monkeypatch.setattr(visual_pkg, "Chart", _Styled)
+        t = _t_trader(cfg=_d_cfg(display_trades=trades, chart_style={"grid": False}))
+        _d_start(t)
+        (chart,) = d21.charts                 # "both" draws the real trades on the sim's
+        assert chart.style == {"grid": False}

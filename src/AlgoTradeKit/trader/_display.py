@@ -87,6 +87,7 @@ import warnings
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pandas as pd
@@ -269,6 +270,16 @@ class _DisplayBridge:
         """One committed closed candle (worker hands it over post-processing)."""
         self._queue.put(("candle", dict(candle)))
 
+    def enqueue_draw(self, kind: str, payload) -> None:
+        """A strategy's ``draw`` or ``erase`` for the real chart (v1.3.0): the
+        trading loop only enqueues; the display thread draws."""
+        self._queue.put(("draw", (kind, payload)))
+
+    @property
+    def real_chart(self):
+        """The real-fills chart (the «real» mode's own; the sim's in «both»)."""
+        return self._real_chart
+
     def enqueue_forming(self, candle: Mapping) -> None:
         """One forming row (worker's forming/tick handlers or the display feed)."""
         self._queue.put(("forming", dict(candle)))
@@ -370,6 +381,11 @@ class _DisplayBridge:
             self._process_forming(payload)
         elif kind == "trade":
             self._process_trade_event(payload, backlog=backlog)
+        elif kind == "draw" and self._real_chart is not None:
+            from ._chart_edits import chart_drawer
+
+            what, drawing = payload
+            chart_drawer(self._real_chart)(what, drawing)
 
     # ------------------------------------------------------------------
     # Closed candles
@@ -611,6 +627,10 @@ class _DisplayBridge:
             chart_port=config.chart_port,
             report_port=config.report_port,
             open_browser=config.display_open_browser,
+            chart_style=config.chart_style,
+            chart_edit_key=config.chart_edit_key,
+            chart_timezone=config.chart_timezone,
+            chart_source_timezone=config.chart_source_timezone,
             # No on_event/on_report: the [LIVE] terminal stream is the
             # trader's voice — a parallel [SIM] log would be noise.
         )
@@ -628,6 +648,11 @@ class _DisplayBridge:
             df = self._fetch_seed_df()
             seed_ts = [int(v) for v in df["timestamp"]]
             self._real_chart = self._build_real_chart(df)
+            if self.worker.strategy_drawings:      # v1.3.0: the strategy's own, from the seed
+                from ..visual.indicator_renderer import add_strategy_drawings
+
+                add_strategy_drawings(self._real_chart, SimpleNamespace(
+                    drawings=list(self.worker.strategy_drawings)))
         else:
             # "both": the real overlay rides the sim's chart.
             self._real_chart = self.sim.chart
@@ -705,6 +730,10 @@ class _DisplayBridge:
             host=config.chart_host,
             port=config.chart_port,
             candle_count_limit=config.candle_count_limit,
+            style=config.chart_style,
+            edit_key=config.chart_edit_key,
+            timezone=config.chart_timezone,
+            source_timezone=config.chart_source_timezone,
         )
         chart.set_data(df)
         chart.show(open_browser=config.display_open_browser, block=False)
@@ -769,7 +798,10 @@ class _DisplayBridge:
         if chart is None:
             chart = self._real_chart
         if chart is not None and getattr(chart, "url", None):
-            print(f"{_LOG_PREFIX} {symbol} chart  → {chart.url}")
+            from ._chart_edits import chart_address
+
+            address = chart_address(chart, self.config.chart_edit_key)   # v1.3.0
+            print(f"{_LOG_PREFIX} {symbol} chart  → {address}")
         server = (
             self.sim.report_server
             if self.mode == DISPLAY_TRADES_SIM and self.sim is not None

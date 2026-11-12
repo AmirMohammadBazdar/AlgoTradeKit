@@ -340,6 +340,8 @@ class PairView:
     chart_indicators: tuple = ()
     drawings: tuple = ()
     picture_config: Any = None
+    #: The pictures' colours: ``TraderConfig.chart_style`` (v1.3.0).
+    chart_style: dict | None = None
     #: Candles kept before a picture's window, for its indicators to settle there.
     warmup_candles = 200
 
@@ -1530,7 +1532,9 @@ class _Adapter:
             lead = _CLOSE_LEAD * (view.timeframe_ms or 0)
             first = max(int(stamps.iloc[0]), opened - lead)
             last = max(first, min(last, int(slices[-1].close_time)))
-        chart = Chart(title=view.symbol, source_timeframe=view.timeframe or None)
+        chart = Chart(title=view.symbol, source_timeframe=view.timeframe or None,
+                      style=getattr(view, "chart_style", None),
+                      source_timezone=getattr(view, "chart_source_timezone", None))
         populate_chart(chart, frame, indicators=view.chart_indicators, drawings=view.drawings,
                        trade_markers=markers, open_positions=positions,
                        config=view.picture_config)

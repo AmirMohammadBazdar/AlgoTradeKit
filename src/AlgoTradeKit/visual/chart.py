@@ -34,15 +34,27 @@ Quick start
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
 import warnings
+from collections import deque
 from pathlib import Path
 from typing import Literal
 
 import pandas as pd
 
+from ._edits import (
+    ChartAction,
+    ChartEvents,
+    DrawingEdit,
+    EditRefused,
+    check_edit_fields,
+    check_editable,
+    drawing_key,
+)
+from ._style import check_style
 from .models import (
     Box,
     FibRetracement,
@@ -53,8 +65,19 @@ from .models import (
     Signal,
     TextLabel,
     TrendLine,
+    VerticalLine,
 )
 from .server import ChartServer
+
+#: The feed's clock (v1.3.0): how many of the newest samples it keeps, and how far it
+#: may move before the open pages are told again.
+_CLOCK_SAMPLES = 10
+_CLOCK_RESEND_MS = 250
+
+
+def _now_ms() -> int:
+    """This machine's clock, in UTC milliseconds."""
+    return int(time.time() * 1000)
 
 # Sentinel for "argument not passed" where None is a meaningful value
 # (e.g. update_live_position(next_tp=None) clears the TP line).
@@ -119,6 +142,20 @@ class Chart:
         Which timeframes the browser's selector offers.  ``None`` offers every
         valid multiple of the source.  Pass a list to narrow it; an entry that
         cannot be produced from the source is rejected.
+    style : dict | None
+        The chart's colours (v1.3.0): ``background``, ``up_color`` and
+        ``down_color`` (``"#rrggbb"``, ``"#rgb"`` or ``"#rrggbbaa"``) and
+        ``grid`` (``True`` / ``False``); a key left out keeps the theme's value.
+        They belong to *theme*, the theme the chart starts in: ☀ shows the other
+        theme's own colours.  Pictures use them.  A viewer can change them for
+        their own browser in the Settings panel; see :meth:`set_style`.
+    edit_key : str | None
+        Who may change the chart from the page (v1.3.0).  With a key, only a page
+        opened at the address with ``?key=<edit_key>`` may move or delete the
+        program's drawings, pick a candle-menu action, switch the timeframe or add
+        and remove indicators; any other page only looks.  :meth:`show` opens
+        the address with the key.  Keep that address as you keep a password.
+        ``None`` (default): every page may, as before.
     """
 
     def __init__(
@@ -133,11 +170,22 @@ class Chart:
         source_timeframe:   str | None = None,
         display_timeframe:  str | None = None,
         timeframes:         list[str] | None = None,
+        style:              dict | None = None,
+        edit_key:           str | None = None,
+        timezone:           str | None = None,
+        source_timezone:    str | None = None,
     ) -> None:
+        if edit_key is not None and (not isinstance(edit_key, str) or not edit_key):
+            raise ValueError(f"edit_key: {edit_key!r} is not a non-empty string")
+        # v1.3.0: the zone times are shown in, and the zone the candles are stamped
+        # in (the chart cannot tell: UTC on Binance, the broker's on MetaTrader).
+        self._timezone = _check_zone(timezone, "timezone")
+        self._source_timezone = _check_zone(source_timezone, "source_timezone")
         self.title          = title
         self.chart_type     = chart_type
         self.theme          = theme
         self.volume_in_main = volume_in_main
+        self._style: dict   = check_style(style)     # v1.3.0: the program's colours
 
         self._bars:       list[dict]          = []
         self._indicators: list[IndicatorSeries] = []
@@ -159,9 +207,30 @@ class Chart:
         self._timeframes: list[str] = []
         self._candle_range: dict | None = None
 
-        self._server = ChartServer(title=title, port=port, host=host)
+        self._edit_key = edit_key
+        self._server = ChartServer(title=title, port=port, host=host, edit_key=edit_key)
         self._server.on_message = self._handle_browser_message
+        self._server.clock = self._clock_message
         self._shown = False
+
+        # ── The feed's clock (v1.3.0): what the page's countdown counts on ──
+        # Learned from the live candles themselves (``_learn_clock``), so it is the
+        # clock the candles are stamped in — UTC on Binance, the broker's on MT5.
+        self._clock_seen: int | None = None        # the newest streamed opening (s)
+        self._clock_updates = 0                     # updates of that candle seen
+        self._clock_pending: tuple[int, int] | None = None   # (opening, sample)
+        self._clock_samples: deque = deque(maxlen=_CLOCK_SAMPLES)
+        self._clock_offset_ms: int | None = None   # the feed's clock minus ours
+        self._clock_sent_ms: int | None = None     # the offset the pages last heard
+
+        # ── Edits from the page (v1.3.0) ──────────────────────────────────
+        self._edit_callbacks:   list = []
+        self._delete_callbacks: list = []
+        self._actions: dict = {}                 # label → fn, in the menu's order
+        self._drawing_actions: dict = {}         # label → fn: a viewer's drawing's menu
+        self._buttons: dict = {}                 # label → (fn, confirm), the toolbar's
+        self._events = ChartEvents()             # its thread starts with the first job
+        self._unheard_said = False               # «nothing told», once per chart
 
         self._candle_count_limit: int | None = None
         if candle_count_limit is not None:
@@ -188,6 +257,7 @@ class Chart:
         source_timeframe:  str | None = None,
         display_timeframe: str | None = None,
         timeframes:        list[str] | None = None,
+        style:             dict | None = None,
     ) -> Chart:
         """
         Create a Chart pre-loaded with data from an AlgoTradeKit CSV file.
@@ -217,6 +287,8 @@ class Chart:
             Timeframe switching (v1.1.0) — see :class:`Chart`.  Load a 1m CSV
             with ``display_timeframe="5m"`` and the viewer can switch from the
             toolbar.
+        style
+            The chart's colours (v1.3.0) — see :class:`Chart`.
 
         Example
         -------
@@ -245,6 +317,7 @@ class Chart:
             source_timeframe=source_timeframe,
             display_timeframe=display_timeframe,
             timeframes=timeframes,
+            style=style,
         )
         chart.set_data(df, candle_range=candle_range)
         return chart
@@ -297,6 +370,9 @@ class Chart:
         # column names match what the user expects (e.g. 'timestamp' intact).
         self.df      = df.copy()
         self._raw_df = df.copy()
+        # A new data set: the feed's clock is learned again from its live candles
+        # (the samples already learned stay — it is the same feed's clock).
+        self._clock_seen, self._clock_updates, self._clock_pending = None, 0, None
 
         if chart_type is not None:
             self.chart_type = chart_type
@@ -978,11 +1054,27 @@ class Chart:
         Central path for every drawing add (v1.0.0): the server's cached
         ``init`` is refreshed so a page refresh mid-session reproduces the
         current chart state, including drawings added after ``show()``.
+
+        v1.3.0: ``key``, ``editable``, ``deletable`` and ``title`` are checked
+        here, and a ``key`` is unique among the drawings the chart holds.
         """
+        if "editable" in getattr(drawing, "__dataclass_fields__", ()):
+            # As given, before to_dict() turns a tuple into a list; a list is kept as
+            # a tuple.
+            drawing.editable = check_editable(drawing.editable)
+        check_edit_fields(drawing.to_dict())
+        key = drawing_key(drawing)
+        if key is not None:
+            self._check_key_free(key, drawing)
         self._drawings.append(drawing)
         if self._shown:
             self._server.send({"type": "add_drawing", "drawing": drawing.to_dict()})
             self._refresh_init_cache()
+
+    def _check_key_free(self, key: str, drawing) -> None:
+        for other in self._drawings:
+            if other is not drawing and drawing_key(other) == key:
+                raise ValueError(f"key {key!r} is already used by drawing {other.id!r}")
 
     def add_hline(
         self,
@@ -991,10 +1083,16 @@ class Chart:
         line_width: int = 1,
         line_style: int = 0,
         label:      str = "",
+        *,
+        key:        str | None = None,
+        editable:   bool | tuple = True,
+        deletable:  bool = True,
+        title:      str | None = None,
     ) -> Chart:
         d = HorizontalLine(
             price=price, color=color,
             line_width=line_width, line_style=line_style, label=label,
+            key=key, editable=editable, deletable=deletable, title=title,
         )
         self._add_drawing(d)
         return self
@@ -1003,16 +1101,22 @@ class Chart:
         self,
         time1:      int,
         price1:     float,
-        time2:      int,
+        time2:      int | None,
         price2:     float,
         color:      str  = "#2196f3",
         line_width: int  = 1,
         extend:     bool = False,
         label:      str  = "",
+        *,
+        key:        str | None = None,
+        editable:   bool | tuple = True,
+        deletable:  bool = True,
+        title:      str | None = None,
     ) -> Chart:
         d = TrendLine(
             time1=time1, price1=price1, time2=time2, price2=price2,
             color=color, line_width=line_width, extend=extend, label=label,
+            key=key, editable=editable, deletable=deletable, title=title,
         )
         self._add_drawing(d)
         return self
@@ -1021,16 +1125,37 @@ class Chart:
         self,
         time1:        int,
         price1:       float,
-        time2:        int,
+        time2:        int | None,
         price2:       float,
         color:        str   = "#26a69a",
         opacity:      float = 0.2,
         border_color: str   = "#26a69a",
         label:        str   = "",
+        *,
+        key:        str | None = None,
+        editable:   bool | tuple = True,
+        deletable:  bool = True,
+        title:      str | None = None,
     ) -> Chart:
+        """
+        A filled rectangle between two corners (times in Unix seconds).
+        ``time2=None`` (v1.3.0): the box runs to the live edge — five candles past
+        the last one, moving with each candle — until it is given an end
+        (:meth:`update_drawing`).  ``add_trendline`` takes it too.
+
+        v1.3.0 — ``key``: the program's own name for the box, which makes it report
+        the user's edits (:meth:`on_drawing_edit`, :meth:`on_drawing_delete`);
+        ``editable``: which handles move once it is unlocked on the page — ``True``
+        (all), ``False`` (it never unlocks) or a tuple of ``"price"`` (top and
+        bottom edges), ``"time"`` (left and right edges) and ``"move"`` (the whole
+        box); ``deletable``: whether its menu offers Delete; ``title``: what the
+        menu and the confirmation call it.  The other ``add_*`` drawings take the
+        same four.
+        """
         d = Box(
             time1=time1, price1=price1, time2=time2, price2=price2,
             color=color, opacity=opacity, border_color=border_color, label=label,
+            key=key, editable=editable, deletable=deletable, title=title,
         )
         self._add_drawing(d)
         return self
@@ -1066,8 +1191,14 @@ class Chart:
         text:      str,
         color:     str = "#ffffff",
         font_size: int = 12,
+        *,
+        key:        str | None = None,
+        editable:   bool | tuple = True,
+        deletable:  bool = True,
+        title:      str | None = None,
     ) -> Chart:
-        d = TextLabel(time=time, price=price, text=text, color=color, font_size=font_size)
+        d = TextLabel(time=time, price=price, text=text, color=color, font_size=font_size,
+                      key=key, editable=editable, deletable=deletable, title=title,)
         self._add_drawing(d)
         return self
 
@@ -1080,20 +1211,52 @@ class Chart:
         color:  str  = "#9c27b0",
         levels: list | None = None,
         label:  str  = "",
+        *,
+        key:        str | None = None,
+        editable:   bool | tuple = True,
+        deletable:  bool = True,
+        title:      str | None = None,
     ) -> Chart:
         d = FibRetracement(
             time1=time1, price1=price1, time2=time2, price2=price2,
             color=color,
             levels=levels or [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0],
             label=label,
+            key=key, editable=editable, deletable=deletable, title=title,
         )
         self._add_drawing(d)
         return self
 
+    def add_vline(
+        self,
+        time:      int,
+        *,
+        color:     str = "#e3b341",
+        label:     str = "",
+        style:     str = "dashed",
+        key:       str | None = None,
+        deletable: bool = True,
+        title:     str | None = None,
+    ) -> str:
+        """
+        A vertical line at *time* (Unix seconds), across the price pane, its label at
+        the top (v1.3.0).  Returns its id.
+
+        A time between two candles sits on the candle that holds it, on every
+        timeframe.  ``style`` is ``"dashed"`` or ``"solid"``.  It is never dragged;
+        with ``key`` it reports its deletion, unless ``deletable=False``.
+        """
+        if style not in ("dashed", "solid"):
+            raise ValueError(f"style: {style!r} is not 'dashed' or 'solid'")
+        d = VerticalLine(time=int(time), color=color, label=label, style=style,
+                         key=key, deletable=deletable, title=title)
+        self._add_drawing(d)
+        return d.id
+
     def add_position_box(
         self,
         open_time:    int,
-        close_time:   int,
+        close_time:   int | None,
         entry_price:  float,
         stop_loss:    float,
         take_profit:  float | None,
@@ -1103,6 +1266,7 @@ class Chart:
         trade_id:     int  = -1,
         rr_ratio:     float = 0.0,
         opacity:      float = 0.15,
+        planned_tp:   float | None = None,
     ) -> Chart:
         """
         Add a TradingView-style position box for one simulated trade.
@@ -1114,7 +1278,8 @@ class Chart:
         Parameters
         ----------
         open_time  : Entry candle time in Unix seconds.
-        close_time : Exit candle time in Unix seconds.
+        close_time : Exit candle time in Unix seconds; ``None`` (v1.3.0) runs to the
+                     live edge, five candles past the last one.
         entry_price: Actual fill price.
         stop_loss  : Initial stop-loss price.
         take_profit: Take-profit price or ``None`` (draws 2R placeholder).
@@ -1124,6 +1289,8 @@ class Chart:
         trade_id   : Sequential trade ID from the simulation.
         rr_ratio   : Actual R multiple of the trade.
         opacity    : Box fill opacity (default 0.15).
+        planned_tp : The TP the trade was opened with (v1.3.0): a replay shows its RR,
+                     «L  1:2.0R», on the trade while it is open at the cursor.
         """
         d = PositionBox(
             open_time=open_time,
@@ -1137,6 +1304,7 @@ class Chart:
             trade_id=trade_id,
             rr_ratio=rr_ratio,
             opacity=opacity,
+            planned_tp=planned_tp,
         )
         self._add_drawing(d)
         return self
@@ -1266,6 +1434,14 @@ class Chart:
         for d in self._drawings:
             if getattr(d, "id", None) != drawing_id:
                 continue
+            given = {k: fields[k] for k in ("key", "editable", "deletable", "title")
+                     if k in fields}
+            if given:                           # v1.3.0: as _add_drawing checks them
+                check_edit_fields(given)
+                if given.get("key") is not None:
+                    self._check_key_free(given["key"], d)
+                if "editable" in given and not hasattr(d, "_payload"):
+                    fields = {**fields, "editable": check_editable(given["editable"])}
             if hasattr(d, "_payload"):          # raw strategy-drawing wrapper
                 d._payload.update(fields)
             else:
@@ -1313,6 +1489,7 @@ class Chart:
 
         bar = {k.lower(): v for k, v in bar.items()}
         bar.setdefault("volume", 0.0)
+        self._learn_clock(int(bar["time"]))
 
         # Timeframe conversion (v1.1.0): a streamed bar is a *source* bar.
         # Fold it into the source frame and hand the browser the display
@@ -1349,6 +1526,51 @@ class Chart:
             self._refresh_init_cache()
 
         return self
+
+    def _learn_clock(self, opening: int) -> None:
+        """The feed's clock (v1.3.0), from a streamed candle opening at *opening*
+        (Unix seconds).
+
+        When a new candle's first update comes, the feed's clock reads about its
+        opening: that is a sample, late by the update's delivery.  It counts only
+        if the candle before it was watched forming (two updates or more) — the
+        first candle after a subscription may be half over, or replayed — and
+        once a second update of the new candle proves it was forming too: a feed
+        of closed candles teaches nothing.  The best of the newest samples wins.
+        """
+        now = _now_ms()
+        seen = self._clock_seen
+        if seen is None:
+            self._clock_seen, self._clock_updates = opening, 1
+            return
+        if opening < seen:
+            return
+        if opening == seen:
+            self._clock_updates += 1
+            pending = self._clock_pending
+            if self._clock_updates == 2 and pending is not None and pending[0] == opening:
+                self._clock_pending = None
+                self._clock_samples.append(pending[1])
+                self._clock_learned(max(self._clock_samples))
+            return
+        watched = self._clock_updates >= 2
+        self._clock_seen, self._clock_updates = opening, 1
+        self._clock_pending = (opening, opening * 1000 - now) if watched else None
+
+    def _clock_learned(self, offset: int) -> None:
+        self._clock_offset_ms = offset
+        sent = self._clock_sent_ms
+        if sent is None or abs(offset - sent) > _CLOCK_RESEND_MS:
+            self._clock_sent_ms = offset
+            if self._shown:
+                self._server.send(self._clock_message())
+
+    def _clock_message(self) -> dict | None:
+        """The feed's clock now, for a page's countdown (v1.3.0) — fresh each time
+        it is asked for; ``None`` until a live feed has taught it."""
+        if self._clock_offset_ms is None:
+            return None
+        return {"type": "clock", "now": _now_ms() + self._clock_offset_ms}
 
     def stream_from_atk(self, candle: dict) -> Chart:
         """
@@ -1442,6 +1664,340 @@ class Chart:
         return self
 
     # -----------------------------------------------------------------------
+    # Colours (v1.3.0)
+    # -----------------------------------------------------------------------
+
+    @property
+    def style(self) -> dict:
+        """The program's colours: a copy of what ``style=`` and :meth:`set_style` set."""
+        return dict(self._style)
+
+    def set_style(self, **fields) -> Chart:
+        """
+        Change the chart's colours: ``background``, ``up_color``, ``down_color``
+        and ``grid``, as ``Chart(style=…)`` takes them.
+
+        The fields are merged into the current style, and ``None`` takes one out,
+        so the theme's own value shows again.  An open page redraws at once; a
+        viewer's own choice from the Settings panel stays on top of it::
+
+            chart.set_style(background="#000000", grid=False)
+            chart.set_style(background=None)        # the theme's background again
+        """
+        self._style = check_style({**self._style, **fields})
+        if self._shown:
+            self._server.send({"type": "style", "style": dict(self._style)})
+            self._refresh_init_cache()
+        return self
+
+    # -----------------------------------------------------------------------
+    # Edits from the page (v1.3.0)
+    # -----------------------------------------------------------------------
+
+    def on_drawing_edit(self, fn):
+        """
+        Call ``fn(edit)`` when the user changes a **keyed** drawing on the page —
+        moves it, resizes it, renames it or recolours it — and return *fn*, so it
+        works as a decorator.  ``edit`` is a :class:`DrawingEdit`: ``chart``,
+        ``drawing_id``, ``key``, ``before`` and ``after`` (the drawing's dicts).
+
+        Callbacks run in the order they were registered, on the chart's own thread
+        (``atk-chart-events``), in the order the edits were made.  One that raises
+        :class:`EditRefused` puts the drawing back in every open page, whose status
+        bar says why; any other error is printed and undoes the edit too.  A
+        drawing without a key reports nothing.
+        """
+        if not callable(fn):
+            raise TypeError(f"on_drawing_edit takes a function, got {type(fn).__name__}")
+        self._edit_callbacks.append(fn)
+        return fn
+
+    def on_drawing_delete(self, fn):
+        """
+        Call ``fn(edit)`` when the user deletes a **keyed** drawing on the page, with
+        ``edit.after`` ``None``; return *fn*.  Refusing puts the drawing back.  As
+        :meth:`on_drawing_edit` otherwise.
+        """
+        if not callable(fn):
+            raise TypeError(f"on_drawing_delete takes a function, got {type(fn).__name__}")
+        self._delete_callbacks.append(fn)
+        return fn
+
+    def add_action(self, label: str, fn) -> Chart:
+        """
+        Put *label* in the candle menu: a right-click on the chart, away from any
+        drawing, opens it.  Picking it calls ``fn(action)`` on the chart's thread
+        with a :class:`ChartAction`: ``chart``, ``label``, ``time`` (the opening of
+        the candle under the pointer, UTC ms) and ``price`` (the pointer's).  An
+        open page gets the new menu at once.  Labels are unique per chart.  ``fn``
+        may raise :class:`EditRefused`: the pages then say «Refused: <why>» (v1.3.0).
+        """
+        if not isinstance(label, str) or not label:
+            raise ValueError(f"action label {label!r} is not a non-empty string")
+        if not callable(fn):
+            raise TypeError(f"add_action takes a function, got {type(fn).__name__}")
+        if label in self._actions:
+            raise ValueError(f"action {label!r} is already on this chart")
+        self._actions[label] = fn
+        self._send_actions()
+        return self
+
+    def remove_action(self, label: str) -> Chart:
+        """Take *label* out of the candle menu."""
+        if label not in self._actions:
+            raise ValueError(f"no action {label!r} on this chart")
+        del self._actions[label]
+        self._send_actions()
+        return self
+
+    @property
+    def actions(self) -> list[str]:
+        """The candle menu's labels, in its order."""
+        return list(self._actions)
+
+    def _send_actions(self) -> None:
+        if self._shown:
+            self._server.send({"type": "actions", "actions": list(self._actions)})
+            self._refresh_init_cache()
+
+    def add_drawing_action(self, label: str, fn) -> Chart:
+        """
+        Put *label* in the right-click menu of every drawing **the viewer drew** on
+        the page (v1.3.0) — a box, a line, a fib.  Picking it calls ``fn(action)``
+        on the chart's thread with a :class:`ChartAction` whose ``drawing`` is that
+        drawing's dict and whose ``time`` is its left edge (UTC ms).  Only a page
+        that may change the chart has the menu.  Labels are unique per chart.
+        ``fn`` may raise :class:`EditRefused`: every open page's status bar then
+        says «Refused: <its message>».
+        """
+        if not isinstance(label, str) or not label:
+            raise ValueError(f"drawing action label {label!r} is not a non-empty string")
+        if not callable(fn):
+            raise TypeError(f"add_drawing_action takes a function, got {type(fn).__name__}")
+        if label in self._drawing_actions:
+            raise ValueError(f"drawing action {label!r} is already on this chart")
+        self._drawing_actions[label] = fn
+        self._send_drawing_actions()
+        return self
+
+    def remove_drawing_action(self, label: str) -> Chart:
+        """Take *label* out of the drawings' menu."""
+        if label not in self._drawing_actions:
+            raise ValueError(f"no drawing action {label!r} on this chart")
+        del self._drawing_actions[label]
+        self._send_drawing_actions()
+        return self
+
+    @property
+    def drawing_actions(self) -> list[str]:
+        """The labels of the menu on a viewer's own drawings, in its order."""
+        return list(self._drawing_actions)
+
+    def _send_drawing_actions(self) -> None:
+        if self._shown:
+            self._server.send({"type": "drawing_actions",
+                               "actions": list(self._drawing_actions)})
+            self._refresh_init_cache()
+
+    @property
+    def timezone(self) -> str | None:
+        """The zone the page shows times in, as the program set it (v1.3.0)."""
+        return self._timezone
+
+    @property
+    def source_timezone(self) -> str | None:
+        """The zone the candles are stamped in, as the program set it (v1.3.0)."""
+        return self._source_timezone
+
+    def add_button(self, label: str, fn, *, confirm: str | None = None) -> Chart:
+        """
+        A button in the chart's toolbar (v1.3.0), shown to a page that may change
+        the chart.  A click asks *confirm* first, when given, then calls ``fn()`` on
+        the chart's thread.  Labels are unique per chart; an open page gets the
+        button at once.
+        """
+        if not isinstance(label, str) or not label:
+            raise ValueError(f"button label {label!r} is not a non-empty string")
+        if not callable(fn):
+            raise TypeError(f"add_button takes a function, got {type(fn).__name__}")
+        if confirm is not None and not isinstance(confirm, str):
+            raise TypeError(f"confirm must be a string, got {type(confirm).__name__}")
+        if label in self._buttons:
+            raise ValueError(f"button {label!r} is already on this chart")
+        self._buttons[label] = (fn, confirm)
+        if self._shown:
+            self._server.send({"type": "buttons", "buttons": self._button_list()})
+            self._refresh_init_cache()
+        return self
+
+    def _button_list(self) -> list[dict]:
+        return [{"label": label, "confirm": confirm}
+                for label, (_fn, confirm) in self._buttons.items()]
+
+    def _queue_button(self, msg: dict) -> None:
+        label = msg.get("label")
+        found = self._buttons.get(label) if isinstance(label, str) else None
+        if found is None:
+            return
+        fn = found[0]
+
+        def run() -> None:
+            try:
+                fn()
+            except Exception as exc:
+                print(f"[AlgoTradeKit] chart: button {label!r} failed — "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+
+        self._events.put(run)
+
+    def _say_unheard(self, key: str) -> None:
+        """A keyed drawing changed on a chart nothing listens to: say so, once."""
+        if not self._unheard_said:
+            self._unheard_said = True
+            print(f"[AlgoTradeKit] chart: edit of {key!r} — no live session, nothing told",
+                  flush=True)
+
+    def _apply_browser_edit(self, drawing, fields: dict) -> None:
+        """Store a page's edit of *drawing*, and hand a keyed drawing's change to
+        the edit callbacks, with what is needed to put it back."""
+        payload = getattr(drawing, "_payload", None)
+        state = payload if isinstance(payload, dict) else drawing.__dict__
+        key = drawing_key(drawing)
+        watched = key is not None and bool(self._edit_callbacks)
+        if key is not None and not watched:
+            self._say_unheard(key)
+        if watched:
+            before = copy.deepcopy(drawing.to_dict())
+            state_before = copy.deepcopy(state)
+        if isinstance(payload, dict):
+            # A strategy's drawing is its dict (v1.3.0): the edit goes into it, or a
+            # reload undoes it.
+            payload.update({k: v for k, v in fields.items() if k != "id"})
+        else:
+            for name, val in fields.items():
+                if hasattr(drawing, name):
+                    setattr(drawing, name, val)
+        if not watched:
+            return
+        after = copy.deepcopy(drawing.to_dict())
+        if after == before:
+            return                  # a click on a handle that moved nothing
+        undo = {k: v for k, v in state_before.items() if state.get(k, _UNSET) != v}
+        added = [k for k in state if k not in state_before]
+        self._events.put(lambda: self._run_edit(drawing, key, before, after, undo, added))
+
+    def _apply_browser_delete(self, drawing_id: str) -> None:
+        index = next((i for i, d in enumerate(self._drawings) if d.id == drawing_id), None)
+        if index is None:
+            return
+        drawing = self._drawings[index]
+        self._drawings = [d for d in self._drawings if d.id != drawing_id]
+        key = drawing_key(drawing)
+        if key is not None and self._delete_callbacks:
+            before = copy.deepcopy(drawing.to_dict())
+            self._events.put(lambda: self._run_delete(drawing, index, key, before))
+        elif key is not None:
+            self._say_unheard(key)
+
+    def _run_edit(self, drawing, key, before, after, undo, added) -> None:
+        edit = DrawingEdit(chart=self, drawing_id=drawing.id, key=key, before=before,
+                           after=after)
+        why = self._ask(self._edit_callbacks, edit, "on_drawing_edit")
+        if why is None:
+            return
+        payload = getattr(drawing, "_payload", None)
+        state = payload if isinstance(payload, dict) else drawing.__dict__
+        state.update(undo)
+        for name in added:
+            state.pop(name, None)
+        if self._shown:
+            self._server.send({"type": "update_drawing", "drawing": drawing.to_dict()})
+        self._tell_refused(drawing.id, why)
+
+    def _run_delete(self, drawing, index, key, before) -> None:
+        edit = DrawingEdit(chart=self, drawing_id=drawing.id, key=key, before=before,
+                           after=None)
+        why = self._ask(self._delete_callbacks, edit, "on_drawing_delete")
+        if why is None:
+            return
+        if all(d.id != drawing.id for d in self._drawings):
+            self._drawings.insert(min(index, len(self._drawings)), drawing)
+        if self._shown:
+            self._server.send({"type": "add_drawing", "drawing": drawing.to_dict()})
+        self._tell_refused(drawing.id, why)
+
+    @staticmethod
+    def _ask(callbacks: list, edit: DrawingEdit, what: str) -> str | None:
+        """Call every callback in turn; the reason the first refusal gives, or None."""
+        for fn in list(callbacks):
+            try:
+                fn(edit)
+            except EditRefused as exc:
+                return str(exc) or "refused"
+            except Exception as exc:
+                print(f"[AlgoTradeKit] chart: {what} failed — {type(exc).__name__}: {exc}",
+                      flush=True)
+                return str(exc) or type(exc).__name__
+        return None
+
+    def _tell_refused(self, drawing_id: str, why: str) -> None:
+        self._refresh_init_cache()
+        if self._shown:
+            self._server.send({"type": "edit_refused", "id": drawing_id, "message": why})
+
+    def _queue_action(self, msg: dict) -> None:
+        label = msg.get("label")
+        fn = self._actions.get(label) if isinstance(label, str) else None
+        if fn is None:
+            return
+        try:
+            when = int(msg["time"]) * 1000
+        except (KeyError, TypeError, ValueError):
+            return
+        price = msg.get("price")
+        if not isinstance(price, (int, float)) or isinstance(price, bool):
+            price = None
+        action = ChartAction(chart=self, label=label, time=when,
+                             price=None if price is None else float(price))
+
+        def run() -> None:
+            try:
+                fn(action)
+            except EditRefused as exc:            # v1.3.0: the page says why
+                self._tell_refused("", str(exc) or f"{label} refused")
+            except Exception as exc:
+                print(f"[AlgoTradeKit] chart: action {label!r} failed — "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+
+        self._events.put(run)
+
+    def _queue_drawing_action(self, msg: dict) -> None:
+        """A label picked in the menu of a drawing the viewer drew (v1.3.0)."""
+        label = msg.get("label")
+        fn = self._drawing_actions.get(label) if isinstance(label, str) else None
+        drawing = msg.get("drawing")
+        if fn is None or not isinstance(drawing, dict):
+            return
+        drawing = dict(drawing)
+        left = drawing.get("time1", drawing.get("open_time", drawing.get("time")))
+        if not isinstance(left, (int, float)) or isinstance(left, bool):
+            return
+        action = ChartAction(chart=self, label=label, time=int(left) * 1000, price=None,
+                             drawing=drawing)
+
+        def run() -> None:
+            try:
+                fn(action)
+            except EditRefused as exc:            # the page says why; the drawing stays
+                self._tell_refused(str(drawing.get("id") or ""),
+                                   str(exc) or f"{label} refused")
+            except Exception as exc:
+                print(f"[AlgoTradeKit] chart: drawing action {label!r} failed — "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+
+        self._events.put(run)
+
+    # -----------------------------------------------------------------------
     # Rolling candle window (v1.0.0)
     # -----------------------------------------------------------------------
 
@@ -1512,6 +2068,11 @@ class Chart:
         payload = drawing.to_dict() if hasattr(drawing, "to_dict") else dict(drawing)
         if payload.get("type") == "live_position":
             return None
+        # v1.3.0: a drawing whose end is the live edge runs to "now" too
+        if payload.get("type") == "position_box" and payload.get("close_time") is None:
+            return None
+        if "time2" in payload and payload.get("time2") is None:
+            return None
         if payload.get("close_time") is not None:
             return payload["close_time"]
         t1, t2 = payload.get("time1"), payload.get("time2")
@@ -1526,9 +2087,23 @@ class Chart:
     # Browser → Python message handling
     # -----------------------------------------------------------------------
 
+    #: What a page opened without the edit key may not do (v1.3.0): change the
+    #: program's drawings, pick an action, or change what every viewer sees.
+    _EDITOR_ONLY = frozenset({
+        "drawing_updated", "drawing_deleted", "drawing_lock_changed", "chart_action",
+        "set_timeframe", "compute_indicator", "remove_indicator", "button", "drawing_action",
+    })
+
     def _handle_browser_message(self, msg: dict) -> None:
-        """Handle messages sent from the browser (drawing edits, indicator removal)."""
+        """Handle messages sent from the browser (drawing edits, indicator removal, …).
+
+        The servers mark each message with ``_editor`` (v1.3.0): ``False`` comes from
+        a page without the chart's edit key, which may look and change nothing
+        another viewer sees.  A message without the mark counts as an editor's.
+        """
         msg_type = msg.get("type")
+        if msg.get("_editor", True) is False and msg_type in self._EDITOR_ONLY:
+            return
 
         if msg_type == "drawing_updated":
             d   = msg.get("drawing", {})
@@ -1536,17 +2111,24 @@ class Chart:
             if did:
                 for drawing in self._drawings:
                     if drawing.id == did:
-                        for key, val in d.items():
-                            if hasattr(drawing, key):
-                                setattr(drawing, key, val)
+                        self._apply_browser_edit(drawing, d)
                         break
                 self._refresh_init_cache()
 
         elif msg_type == "drawing_deleted":
             did = msg.get("id")
             if did:
-                self._drawings = [dr for dr in self._drawings if dr.id != did]
+                self._apply_browser_delete(did)
                 self._refresh_init_cache()
+
+        elif msg_type == "chart_action":
+            self._queue_action(msg)
+
+        elif msg_type == "drawing_action":
+            self._queue_drawing_action(msg)
+
+        elif msg_type == "button":
+            self._queue_button(msg)
 
         elif msg_type == "drawing_lock_changed":
             did   = msg.get("id")
@@ -1554,7 +2136,11 @@ class Chart:
             if did is not None and state is not None:
                 for drawing in self._drawings:
                     if drawing.id == did:
-                        drawing.locked = state
+                        payload = getattr(drawing, "_payload", None)
+                        if isinstance(payload, dict):
+                            payload["locked"] = state
+                        else:
+                            drawing.locked = state
                         break
                 self._refresh_init_cache()
 
@@ -1908,11 +2494,12 @@ class Chart:
     # -----------------------------------------------------------------------
 
     def save_layout(self, path: str) -> Chart:
-        """Save the current chart configuration (indicators + drawings) to JSON."""
+        """Save the current chart configuration (style, indicators, drawings) to JSON."""
         layout = {
             "title":      self.title,
             "chart_type": self.chart_type,
             "theme":      self.theme,
+            "style":      dict(self._style),
             "indicators": [i.to_dict() for i in self._indicators],
             "drawings":   [d.to_dict() for d in self._drawings],
         }
@@ -1926,6 +2513,8 @@ class Chart:
         self.title      = layout.get("title",      self.title)
         self.chart_type = layout.get("chart_type", self.chart_type)
         self.theme      = layout.get("theme",       self.theme)
+        if "style" in layout:               # v1.3.0; an older file keeps the style
+            self._style = check_style(layout["style"])
 
         TYPE_MAP = {
             "hline":     HorizontalLine,
@@ -1934,6 +2523,7 @@ class Chart:
             "signal":    Signal,
             "text":      TextLabel,
             "fib":       FibRetracement,
+            "vline":     VerticalLine,
         }
 
         self._drawings.clear()
@@ -1998,27 +2588,44 @@ class Chart:
         """Stop the server and close the browser connection."""
         self._server.stop()
 
-    def _snapshot_query(self, start=None, end=None, timezone=None) -> str:
+    #: The empty candles a picture leaves after its last candle (v1.3.0): what
+    #: :meth:`screenshot` uses when its ``right_room`` is not given.  Set it on one
+    #: chart, or on the class — ``Chart.picture_room = 4`` — for every picture,
+    #: the notifiers' included.  0: the last candle at the picture's right edge.
+    picture_room: int = 10
+
+    def _snapshot_query(self, start=None, end=None, timezone=None, room=None) -> str:
         """The screenshot page's query for *start*–*end*: the candles' range, the
-        zone and the title line."""
+        zone, the title line and the room after the last candle."""
         from urllib.parse import urlencode
 
+        room = self.picture_room if room is None else room
+        if isinstance(room, bool) or not isinstance(room, int) or not 0 <= room <= 1000:
+            raise ValueError(f"right_room: {room!r} is not a whole number of candles, 0–1000")
         if not self._bars:
             raise ValueError("the chart has no candles to photograph")
+        if timezone is None:
+            timezone = self._timezone                # v1.3.0: as the chart shows its times
         zone_name, zone = _snapshot_zone(timezone)
+        source = self._source_timezone              # v1.3.0: the stamps' own zone
         first = self._bars[0]["time"] if start is None else self._parse_range_time(start)
         last = self._bars[-1]["time"] if end is None else self._parse_range_time(end)
         inside = [bar["time"] for bar in self._bars if first <= bar["time"] <= last]
         if not inside:
             raise ValueError(
-                f"no candle between {_span_moment(first, zone)} and {_span_moment(last, zone)}"
+                f"no candle between {_span_moment(first, zone, source)} and "
+                f"{_span_moment(last, zone, source)}"
             )
         tf = self._display_tf or self._source_tf
         title = " · ".join(
-            part for part in (self.title, tf, _span_text(inside[0], inside[-1], zone)) if part
+            part for part in (self.title, tf, _span_text(inside[0], inside[-1], zone, source))
+            if part
         )
-        return urlencode({"snapshot": 1, "from": inside[0], "to": inside[-1],
-                          "tz": zone_name, "title": title})
+        query = {"snapshot": 1, "from": inside[0], "to": inside[-1], "tz": zone_name,
+                 "title": title, "room": room}
+        if source and source != "UTC":
+            query["stz"] = source
+        return urlencode(query)
 
     # -----------------------------------------------------------------------
     # Pictures (v1.2.0)
@@ -2032,6 +2639,7 @@ class Chart:
         width:    int = 1280,
         height:   int = 720,
         timezone=None,
+        right_room: int | None = None,
     ) -> bytes:
         """
         A PNG of this chart from *start* to *end*, photographed by a headless
@@ -2046,16 +2654,33 @@ class Chart:
 
         ``timezone`` — an IANA name such as ``"Asia/Tehran"``, or a ``ZoneInfo`` —
         changes the time axis, the crosshair label and the title line; the
-        interactive chart stays UTC.
+        interactive chart stays as it is.  Without it the picture shows the
+        chart's own ``timezone`` (v1.3.0; UTC when the chart has none), reading
+        the candles in its ``source_timezone``.
+
+        ``right_room`` — the empty candles after the last one (v1.3.0), so the
+        newest candle does not sit on the picture's edge.  ``None`` takes the
+        chart's ``picture_room``: 10 unless it was changed, on the chart or on the
+        class.  ``0`` puts the last candle at the right edge, as before 1.3.0.  An
+        open position's lines get at least an eighth of the candles shown, and 8.
 
         A chart that is not shown is served for the picture, with no browser tab,
-        and stopped after it; a shown one stays as it is.  Needs the ``[notify]``
-        extra and its browser: ``pip install "AlgoTradeKit[notify]"``, then
-        ``playwright install chromium``.
+        and stopped after it; a shown one stays as it is.  A chart on a
+        :class:`ChartPage` is photographed from the page's server (v1.3.0), so the
+        page must be shown first.  Needs the ``[notify]`` extra and its browser:
+        ``pip install "AlgoTradeKit[notify]"``, then ``playwright install chromium``.
         """
-        from ._snapshot import snapshot
+        from ._page import _ViewProxy
+        from ._snapshot import SnapshotError, snapshot
 
-        query = self._snapshot_query(start, end, timezone)
+        # A page's chart lives at /view?view=<id> on the page's server, which only
+        # the page starts.
+        on_page = isinstance(self._server, _ViewProxy)
+        if on_page and not self._shown:
+            raise SnapshotError(
+                "the chart is on a ChartPage that is not shown — call page.show() first"
+            )
+        query = self._snapshot_query(start, end, timezone, right_room)
         with _SCREENSHOT_LOCK:
             started_here = not self._shown
             if started_here:
@@ -2063,8 +2688,9 @@ class Chart:
                 self._shown = True
             # The page asks for the chart as it is now; an open tab is not told.
             self._server._last_init = self._build_init_payload()
+            address = f"{self.url}&{query}" if on_page else f"{self.url}/?{query}"
             try:
-                return snapshot(f"{self.url}/?{query}", width, height)
+                return snapshot(address, width, height)
             finally:
                 if started_here:
                     self._server.stop()
@@ -2085,11 +2711,17 @@ class Chart:
             "title":            self.title,
             "chartType":        self.chart_type,
             "theme":            self.theme,
+            "style":            dict(self._style),
             "volumeInMain":     self.volume_in_main,
             "candleCountLimit": self._candle_count_limit,
             "sourceTimeframe":  self._source_tf,
             "displayTimeframe": self._display_tf,
             "timeframes":       list(self._timeframes),
+            "actions":          list(self._actions),
+            "drawingActions":   list(self._drawing_actions),
+            "buttons":          self._button_list(),
+            "timezone":         self._timezone,
+            "sourceTimezone":   self._source_timezone,
             "bars":             self._bars,
             "indicators":       [i.to_dict() for i in self._indicators],
             "drawings":         [d.to_dict() for d in self._drawings],
@@ -2184,10 +2816,35 @@ def _snapshot_zone(timezone) -> tuple[str, object | None]:
     )
 
 
-def _local(seconds: int, zone):
+def _local(seconds: int, zone, source: str | None = None):
+    """A candle stamp as a moment in *zone*.  A stamp is its *source* zone's wall
+    clock written as UTC (v1.3.0); without a source it is UTC itself."""
     import datetime as _dt
 
+    if source and source != "UTC":
+        from zoneinfo import ZoneInfo
+
+        wall = _dt.datetime.fromtimestamp(int(seconds), tz=_dt.timezone.utc).replace(tzinfo=None)
+        return wall.replace(tzinfo=ZoneInfo(source)).astimezone(zone or _dt.timezone.utc)
     return _dt.datetime.fromtimestamp(int(seconds), tz=zone or _dt.timezone.utc)
+
+
+def _check_zone(name, what: str) -> str | None:
+    """An IANA zone name, checked (v1.3.0); ``None`` stays ``None``."""
+    if name is None:
+        return None
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"{what}: {name!r} is not a time zone name such as 'Asia/Tehran'")
+    name = name.strip()
+    if name.upper() == "UTC":
+        return "UTC"
+    from zoneinfo import ZoneInfo
+
+    try:
+        ZoneInfo(name)
+    except Exception:
+        raise ValueError(f"{what}: unknown time zone {name!r}") from None
+    return name
 
 
 def _zone_label(moment, zone) -> str:
@@ -2199,13 +2856,13 @@ def _zone_label(moment, zone) -> str:
     return f"(UTC{sign}{abs(offset) // 60:02d}:{abs(offset) % 60:02d})"
 
 
-def _span_moment(seconds: int, zone) -> str:
-    moment = _local(seconds, zone)
+def _span_moment(seconds: int, zone, source: str | None = None) -> str:
+    moment = _local(seconds, zone, source)
     return f"{moment:%Y-%m-%d %H:%M} {_zone_label(moment, zone)}"
 
 
-def _span_text(first: int, last: int, zone) -> str:
+def _span_text(first: int, last: int, zone, source: str | None = None) -> str:
     """«2026-10-14 08:00 – 14:00 UTC»; a span over two dates writes both."""
-    start, end = _local(first, zone), _local(last, zone)
+    start, end = _local(first, zone, source), _local(last, zone, source)
     tail = f"{end:%H:%M}" if start.date() == end.date() else f"{end:%Y-%m-%d %H:%M}"
     return f"{start:%Y-%m-%d %H:%M} – {tail} {_zone_label(start, zone)}"

@@ -90,8 +90,21 @@ Live trade push + rolling window (v1.0.0)
     chart.update_live_position(pid, next_tp=None)       # TP ladder exhausted
     chart.remove_drawing(pid)                           # position closed
     chart.update_drawing(drawing_id, price=...)         # generic live edit
+
+Edits on the page reach Python (v1.3.0)
+---------------------------------------
+    chart = Chart(edit_key="…")          # only the address with ?key=… may change it
+    chart.add_box(t1, p1, t2, p2, key="zone:1", editable=("price",), title="Zone 1")
+
+    @chart.on_drawing_edit
+    def moved(edit):                     # a DrawingEdit: key, before, after
+        if edit.after["price1"] < 0:
+            raise EditRefused("below zero")   # the box goes back, the page says why
+
+    chart.add_action("Mark here", lambda action: chart.add_vline(action.time // 1000))
 """
 
+from ._edits import ChartAction, DrawingEdit, EditRefused
 from ._page import ChartPage
 from .chart import Chart
 from .indicator_renderer import (
@@ -113,6 +126,7 @@ from .models import (
     Signal,
     TextLabel,
     TrendLine,
+    VerticalLine,
 )
 
 __all__ = [
@@ -130,6 +144,11 @@ __all__ = [
     "Signal",
     "TextLabel",
     "TrendLine",
+    "VerticalLine",
+    # Edits on the page (v1.3.0)
+    "ChartAction",
+    "DrawingEdit",
+    "EditRefused",
     # Indicator renderer helpers
     "add_rsi",
     "add_macd",

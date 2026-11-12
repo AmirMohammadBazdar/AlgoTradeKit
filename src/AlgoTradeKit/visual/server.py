@@ -11,11 +11,13 @@ Lightweight FastAPI server that:
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import socket
 import threading
 from pathlib import Path
+from urllib.parse import quote
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -107,6 +109,54 @@ class ConnectionManager:
 
 
 # ---------------------------------------------------------------------------
+# The edit key (v1.3.0)
+# ---------------------------------------------------------------------------
+
+def _may_edit(edit_key: str | None, given: str | None) -> bool:
+    """Whether a page that connected with *given* may change a chart whose key is
+    *edit_key*.  No key on the chart: every page may."""
+    if edit_key is None:
+        return True
+    if not given:
+        return False
+    return hmac.compare_digest(given.encode("utf-8"), edit_key.encode("utf-8"))
+
+
+def _with_key(url: str, edit_key: str | None) -> str:
+    """The address a program's own browser opens: with the key, when there is one."""
+    return f"{url}/?key={quote(edit_key, safe='')}" if edit_key else url
+
+
+async def _send_clock(websocket, clock) -> None:
+    """The feed's clock now (v1.3.0), made fresh for this socket — a cached copy
+    would be stale.  Nothing until the chart has learned it from a live feed."""
+    if clock is None:
+        return
+    try:
+        message = clock()
+        if message is not None:
+            await websocket.send_text(json.dumps(message))
+    except Exception:
+        pass
+
+
+async def _send_access(websocket, editor: bool) -> None:
+    """Tell a page what it may do (v1.3.0), after the replayed init."""
+    try:
+        await websocket.send_text(json.dumps({"type": "access", "edit": editor}))
+    except Exception:
+        pass
+
+
+def _marked(raw: str, editor: bool):
+    """A page's message, marked with who sent it: ``_editor`` (v1.3.0)."""
+    msg = json.loads(raw)
+    if isinstance(msg, dict):
+        msg["_editor"] = editor
+    return msg
+
+
+# ---------------------------------------------------------------------------
 # Chart server
 # ---------------------------------------------------------------------------
 
@@ -146,10 +196,16 @@ class ChartServer:
            There is no authentication.  Only use ``"0.0.0.0"`` on trusted /
            firewalled networks; an SSH tunnel to the default
            ``127.0.0.1`` binding is the safer alternative.
+    edit_key : str | None
+        v1.3.0: only a page whose socket gives ``?key=<edit_key>`` may change the
+        chart.  Every page is told ``{type: "access", edit: …}`` after the init, and
+        every message it sends is marked ``_editor``.  ``None``: every page may.
     """
 
-    def __init__(self, title: str = "Chart", port: int = 0, host: str = "127.0.0.1") -> None:
+    def __init__(self, title: str = "Chart", port: int = 0, host: str = "127.0.0.1",
+                 edit_key: str | None = None) -> None:
         self.title   = title
+        self.edit_key = edit_key
         self.host    = host
         self.port    = port or _find_free_port(host=host)
         self._manager = ConnectionManager()
@@ -161,6 +217,8 @@ class ChartServer:
         # Set by Chart to receive browser → Python messages.
         # Signature: on_message(msg: dict) -> None
         self.on_message = None
+        # Set by Chart (v1.3.0): () -> the feed's clock message, or None
+        self.clock = None
 
         # v0.7.1: replay cache — new browsers get the current state immediately
         self._last_init:     dict | None = None
@@ -178,6 +236,7 @@ class ChartServer:
 
         @app.websocket("/ws")
         async def ws_endpoint(websocket: WebSocket):
+            editor = _may_edit(self.edit_key, websocket.query_params.get("key"))
             await self._manager.connect(websocket)
             # Replay cached init so a refreshed/new tab sees the current chart
             if self._last_init is not None:
@@ -191,12 +250,14 @@ class ChartServer:
                     await websocket.send_text(json.dumps(self._last_navigate))
                 except Exception:
                     pass
+            await _send_access(websocket, editor)
+            await _send_clock(websocket, self.clock)
             try:
                 while True:
                     raw = await websocket.receive_text()
                     if self.on_message:
                         try:
-                            self.on_message(json.loads(raw))
+                            self.on_message(_marked(raw, editor))
                         except Exception:
                             pass
             except WebSocketDisconnect:
@@ -256,7 +317,10 @@ class ChartServer:
 
         if open_browser:
             import webbrowser
-            webbrowser.open(f"{self.url}/?title={self.title}")
+            address = f"{self.url}/?title={self.title}"
+            if self.edit_key:              # v1.3.0: the program's own tab may edit
+                address += f"&key={quote(self.edit_key, safe='')}"
+            webbrowser.open(address)
 
         log.info("ChartServer started → %s (bound to %s)", self.url, self.host)
 
@@ -378,6 +442,10 @@ class PageServer:
         self.layout_payload: dict = {}
         # view id → callback(msg: dict) for browser → Python messages
         self.on_message: dict = {}
+        # view id → its chart's edit key (v1.3.0); a view without one is open to all
+        self.edit_keys: dict[str, str] = {}
+        # view id → () -> its chart's clock message, or None (v1.3.0)
+        self.clocks: dict = {}
 
         self._app = self._build_app()
 
@@ -401,6 +469,7 @@ class PageServer:
         @app.websocket("/ws")
         async def ws_endpoint(websocket: WebSocket):
             view_id = websocket.query_params.get("view", "")
+            editor = _may_edit(self.edit_keys.get(view_id), websocket.query_params.get("key"))
             await websocket.accept()
             with self._lock:
                 self._sockets[websocket] = view_id
@@ -412,6 +481,8 @@ class PageServer:
                         await websocket.send_text(json.dumps(cached))
                     except Exception:
                         pass
+            await _send_access(websocket, editor)
+            await _send_clock(websocket, self.clocks.get(view_id))
 
             try:
                 while True:
@@ -419,7 +490,7 @@ class PageServer:
                     handler = self.on_message.get(view_id)
                     if handler:
                         try:
-                            handler(json.loads(raw))
+                            handler(_marked(raw, editor))
                         except Exception:
                             pass
             except WebSocketDisconnect:
@@ -471,7 +542,10 @@ class PageServer:
 
         if open_browser:
             import webbrowser
-            webbrowser.open(self.url)
+            # The first keyed chart's key: charts with different keys on one page
+            # are edited one key at a time.
+            key = next(iter(self.edit_keys.values()), None)
+            webbrowser.open(_with_key(self.url, key))
 
         log.info("PageServer started → %s (bound to %s)", self.url, self.host)
 

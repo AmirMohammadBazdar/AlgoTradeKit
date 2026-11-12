@@ -68,6 +68,23 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
 
 /* ── Timeframe selector (v1.1.0) ─────────────────────────────── */
 #tf-wrap{position:relative;flex-shrink:0}
+/* v1.3.0: the brand is a link to the repository; it looks as it did */
+a#logo{text-decoration:none;cursor:pointer}
+a#logo:hover{text-decoration:underline}
+/* v1.3.0: go to a date and time — fixed under its button, as #tf-menu is */
+#goto-wrap{position:relative;flex-shrink:0}
+#goto-box{display:none;position:fixed;z-index:300;flex-direction:column;gap:6px;
+          background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+          padding:8px;box-shadow:0 8px 24px #000a}
+#goto-box.open{display:flex}
+#goto-box .row{display:flex;gap:6px;align-items:center}
+#goto-at{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;
+         padding:3px 6px;font-family:'Courier New',monospace;font-size:12px;color-scheme:dark}
+body.light #goto-at{color-scheme:light}
+#goto-hint{color:var(--text2);font-size:10px}
+/* v1.3.0: the time to the last candle's close, under its price on the price axis */
+#cd-tag{position:fixed;display:none;z-index:15;pointer-events:none;text-align:center;
+        border-radius:0 0 2px 2px;white-space:nowrap;overflow:hidden}
 #tf-btn{font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em}
 #tf-btn.busy{opacity:.5;pointer-events:none}
 /* Fixed, not absolute: #tbar scrolls horizontally, and an overflow other than
@@ -202,6 +219,17 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
 #ctx-lock-row{padding:6px 14px;font-size:12px;cursor:pointer;
               display:flex;align-items:center;gap:8px;transition:background .1s}
 #ctx-lock-row:hover{background:var(--bg3)}
+#ctx-menu .mi-title{padding:5px 14px 2px;font-size:11px;font-weight:600;color:var(--text);
+                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+/* ── Candle menu (v1.3.0): the program's actions ──────────────── */
+#candle-menu{position:fixed;background:var(--bg2);border:1px solid var(--border);border-radius:8px;
+             padding:4px 0;z-index:300;box-shadow:0 8px 28px #000a;min-width:160px;display:none}
+#candle-menu .mi{padding:6px 14px;font-size:12px;cursor:pointer;transition:background .1s}
+#candle-menu .mi:hover{background:var(--bg3)}
+#candle-menu hr{border:none;border-top:1px solid var(--border);margin:3px 0}
+/* A page without the edit key (v1.3.0): what would change every viewer's chart */
+body.no-edit #tf-btn,body.no-edit #ind-btn,body.no-edit .il-btn.remove,
+body.no-edit .il-btn.il-edit{opacity:.35;cursor:not-allowed}
 
 /* ── Status bar ──────────────────────────────────────────────── */
 #sb{height:var(--sb);background:var(--bg2);border-top:1px solid var(--border);
@@ -210,6 +238,7 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
 #wsdot{width:7px;height:7px;border-radius:50%;background:#444;margin-right:5px;transition:background .3s}
 #wsdot.live{background:var(--green)} #wsdot.conn{background:var(--yellow);animation:blink 1s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+#sbmsg{color:var(--yellow)}
 
 /* ── Settings panel ──────────────────────────────────────────── */
 #settings-overlay{
@@ -259,6 +288,16 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
   bottom:3px;background:#fff;border-radius:50%;transition:.25s}
 .stog input:checked+.stog-slider{background:var(--accent)}
 .stog input:checked+.stog-slider::before{transform:translateX(16px)}
+/* Colour pickers (v1.3.0) */
+.scolor-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:1px 0}
+.scolor-row label{font-size:12px;color:var(--text)}
+.scolor-row input[type=color]{width:46px;height:24px;padding:1px 2px;cursor:pointer;
+  background:var(--bg3);border:1px solid var(--border);border-radius:5px}
+.scolor-row input[type=color]:hover{border-color:var(--accent)}
+.sreset{height:26px;background:none;border:1px solid var(--border);border-radius:6px;
+  color:var(--text2);font-size:11px;font-weight:600;cursor:pointer;
+  transition:border-color .15s,color .15s}
+.sreset:hover{border-color:var(--accent);color:var(--text)}
 
 /* ── Indicator-add panel (v0.7.4) ────────────────────────────── */
 #ind-overlay{
@@ -301,7 +340,8 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
 <body>
 
 <div id="hdr">
-  <span id="logo">⬡ AlgoTradeKit</span>
+  <a id="logo" href="https://github.com/AmirMohammadBazdar/AlgoTradeKit" target="_blank"
+     rel="noopener noreferrer" title="AlgoTradeKit on GitHub">⬡ AlgoTradeKit</a>
   <span id="chart-title">Chart</span>
   <div id="ohlcv">
     <span id="oi-o"></span><span id="oi-h"></span>
@@ -384,6 +424,26 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
     <svg width="13" height="12" viewBox="0 0 13 12"><rect x=".5" y=".5" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M4 4v4h4" stroke="currentColor" stroke-width="1" fill="none"/></svg>
     Fit
   </button>
+  <div id="goto-wrap">
+    <button class="tb" id="goto-btn" onclick="toggleGoto()" title="Go to a date and time (Alt+G)"
+            style="font-family:'Courier New',monospace;font-size:10px;letter-spacing:.05em;gap:5px">
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+        <rect x=".6" y="1.8" width="11.8" height="10.6" rx="1.4" stroke="currentColor" stroke-width="1.1"/>
+        <line x1=".6" y1="4.8" x2="12.4" y2="4.8" stroke="currentColor" stroke-width="1"/>
+        <line x1="3.6" y1=".5" x2="3.6" y2="3" stroke="currentColor" stroke-width="1.1"/>
+        <line x1="9.4" y1=".5" x2="9.4" y2="3" stroke="currentColor" stroke-width="1.1"/>
+        <rect x="6.6" y="7.2" width="2.6" height="2.6" fill="currentColor"/>
+      </svg>
+      GO TO
+    </button>
+    <div id="goto-box">
+      <div class="row">
+        <input type="datetime-local" id="goto-at" step="60" onkeydown="onGotoKey(event)"/>
+        <button class="tb" id="goto-go" onclick="gotoSubmit()">Go</button>
+      </div>
+      <span id="goto-hint">The chart's time, as its time axis shows it</span>
+    </div>
+  </div>
   <button class="tb" id="ml" onclick="toggleTheme()" title="Theme">
     <svg width="13" height="13" viewBox="0 0 13 13">
       <circle cx="6.5" cy="6.5" r="2.5" stroke="currentColor" stroke-width="1.2" fill="none"/>
@@ -396,6 +456,8 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
       <path d="M7 1v1.8M7 11.2V13M1 7h1.8M11.2 7H13M2.9 2.9l1.3 1.3M9.8 9.8l1.3 1.3M11.1 2.9l-1.3 1.3M4.2 9.8l-1.3 1.3" stroke="currentColor" stroke-width="1.2"/>
     </svg>
   </button>
+  <!-- v1.3.0: the program's own buttons (chart.add_button), for a page that may edit -->
+  <span id="prog-btns"></span>
 </div>
 
 <!-- ── Indicator-add overlay (v0.7.4) ─────────────────────────── -->
@@ -538,6 +600,61 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
     <h3>Settings <button onclick="closeSettings()">✕</button></h3>
     <div class="sdivider"></div>
 
+    <div class="sgroup-title">Colours</div>
+
+    <div class="scolor-row">
+      <label for="sc-background">Background</label>
+      <input type="color" id="sc-background" value="#0d1117"
+             oninput="onStyleInput('background', this.value)" onchange="onStylePicked()"/>
+    </div>
+    <div class="scolor-row">
+      <label for="sc-up">Up candles</label>
+      <input type="color" id="sc-up" value="#3fb950"
+             oninput="onStyleInput('upColor', this.value)" onchange="onStylePicked()"/>
+    </div>
+    <div class="scolor-row">
+      <label for="sc-down">Down candles</label>
+      <input type="color" id="sc-down" value="#f85149"
+             oninput="onStyleInput('downColor', this.value)" onchange="onStylePicked()"/>
+    </div>
+
+    <div class="stoggle-row">
+      <label class="slabel" for="stog-grid">
+        Grid
+        <small>Vertical and horizontal grid lines</small>
+      </label>
+      <label class="stog">
+        <input type="checkbox" id="stog-grid" checked
+               onchange="onGridToggle(this.checked)">
+        <span class="stog-slider"></span>
+      </label>
+    </div>
+
+    <div class="srow">
+      <button class="sreset" onclick="resetStyle()">Reset colours</button>
+      <span class="hint">Changes apply to every chart on this page and are kept in this
+        browser, one set per theme.</span>
+    </div>
+
+    <div class="sdivider"></div>
+    <div class="sgroup-title">Time zone</div>
+
+    <div class="srow">
+      <label for="sz-source">Times are stamped in</label>
+      <select id="sz-source" onchange="onZoneChange()"></select>
+      <span class="hint" id="sz-source-note"></span>
+    </div>
+    <div class="srow">
+      <label for="sz-display">Show times in</label>
+      <select id="sz-display" onchange="onZoneChange()"></select>
+    </div>
+    <div class="srow">
+      <button class="sreset" onclick="resetZones()">Reset time zones</button>
+      <span class="hint">Kept in this browser, for every chart on this page. The candles do
+        not move: a daily candle still runs from the stamps' midnight.</span>
+    </div>
+
+    <div class="sdivider"></div>
     <div class="sgroup-title">Axis &amp; OHLC</div>
 
     <div class="srow">
@@ -585,6 +702,14 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
              oninput="document.getElementById('sf-size-val').textContent=this.value+'px'"/>
     </div>
 
+    <div class="srow">
+      <label for="sf-fib-levels">Fib levels</label>
+      <input type="text" id="sf-fib-levels" value="0, 23.6, 38.2, 50, 61.8, 78.6, 100"
+             onchange="onFibLevelsChange(this.value)"/>
+      <span class="hint">In percent, for a new fib; a fib's own: right-click it → Levels….
+        Kept in this browser.</span>
+    </div>
+
     <div class="sdivider"></div>
     <div class="sgroup-title">Price Axis Labels</div>
 
@@ -612,12 +737,25 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
       </label>
     </div>
 
+    <div class="stoggle-row">
+      <label class="slabel" for="stog-countdown">
+        Time to the candle's close
+        <small>Under the last price on the price axis, while the chart is live</small>
+      </label>
+      <label class="stog">
+        <input type="checkbox" id="stog-countdown" checked
+               onchange="onCountdownToggle(this.checked)">
+        <span class="stog-slider"></span>
+      </label>
+    </div>
+
     <div class="sdivider"></div>
     <button class="sapply" onclick="applyFonts()">Apply &amp; Close</button>
   </div>
 </div>
 
 <div id="rp-hint">Click a candle to start the replay there</div>
+<div id="cd-tag"></div>
 <div id="panes">
   <canvas id="draw-cv"></canvas>
   <canvas id="ghost-cv"></canvas>
@@ -627,9 +765,12 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
   <span id="wsdot" class="conn"></span><span id="wslbl">Connecting…</span>
   <span id="barcnt">—</span>
   <span id="lupd"></span>
+  <span id="sbmsg"></span>
 </div>
 
 <div id="ctx-menu">
+  <!-- v1.3.0: the drawing's title, when the program gave it one -->
+  <div class="mi-title" id="ctx-title"></div>
   <!-- Row 1: metadata — source info -->
   <div class="mi-info">
     <span id="ctx-source-label">Created by</span>
@@ -641,14 +782,22 @@ body.snapshot .il-btn,body.snapshot .iact,body.snapshot .il-group-arrow{display:
     <span id="ctx-lock-icon">🔒</span>
     <span id="ctx-lock-label">Unlock</span>
   </div>
-  <hr/>
+  <hr id="ctx-lock-sep"/>
   <!-- Rows 3-4: edit actions — hidden when locked -->
   <div class="mi" id="ctx-rename-row" onclick="ctxRename()">✏️ Rename label</div>
   <div class="mi" id="ctx-color-row"  onclick="ctxEditColor()">🎨 Change color</div>
-  <hr/>
-  <!-- Row 5: delete — always available -->
-  <div class="mi danger" onclick="ctxDelete()">🗑 Delete</div>
+  <!-- v1.3.0: a fib's levels; the program's items on a drawing you drew -->
+  <div class="mi" id="ctx-levels-row" onclick="ctxFibLevels()">📐 Levels…</div>
+  <!-- v1.3.0: a copy for Ctrl+V, or for «Paste here» on a right-click on the chart -->
+  <div class="mi" id="ctx-copy-row" onclick="ctxCopy()">📋 Copy</div>
+  <div id="ctx-dactions"></div>
+  <hr id="ctx-delete-sep"/>
+  <!-- Row 5: delete — unless the drawing is not deletable (v1.3.0) -->
+  <div class="mi danger" id="ctx-delete-row" onclick="ctxDelete()">🗑 Delete</div>
 </div>
+
+<!-- v1.3.0: the program's actions, on a right-click away from any drawing -->
+<div id="candle-menu"></div>
 
 <script>
 'use strict';
@@ -676,6 +825,18 @@ const embedded = viewId !== null && window.parent !== window;
 // page a headless browser photographs for a chart picture. It only reads: it
 // sends the server nothing.
 const snapshot = _q.get('snapshot') === '1';
+// The edit key (v1.3.0): read from this page's address and given to the server when
+// the socket connects. The server answers with what this page may change; until it
+// does — or if it never does, an older server — the page may, as before.
+const editKey = _q.get('key');
+let canEdit = true;
+// A ChartPage serves each frame this page as /view?view=<id>. The same address
+// with no view names nothing on that page: whoever typed it wanted the page, so
+// go there, with the key (v1.3.0, the check of Part 4: /view?key=… stayed blank).
+if (viewId === null && !snapshot && /\/view\/?$/.test(location.pathname || '')) {
+  const root = location.pathname.replace(/\/view\/?$/, '/');
+  location.replace(root + (editKey ? `?key=${encodeURIComponent(editKey)}` : ''));
+}
 // Only the chart the pointer is over may drive the others.
 //
 // Comparing values is not enough to stop an echo: each chart snaps a range to
@@ -706,6 +867,9 @@ const gCtx    = ghostCv.getContext('2d');
 const ctxMenu = document.getElementById('ctx-menu');
 
 const HANDLE_R=5, HIT_R=9;
+// v1.3.0: the fib's end points are bigger, and its levels can be any
+const FIB_HANDLE_R=7;
+const FIB_DEFAULT=[0,.236,.382,.5,.618,.786,1];
 
 // indGroups: groupName → {names: [str], collapsed: bool, hidden: bool}
 const indGroups = {};
@@ -730,18 +894,179 @@ const DARK={layout:{background:{color:'#0d1117'},textColor:'#8b949e'},
   grid:{vertLines:{color:'#1c2333'},horzLines:{color:'#1c2333'}},
   crosshair:{mode:1,vertLine:{color:'#58a6ff44'},horzLine:{color:'#58a6ff44'}},
   rightPriceScale:{borderColor:'#30363d'},
-  timeScale:{borderColor:'#30363d',timeVisible:true,secondsVisible:false}};
+  timeScale:{borderColor:'#30363d',timeVisible:true,secondsVisible:false,rightOffset:8}};
 const LIGHT={layout:{background:{color:'#ffffff'},textColor:'#57606a'},
   grid:{vertLines:{color:'#eaeef2'},horzLines:{color:'#eaeef2'}},
   crosshair:{mode:1},rightPriceScale:{borderColor:'#d0d7de'},
-  timeScale:{borderColor:'#d0d7de',timeVisible:true,secondsVisible:false}};
-const tOpts=()=>theme==='dark'?DARK:LIGHT;
+  timeScale:{borderColor:'#d0d7de',timeVisible:true,secondsVisible:false,rightOffset:8}};
+// The theme's options with this chart's colours in them, so every pane made
+// or restyled takes the background and the grid from the colours below.
+const tOpts=()=>{
+  const base=theme==='dark'?DARK:LIGHT;
+  return {...base,
+    layout:{...base.layout, background:{color:chartStyle.background}},
+    grid:{vertLines:{...base.grid.vertLines, visible:chartStyle.grid},
+          horzLines:{...base.grid.horzLines, visible:chartStyle.grid}},
+    // v1.3.0: times in the zone shown, read from the zone the candles are stamped
+    // in — lightweight-charts' own labels while both are UTC
+    ...(zonesActive() ? zonedOptions() : {})};
+};
 
 function toggleTheme(){
   theme=theme==='dark'?'light':'dark';
   document.body.classList.toggle('light',theme==='light');
-  Object.values(panes).forEach(p=>p.chart.applyOptions(tOpts()));
+  applyStyle();                  // ☀ swaps to the other theme's colours
+  syncStylePanel();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  COLOURS (v1.3.0)
+//  Each theme has its own background, candle colours and grid, in three
+//  layers, each over the one before: the theme's default; the program's
+//  colours (the init's `style`), which belong to the theme the chart starts
+//  in; and this browser's own choice from the Settings panel, saved per
+//  theme. A picture shows the program's colours: the screenshot mode never
+//  reads or writes the browser's choice.
+// ═══════════════════════════════════════════════════════════════
+const STYLE_DEFAULTS = {
+  dark:  {background:'#0d1117', upColor:'#3fb950', downColor:'#f85149', grid:true},
+  light: {background:'#ffffff', upColor:'#3fb950', downColor:'#f85149', grid:true},
+};
+const STYLE_KEY = 'atk.chart.style.v1';
+// The program's style comes with Python's names
+const PROGRAM_FIELDS = {background:'background', up_color:'upColor', down_color:'downColor',
+                        grid:'grid'};
+const COLOUR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+let programStyle = {}, programTheme = 'dark';
+let browserStyle = {dark:{}, light:{}};           // only the fields the viewer changed
+let chartStyle   = {...STYLE_DEFAULTS.dark};      // what the chart shows now
+
+// Only a colour where a colour goes and a boolean for the grid: storage is the
+// browser's, and anything can be in it.
+function cleanStyle(s){
+  const out = {};
+  if(!s || typeof s !== 'object') return out;
+  ['background','upColor','downColor'].forEach(k => {
+    if(typeof s[k] === 'string' && COLOUR_RE.test(s[k])) out[k] = s[k];
+  });
+  if(typeof s.grid === 'boolean') out.grid = s.grid;
+  return out;
+}
+
+function fromProgram(style){
+  const s = {};
+  Object.entries(style || {}).forEach(([k, v]) => {
+    if(PROGRAM_FIELDS[k]) s[PROGRAM_FIELDS[k]] = v;
+  });
+  return cleanStyle(s);
+}
+
+function styleFor(t){
+  return Object.assign({}, STYLE_DEFAULTS[t] || STYLE_DEFAULTS.dark,
+                       t === programTheme ? programStyle : {},
+                       browserStyle[t] || {});
+}
+
+// What this browser saved, or null when it cannot say: no storage, a private
+// window that refuses it, or a picture, which shows the program's colours.
+function readSavedStyle(){
+  if(snapshot) return null;
+  try{
+    const raw = window.localStorage.getItem(STYLE_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    return {dark: cleanStyle(all && all.dark), light: cleanStyle(all && all.light)};
+  }catch{ return null; }
+}
+function loadSavedStyle(){
+  const saved = readSavedStyle();
+  if(saved) browserStyle = saved;
+}
+function storeSavedStyle(){
+  if(snapshot) return;
+  try{ window.localStorage.setItem(STYLE_KEY, JSON.stringify(browserStyle)); }catch{}
+}
+
+function candleColours(){
+  const up = chartStyle.upColor, down = chartStyle.downColor;
+  return {upColor:up, downColor:down, borderUpColor:up, borderDownColor:down,
+          wickUpColor:up, wickDownColor:down};
+}
+
+// #rgb written out, #rrggbbaa without its alpha
+function rgbOf(c){
+  return c.length === 4 ? '#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3] : c.slice(0, 7);
+}
+
+// A volume bar is its candle's colour at a third (alpha 55), in place of any
+// alpha the colour has of its own.
+function volPoint(b){
+  return {time:b.time, value:b.volume||0,
+          color:rgbOf(b.close>=b.open ? chartStyle.upColor : chartStyle.downColor) + '55'};
+}
+
+function applyStyle(){
+  chartStyle = styleFor(theme);
+  Object.values(panes).forEach(p => { try{ p.chart.applyOptions(tOpts()); }catch{} });
+  if(mainSeries) mainSeries.applyOptions(candleColours());
+  if(volumeSeries){
+    const bars = replay.active && replay.shown ? replay.shown : allBars;
+    volumeSeries.setData(bars.map(volPoint));
+  }
   redrawAll();
+}
+
+// The panel shows the colours the chart shows. A colour picker holds #rrggbb
+// only; the colour itself is untouched until another is picked.
+function syncStylePanel(){
+  const setColour = (id, c) => {
+    const el = document.getElementById(id);
+    if(el) el.value = rgbOf(c);
+  };
+  setColour('sc-background', chartStyle.background);
+  setColour('sc-up', chartStyle.upColor);
+  setColour('sc-down', chartStyle.downColor);
+  const grid = document.getElementById('stog-grid');
+  if(grid) grid.checked = chartStyle.grid;
+}
+
+// A change applies at once and is saved at once, for the current theme.
+// Storage is read again first: another tab of this chart may have saved since.
+function changeStyle(field, value){
+  loadSavedStyle();
+  browserStyle[theme] = cleanStyle({...browserStyle[theme], [field]: value});
+  storeSavedStyle();
+  applyStyle();
+}
+
+// The picker reports while it moves (input) and once more when a colour is
+// picked (change). This chart follows every move; the page's other charts
+// follow the pick, so dragging does not redraw every chart sixty times a second.
+function onStyleInput(field, value){ changeStyle(field, value); }
+function onStylePicked(){ postToPage({t:'style'}); }
+function onGridToggle(on){ changeStyle('grid', !!on); postToPage({t:'style'}); }
+
+// Forget this browser's choice for the current theme: the program's colours
+// show again, or the theme's own.
+function resetStyle(){
+  loadSavedStyle();
+  browserStyle[theme] = {};
+  storeSavedStyle();
+  applyStyle();
+  syncStylePanel();
+  postToPage({t:'style'});
+}
+
+// Another chart of the page changed the colours: they are in the storage every
+// frame of the page shares.
+function onStyleRelayed(){
+  loadSavedStyle();
+  applyStyle();
+  syncStylePanel();
+  loadCountdown();                       // v1.3.0: it travels with the colours
+  updateCountdown();
+  loadZones();                           // v1.3.0: and so do the time zones
+  applyZones();
+  loadFibLevels();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -933,7 +1258,15 @@ if(embedded){
       case 'replay-cursor':   replayPageCursor(msg.time);              break;
       case 'replay-exit':     replayExit();                            break;
       case 'replay-info':     postToPage(replayInfo());                break;
-      case 'navigate':        scrollToTime(msg.time);                  break;
+      case 'navigate':        // v1.3.0: «Go to» on another chart keeps each zoom
+                              if(msg.keep) goToTime(msg.time); else scrollToTime(msg.time);
+                              break;
+      case 'style':           onStyleRelayed();                        break;
+      case 'paste': {         // v1.3.0: a Ctrl+V the page passed to the chart in use
+        const shape = readClipText(msg.text);
+        if(shape) pasteCopied(shape);
+        break;
+      }
     }
   });
 }
@@ -947,20 +1280,247 @@ if(embedded){
 //  are painted.
 // ═══════════════════════════════════════════════════════════════
 const SNAP_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+// v1.3.0: the empty candles a picture leaves after its last one (?room=, the
+// program's Chart.picture_room; none when the address does not say)
+const SNAP_ROOM = Math.max(0, Math.min(1000, Math.floor(Number(_q.get('room')) || 0)));
+
+// ═══════════════════════════════════════════════════════════════
+//  TIME ZONES (v1.3.0)
+//  A candle's time is the feed's stamp: the wall clock of the zone the feed
+//  stamps in — UTC on Binance, the broker's own time on MetaTrader — written
+//  as if it were UTC. The chart cannot tell which zone that is: the program
+//  says (Chart(source_timezone=)) or the viewer (Settings → «Time zone»). A
+//  label goes stamp → instant (through the source zone) → the wall clock of
+//  the zone shown. The candles never move; only their labels do.
+// ═══════════════════════════════════════════════════════════════
+const ZONES_KEY = 'atk.chart.zones.v1';
+let programZones = {source: null, display: null};   // the init's
+let browserZones = {};                               // what this browser chose
+let zones = {source: 'UTC', display: 'UTC'};         // what the chart uses now
+const _zoneFmts = {};
+
+function validZone(z){
+  if(typeof z !== 'string' || !z) return false;
+  try{ new Intl.DateTimeFormat('en-GB', {timeZone: z}); return true; }catch{ return false; }
+}
+function zoneFmt(z){
+  if(!_zoneFmts[z]){
+    _zoneFmts[z] = new Intl.DateTimeFormat('en-GB', {timeZone: z, year:'numeric',
+      month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit',
+      hourCycle:'h23'});
+  }
+  return _zoneFmts[z];
+}
+function wallParts(z, ms){                           // instant ms → zone z's wall clock
+  const parts = {};
+  zoneFmt(z).formatToParts(new Date(ms)).forEach(p => { parts[p.type] = p.value; });
+  return parts;
+}
+function zoneOffset(z, ms){                          // zone z minus UTC at instant ms
+  if(z === 'UTC') return 0;
+  const p = wallParts(z, ms);
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second)
+         - Math.floor(ms / 1000) * 1000;
+}
+function wallToInstant(z, wallMs){                   // zone z's wall clock → the instant
+  if(z === 'UTC') return wallMs;
+  const guess = wallMs - zoneOffset(z, wallMs);
+  return wallMs - zoneOffset(z, guess);
+}
+function stampToMs(sec){ return wallToInstant(zones.source, sec * 1000); }
+function msToStamp(ms){ return Math.round((ms + zoneOffset(zones.source, ms)) / 1000); }
+function shownParts(sec){ return wallParts(zones.display, stampToMs(sec)); }
+function shownLabel(sec){                            // «2026-10-31 00:15»
+  const p = shownParts(sec);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+}
+
+// lightweight-charts' labels: its own defaults' look, in the zone shown
+function zoneTickLabel(time, type){
+  if(typeof time !== 'number') return null;          // a business day: the default
+  const p = shownParts(time);
+  return type === 0 ? p.year
+       : type === 1 ? SNAP_MONTHS[Number(p.month) - 1]
+       : type === 2 ? String(Number(p.day))
+       : type === 4 ? `${p.hour}:${p.minute}:${p.second}`
+       : `${p.hour}:${p.minute}`;
+}
+function zoneTimeLabel(time){
+  if(typeof time !== 'number') return String(time);
+  const p = shownParts(time);
+  return `${p.day} ${SNAP_MONTHS[Number(p.month) - 1]} '${p.year.slice(2)} ${p.hour}:${p.minute}`;
+}
+
+function readSavedZones(){
+  if(snapshot) return null;
+  try{
+    const all = JSON.parse(window.localStorage.getItem(ZONES_KEY) || '{}') || {};
+    const out = {};
+    ['source', 'display'].forEach(k => { if(validZone(all[k])) out[k] = all[k]; });
+    return out;
+  }catch{ return null; }
+}
+function loadZones(){
+  const saved = readSavedZones();
+  if(saved) browserZones = saved;
+}
+// What the chart uses: this browser's choice, else the program's, else UTC. A
+// picture reads its zones from its address (tz, stz) and nothing else.
+function pickZones(){
+  if(snapshot){
+    zones = {source: validZone(_q.get('stz')) ? _q.get('stz') : 'UTC',
+             display: validZone(_q.get('tz')) ? _q.get('tz') : 'UTC'};
+    return;
+  }
+  const pick = k => browserZones[k] || (validZone(programZones[k]) ? programZones[k] : 'UTC');
+  zones = {source: pick('source'), display: pick('display')};
+}
+// While both zones are UTC the chart keeps lightweight-charts' own labels
+function zonesActive(){ return zones.source !== 'UTC' || zones.display !== 'UTC'; }
+function zonedOptions(){
+  return {localization:{timeFormatter:t => zoneTimeLabel(t)},
+          timeScale:{...(theme === 'dark' ? DARK : LIGHT).timeScale,
+                     tickMarkFormatter:(t, type) => zoneTickLabel(t, type)}};
+}
+let _zonedPanes = false, _toldZones = '';
+function applyZones(){
+  pickZones();
+  if(!snapshot && (zonesActive() || _zonedPanes)){
+    const opts = zonesActive() ? zonedOptions()
+      : {localization:{timeFormatter:undefined}, timeScale:{tickMarkFormatter:undefined}};
+    Object.values(panes).forEach(p => { try{ p.chart.applyOptions(opts); }catch{} });
+    _zonedPanes = zonesActive();
+  }
+  const told = zones.source + '|' + zones.display;        // the page's replay clock,
+  if(told !== _toldZones){                                 // told of a change only
+    _toldZones = told;
+    postToPage({t:'zones', source: zones.source, display: zones.display});
+  }
+  syncZonePanel();
+  updateReplayUI();
+  redrawAll();
+}
+
+// The Settings panel's two lists: UTC, this PC's zone, the program's, then all
+let _zoneListBuilt = false;
+// The browser (ICU) still lists some places by their old names: the list shows,
+// and keeps, the current ones — the same zones under the names tzdata gives now.
+const ZONE_RENAMED = {
+  'Africa/Asmera':'Africa/Asmara', 'America/Buenos_Aires':'America/Argentina/Buenos_Aires',
+  'America/Catamarca':'America/Argentina/Catamarca', 'America/Cordoba':'America/Argentina/Cordoba',
+  'America/Godthab':'America/Nuuk', 'America/Indianapolis':'America/Indiana/Indianapolis',
+  'America/Jujuy':'America/Argentina/Jujuy', 'America/Louisville':'America/Kentucky/Louisville',
+  'America/Mendoza':'America/Argentina/Mendoza', 'Asia/Calcutta':'Asia/Kolkata',
+  'Asia/Katmandu':'Asia/Kathmandu', 'Asia/Rangoon':'Asia/Yangon', 'Asia/Saigon':'Asia/Ho_Chi_Minh',
+  'Atlantic/Faeroe':'Atlantic/Faroe', 'Europe/Kiev':'Europe/Kyiv', 'Pacific/Enderbury':'Pacific/Kanton',
+  'Pacific/Ponape':'Pacific/Pohnpei', 'Pacific/Truk':'Pacific/Chuuk'};
+function modernZone(z){
+  const m = ZONE_RENAMED[z];
+  return m && validZone(m) ? m : z;
+}
+
+// Each zone as «+03:30 Tehran»: its offset from UTC at *at*, then its city; the
+// list goes by the offset, then the city (v1.3.0).
+function zoneChoices(at = Date.now()){
+  const here = (() => { try{ return Intl.DateTimeFormat().resolvedOptions().timeZone; }
+                        catch{ return null; } })();
+  let all = [];
+  try{ all = Intl.supportedValuesOf('timeZone'); }catch{}
+  const seen = new Set(), out = [];
+  ['UTC', here, programZones.source, programZones.display, zones.source, zones.display,
+   ...all].forEach(name => {
+    const z = name && modernZone(name);
+    if(!z || seen.has(z)) return;
+    const offset = listOffset(z, at);           // null: a zone this browser does not know
+    if(offset == null) return;
+    seen.add(z);
+    out.push({zone: z, offset, city: zoneCity(z)});
+  });
+  out.sort((a, b) => a.offset - b.offset || a.city.localeCompare(b.city));
+  out.forEach(c => { c.label = offsetText(c.offset) + ' ' + c.city; });
+  return out;
+}
+function zoneCity(z){ return z.split('/').pop().replace(/_/g, ' '); }
+// The offset alone («GMT+03:30»): one light formatter per zone, which is most of
+// what the list costs — so it is also the list's check that the zone is known.
+function listOffset(z, at){
+  let part;
+  try{
+    part = new Intl.DateTimeFormat('en-US', {timeZone: z, timeZoneName: 'longOffset'})
+      .formatToParts(new Date(at)).find(p => p.type === 'timeZoneName');
+  }catch{
+    return validZone(z) ? zoneOffset(z, at) : null;     // no «longOffset» here, or unknown
+  }
+  const text = part ? part.value : '';
+  if(text === 'GMT') return 0;
+  const m = /^GMT([+-])(\d{2}):(\d{2})$/.exec(text);
+  return m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) * 60000
+           : zoneOffset(z, at);
+}
+function offsetText(ms){
+  const m = Math.round(Math.abs(ms) / 60000);
+  return (ms < 0 ? '-' : '+') + String(Math.floor(m / 60)).padStart(2, '0') + ':'
+       + String(m % 60).padStart(2, '0');
+}
+// The lists are filled the first time Settings opens: some 420 zones cost a few
+// hundred milliseconds, which a page of charts should not pay on every load.
+function buildZoneLists(){
+  const src = document.getElementById('sz-source'), shown = document.getElementById('sz-display');
+  if(_zoneListBuilt || !src || !shown) return;
+  zoneChoices().forEach(c => {
+    [src, shown].forEach(sel => {
+      const o = document.createElement('option');
+      o.value = c.zone; o.textContent = c.label; o.title = c.zone;
+      sel.appendChild(o);
+    });
+  });
+  _zoneListBuilt = true;
+}
+function syncZonePanel(){
+  const src = document.getElementById('sz-source'), shown = document.getElementById('sz-display');
+  if(!src || !shown) return;
+  if(_zoneListBuilt){
+    src.value = modernZone(zones.source);
+    shown.value = modernZone(zones.display);
+  }
+  const note = document.getElementById('sz-source-note');
+  if(note){
+    note.textContent = browserZones.source
+      ? 'You set it. The chart cannot tell which zone the feed stamps its candles in.'
+      : programZones.source
+        ? `Set by the program (${programZones.source}). The chart cannot tell which zone the `
+          + 'feed stamps its candles in: change it if it is wrong.'
+        : 'UTC unless you say otherwise: the chart cannot tell which zone the feed stamps '
+          + 'its candles in (UTC on Binance, the broker\'s own time on MetaTrader).';
+  }
+}
+// A choice is kept only where it differs from what the program said
+function onZoneChange(){
+  loadZones();
+  const src = document.getElementById('sz-source').value;
+  const shown = document.getElementById('sz-display').value;
+  const prog = k => modernZone(validZone(programZones[k]) ? programZones[k] : 'UTC');
+  browserZones = {};
+  if(validZone(src) && src !== prog('source')) browserZones.source = src;
+  if(validZone(shown) && shown !== prog('display')) browserZones.display = shown;
+  if(!snapshot){ try{ window.localStorage.setItem(ZONES_KEY, JSON.stringify(browserZones)); }catch{} }
+  applyZones();
+  postToPage({t:'style'});
+}
+function resetZones(){
+  browserZones = {};
+  if(!snapshot){ try{ window.localStorage.setItem(ZONES_KEY, '{}'); }catch{} }
+  applyZones();
+  postToPage({t:'style'});
+}
 // The labels the time axis asked for, newest last: what a test reads back.
 const snapTicks = [];
 let snapFormat = null;
 
 function snapParts(sec){
-  if(!snapFormat){
-    const opts = {year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit',
-                  minute:'2-digit', second:'2-digit', hourCycle:'h23'};
-    try{ snapFormat = new Intl.DateTimeFormat('en-GB', {...opts, timeZone:_q.get('tz') || 'UTC'}); }
-    catch{ snapFormat = new Intl.DateTimeFormat('en-GB', {...opts, timeZone:'UTC'}); }
-  }
-  const parts = {};
-  snapFormat.formatToParts(new Date(sec * 1000)).forEach(p => { parts[p.type] = p.value; });
-  return parts;
+  // v1.3.0: the picture's zones are its address's: tz shown, stz stamped in
+  if(!snapFormat){ pickZones(); snapFormat = true; }
+  return shownParts(sec);
 }
 
 // lightweight-charts' tickMarkFormatter: the tick's type picks the unit, the zone
@@ -996,14 +1556,42 @@ function snapshotHideControls(){
 // An open position starts at its entry, which in a trade's picture is the last
 // candle: leave room after it, an eighth of the candles shown (at least 8), so its
 // entry, SL and TP lines show.
-function roomForPositions(range){
+// The room after a picture's last candle (v1.3.0): the program's `room`, and at
+// least an eighth of the candles shown, and 8, for an open position's lines. It is
+// free space: what comes after the picture's last candle is not drawn in it.
+function roomAfterLast(range){
   if(!range || !mainChart) return;
-  if(!Object.values(drawings).some(d => d.type === 'live_position')) return;
   const shown = mainChart.timeScale().getVisibleLogicalRange();
   if(!shown) return;
-  const room = Math.max(8, Math.round((shown.to - shown.from) / 8));
+  let room = SNAP_ROOM;
+  if(Object.values(drawings).some(d => d.type === 'live_position'))
+    room = Math.max(room, 8, Math.round((shown.to - shown.from) / 8));
+  if(!room) return;
+  snapCutAfter(range.to);
   const wider = {from:shown.from, to:shown.to + room};
   Object.values(panes).forEach(p => { try{ p.chart.timeScale().setVisibleLogicalRange(wider); }catch{} });
+}
+
+// A picture ends at its last candle (v1.3.0): the candles after it, and every
+// indicator's points after it but the overhang a series has past the data (the
+// Ichimoku spans), are not drawn, so the room after it is free space.
+function snapCutAfter(t){
+  const dataEnd = allBars.length ? allBars[allBars.length-1].time : t;
+  if(dataEnd <= t) return;
+  const kept = allBars.filter(b => b.time <= t);
+  try{ mainSeries.setData(kept); }catch{}
+  if(volumeSeries){ try{ volumeSeries.setData(kept.map(volPoint)); }catch{} }
+  Object.values(indMeta).forEach(m => {
+    const full = m.full || [];
+    const ahead = full.length ? Math.max(0, full[full.length-1].time - dataEnd) : 0;
+    try{ m.series.setData(full.filter(p => p.time <= t + ahead)); }catch{}
+  });
+  if(ichimokuCloud){
+    const fa = ichimokuCloud.spanA, fb = ichimokuCloud.spanB;
+    const ahead = fa.length ? Math.max(0, fa[fa.length-1].time - dataEnd) : 0;
+    ichimokuCloud.spanA = fa.filter(p => p.time <= t + ahead);
+    ichimokuCloud.spanB = fb.filter(p => p.time <= t + ahead);
+  }
 }
 
 // After an init: the title line, the zone on every pane, the range, and the flag
@@ -1049,7 +1637,7 @@ function snapshotApply(){
       });
     }
     applyRange();
-    roomForPositions(range);
+    roomAfterLast(range);
     requestAnimationFrame(() => requestAnimationFrame(() => {
       redrawAll();
       window.__atkSnapshotReady = true;
@@ -1151,11 +1739,7 @@ function initMain(){
       }
     }
   });
-  mainSeries=mainChart.addCandlestickSeries({
-    upColor:'#3fb950',downColor:'#f85149',
-    borderUpColor:'#3fb950',borderDownColor:'#f85149',
-    wickUpColor:'#3fb950',wickDownColor:'#f85149',
-  });
+  mainSeries=mainChart.addCandlestickSeries(candleColours());
   // Apply initial axis label settings
   mainSeries.applyOptions({ lastValueVisible: showLastClose });
   panes.main.seriesList=[mainSeries];
@@ -1175,10 +1759,7 @@ function initMain(){
 function setData(bars){
   allBars=bars;
   mainSeries.setData(bars);
-  if(volumeSeries) volumeSeries.setData(bars.map(b=>({
-    time:b.time,value:b.volume||0,
-    color:b.close>=b.open?'#3fb95055':'#f8514955',
-  })));
+  if(volumeSeries) volumeSeries.setData(bars.map(volPoint));
   document.getElementById('barcnt').textContent=bars.length+' bars';
   // Show last-close label on right axis immediately (cursor not yet on chart)
   updateCursorAxisLabel(null);
@@ -1192,14 +1773,15 @@ function streamBar(bar){
   // trimming allBars underneath the cursor would invalidate what is on screen.
   if(!replay.active){
     mainSeries.update(bar);
-    if(volumeSeries) volumeSeries.update({time:bar.time,value:bar.volume||0,
-      color:bar.close>=bar.open?'#3fb95055':'#f8514955'});
+    if(volumeSeries) volumeSeries.update(volPoint(bar));
   }
   if(allBars.length&&allBars[allBars.length-1].time===bar.time) allBars[allBars.length-1]=bar;
   else allBars.push(bar);
   if(!replay.active) enforceCandleLimit();   // rolling window (v1.0.0)
   document.getElementById('barcnt').textContent=allBars.length+' bars';
-  document.getElementById('lupd').textContent='⟳ '+new Date().toLocaleTimeString();
+  // v1.3.0: this PC's clock, in the zone the chart shows its times in
+  const nowShown=wallParts(zones.display, Date.now());
+  document.getElementById('lupd').textContent=`⟳ ${nowShown.hour}:${nowShown.minute}:${nowShown.second}`;
   // Keep last-close axis label current
   if(!replay.active) updateCursorAxisLabel(null);
 }
@@ -1214,6 +1796,9 @@ function drawingEndTime(d){
   // Latest chart time a drawing occupies; null = never trim.
   // hlines are timeless; live positions extend to "now".
   if(d.type==='live_position') return null;
+  // v1.3.0: a running drawing (no end given) is never trimmed — as on the server
+  if(d.type==='position_box' && d.close_time==null) return null;
+  if('time2' in d && d.time2==null && d.time1!=null) return null;
   if(d.close_time!=null) return d.close_time;
   if(d.time1!=null || d.time2!=null)
     return Math.max(d.time1 ?? -Infinity, d.time2 ?? -Infinity);
@@ -1229,10 +1814,7 @@ function enforceCandleLimit(){
   const cutoff = allBars[0].time;
 
   if(mainSeries) mainSeries.setData(allBars);
-  if(volumeSeries) volumeSeries.setData(allBars.map(b=>({
-    time:b.time,value:b.volume||0,
-    color:b.close>=b.open?'#3fb95055':'#f8514955',
-  })));
+  if(volumeSeries) volumeSeries.setData(allBars.map(volPoint));
 
   // Indicator series: drop points older than the window start
   Object.values(indMeta).forEach(m=>{
@@ -1351,7 +1933,7 @@ function _addCloudLegendRow(name, color, grpName){
               onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
         <span class="il-dot" style="background:${color}"></span>
         <span class="il-group-name">${grpName}</span>
-        <button class="il-btn" title="Edit settings"
+        <button class="il-btn il-edit" title="Edit settings"
                 onclick="openEditPanel('${grpName.replace(/'/g,"\\'")}')">⚙</button>
         <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
                 onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
@@ -1466,7 +2048,7 @@ function addLegendRow(name, color, group){
               onclick="toggleGroupCollapse('${grpName.replace(/'/g,"\\'")}')">▶</span>
         <span class="il-dot" style="background:${existingColor}"></span>
         <span class="il-group-name">${grpName}</span>
-        <button class="il-btn" title="Edit settings"
+        <button class="il-btn il-edit" title="Edit settings"
                 onclick="openEditPanel('${grpName.replace(/'/g,"\\'")}')">⚙</button>
         <button class="il-btn" id="ilgrpvis-${CSS.escape(grpName)}" title="Hide/Show all"
                 onclick="toggleGroupVisibility('${grpName.replace(/'/g,"\\'")}')">
@@ -1514,7 +2096,7 @@ function _makeIndRow(name, color, isChild, grpName){
     <span class="il-dot" style="background:${color}"></span>
     <span class="il-name">${name}</span>
     <span class="il-val" id="ilval-${CSS.escape(name)}">—</span>
-    ${isChild ? '' : `<button class="il-btn" title="Edit settings"
+    ${isChild ? '' : `<button class="il-btn il-edit" title="Edit settings"
             onclick="openEditPanel('${g}')">⚙</button>`}
     <button class="il-btn" title="Hide/Show"
             onclick="toggleIndVisibility('${name.replace(/'/g,"\\'")}')">
@@ -1572,6 +2154,7 @@ function toggleGroupVisibility(grpName){
 }
 
 function removeIndicatorGroup(grpName){
+  if(!canEdit && refuseNoEdit()) return;
   const g = indGroups[grpName]; if(!g) return;
   if(grpName.startsWith('Ichimoku') || g.names.some(n=>n==='Cloud (Bull)'||n==='Cloud (Bear)')){
     ichimokuCloud = null;
@@ -1689,6 +2272,7 @@ function toggleSubGrpVisibility(paneId, grpName){
 }
 
 function removeSubGrp(paneId, grpName){
+  if(!canEdit && refuseNoEdit()) return;
   const g = subPaneGroups[paneId]?.[grpName]; if(!g) return;
   [...g.names].forEach(n=>removeIndicator(n));
   const grpChip = document.getElementById('chipgrp-'+CSS.escape(paneId+'-'+grpName));
@@ -1714,6 +2298,7 @@ function toggleIndVisibility(name){
 
 // ── Remove indicator (frontend + notify Python) ───────────────
 function removeIndicator(name){
+  if(!canEdit && refuseNoEdit()) return;
   if(name==='Cloud (Bull)' || name==='Cloud (Bear)'){
     ichimokuCloud=null; redrawAll(); return;
   }
@@ -1925,10 +2510,30 @@ function fromXY(cx,cy){
     const wR=panes.main.paneWrap.getBoundingClientRect();
     const pR=document.getElementById('panes').getBoundingClientRect();
     const price=mainSeries.coordinateToPrice(cy-(wR.top-pR.top));
-    const time=mainChart.timeScale().coordinateToTime(cx);
+    const time=xToTime(cx);
     if(price==null||time==null) return null;
     return{time,price};
   }catch{return null;}
+}
+
+// The time at x, also off the candles (v1.3.0). The scale answers only where it
+// has a candle; past the last one (or before the first) the time runs on at the
+// spacing of the two nearest candles — the way timeToX draws there — so a shape
+// reaching into the future can still be grabbed and resized.
+function xToTime(x){
+  if(!mainChart) return null;
+  let t=null;
+  try{ t=mainChart.timeScale().coordinateToTime(x); }catch{}
+  if(t!=null) return t;
+  const bars=scaleBars();
+  if(bars.length<2) return null;
+  const last=bars.length-1;
+  const first=timeToX(bars[0].time);
+  const [lo,hi]=(first!=null&&x<first) ? [0,1] : [last-1,last];
+  const x0=timeToX(bars[lo].time), x1=timeToX(bars[hi].time);
+  if(x0==null||x1==null||x1===x0) return null;
+  const t0=bars[lo].time, t1=bars[hi].time;
+  return Math.round(t0+(t1-t0)*((x-x0)/(x1-x0)));
 }
 function toXYFromOrig(time,price){ return toXY(time,price); }
 
@@ -2115,6 +2720,21 @@ function renderOne(d,ctx,W,H){
     if(hl) drawHandle(ctx,W/2,xy.y,d.color,true);
   }
 
+  else if(d.type==='vline'){
+    // v1.3.0: across the price pane, its label at the top
+    const x=vlineX(d.time), band=mainPaneBand();
+    if(x==null||!band){ctx.restore();return;}
+    const col=d.color||'#e3b341';
+    ctx.beginPath(); ctx.strokeStyle=col;
+    ctx.lineWidth=(d.id===hoverId||d.id===selectedId)?2:1;
+    ctx.setLineDash(d.style==='solid'?[]:[5,4]);
+    ctx.moveTo(x,band.top); ctx.lineTo(x,band.bottom); ctx.stroke(); ctx.setLineDash([]);
+    if(d.label){
+      ctx.fillStyle=col; ctx.textAlign='left';
+      ctx.fillText(d.label,x+4,band.top+drawingFontSize+4);
+    }
+  }
+
   else if(d.type==='trendline'){
     const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
     if(!p1||!p2){ctx.restore();return;}
@@ -2164,7 +2784,11 @@ function renderOne(d,ctx,W,H){
     if(!p1||!p2){ctx.restore();return;}
     const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
     const range=d.price2-d.price1;
-    (d.levels||[0,.236,.382,.5,.618,.786,1]).forEach((lvl,i,arr)=>{
+    // v1.3.0: the line between its two points, dashed, as a guide
+    ctx.save(); ctx.beginPath(); ctx.strokeStyle=d.color+'99'; ctx.lineWidth=1;
+    ctx.setLineDash([4,4]); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke();
+    ctx.restore();
+    (d.levels||FIB_DEFAULT).forEach((lvl,i,arr)=>{
       const price=d.price1+range*lvl;
       const pt=toXY(d.time1,price); if(!pt) return;
       const isEdge=(i===0||i===arr.length-1);
@@ -2179,8 +2803,12 @@ function renderOne(d,ctx,W,H){
       if(midPt){ ctx.fillStyle=d.color; ctx.textAlign='center';
         ctx.fillText(d.label,(xL+xR)/2,midPt.y-8); ctx.textAlign='left'; }
     }
-    drawHandle(ctx,p1.x,p1.y,d.color,false);
-    drawHandle(ctx,p2.x,p2.y,d.color,false);
+    // v1.3.0: bigger end points, and the other two corners resize it too
+    drawHandle(ctx,p1.x,p1.y,d.color,false,FIB_HANDLE_R);
+    drawHandle(ctx,p2.x,p2.y,d.color,false,FIB_HANDLE_R);
+    const c3=toXY(d.time2,d.price1), c4=toXY(d.time1,d.price2);
+    if(c3) drawHandle(ctx,c3.x,c3.y,d.color,false);
+    if(c4) drawHandle(ctx,c4.x,c4.y,d.color,false);
     if(hl){ const mx=(p1.x+p2.x)/2,my=(p1.y+p2.y)/2; drawHandle(ctx,mx,my,d.color,true); }
   }
 
@@ -2320,7 +2948,9 @@ function renderOne(d,ctx,W,H){
     const openPt = toXY(d.open_time, d.entry_price);
     const x1 = openPt ? openPt.x : 0;
     // A touch past the newest bar; in a picture, to the edge of the room left for it
-    const x2 = snapshot ? W : Math.min(pEntry.x + 8, W);
+    // v1.3.0: to the live edge — five candles past the newest (a picture: to its room)
+    const pLive = toXY(liveEndTime(), d.entry_price);
+    const x2 = snapshot ? W : (pLive ? Math.min(pLive.x, W) : Math.min(pEntry.x + 8, W));
 
     // Entry line (dashed, like the posbox entry line)
     ctx.beginPath(); ctx.strokeStyle='#ffffff66';
@@ -2361,11 +2991,11 @@ function renderOne(d,ctx,W,H){
   ctx.restore();
 }
 
-function drawHandle(ctx,x,y,color,filled){
+function drawHandle(ctx,x,y,color,filled,r=HANDLE_R){
   ctx.save();
-  ctx.beginPath(); ctx.arc(x,y,HANDLE_R,0,Math.PI*2);
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
   ctx.strokeStyle=color; ctx.lineWidth=1.5;
-  ctx.fillStyle=filled?color:(theme==='dark'?'#0d1117':'#ffffff');
+  ctx.fillStyle=filled?color:chartStyle.background;
   ctx.fill(); ctx.stroke();
   ctx.restore();
 }
@@ -2390,84 +3020,171 @@ function hitTestAny(cx,cy){ return _hitTest(cx,cy,true); }
 
 function _hitTest(cx,cy,includeAll){
   for(const d of Object.values(drawings).reverse()){
-    // For drag hit-test, skip locked drawings entirely
-    if(!includeAll && d.locked) continue;
-
-    if(d.type==='hline'){
-      const xy=toXY(allBars.length?allBars[Math.floor(allBars.length/2)].time:0,d.price);
-      if(!xy) continue;
-      if(Math.abs(cy-xy.y)<HIT_R) return{id:d.id,handle:'body'};
-    }
-    else if(d.type==='trendline'||d.type==='fib'){
-      const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
-      if(!p1||!p2) continue;
-      if(dist(cx,cy,p1.x,p1.y)<HIT_R) return{id:d.id,handle:'p1'};
-      if(dist(cx,cy,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'p2'};
-      const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
-      if(dist(cx,cy,mx,my)<HIT_R) return{id:d.id,handle:'body'};
-      if(d.type==='trendline'&&distToSeg(cx,cy,p1.x,p1.y,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'body'};
-      if(d.type==='fib'){
-        const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
-        const range=d.price2-d.price1;
-        for(const lvl of (d.levels||[])){
-          const pt=toXY(d.time1,d.price1+range*lvl); if(!pt) continue;
-          if(cx>=xL&&cx<=xR&&Math.abs(cy-pt.y)<HIT_R) return{id:d.id,handle:'body'};
-        }
-      }
-    }
-    else if(d.type==='box'){
-      const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
-      if(!p1||!p2) continue;
-      const x=Math.min(p1.x,p2.x), y=Math.min(p1.y,p2.y);
-      const w=Math.abs(p2.x-p1.x), h=Math.abs(p2.y-p1.y), cx2=x+w/2, cy2=y+h/2;
-      const handles=[['tl',x,y],['tc',cx2,y],['tr',x+w,y],['rc',x+w,cy2],
-                     ['br',x+w,y+h],['bc',cx2,y+h],['bl',x,y+h],['lc',x,cy2]];
-      for(const [hname,hx,hy] of handles)
-        if(dist(cx,cy,hx,hy)<HIT_R) return{id:d.id,handle:hname};
-      const ez=HIT_R+2;
-      if(cx>x+ez&&cx<x+w-ez&&cy>y+ez&&cy<y+h-ez) return{id:d.id,handle:'interior'};
-    }
-    else if(d.type==='signal'){
-      const price=d.price||(d.side==='buy'?findBarLow(d.time):findBarHigh(d.time));
-      const pt=toXY(d.time,price); if(!pt) continue;
-      if(dist(cx,cy,pt.x,pt.y)<HIT_R+4) return{id:d.id,handle:'body'};
-    }
-    else if(d.type==='text'){
-      const pt=toXY(d.time,d.price); if(!pt) continue;
-      const fs=d.fontSize||drawingFontSize;
-      if(cx>=pt.x&&cx<=pt.x+d.text.length*fs*0.62&&cy>=pt.y-fs-2&&cy<=pt.y+4)
-        return{id:d.id,handle:'body'};
-    }
-    else if(d.type==='position_box'){
-      const openPt  = toXY(d.open_time,  d.entry_price);
-      const closePt = toXY(d.close_time, d.entry_price);
-      if(!openPt) continue;
-      const x1 = openPt.x;
-      const x2 = closePt ? closePt.x : x1 + 60;
-      const entryPt  = toXY(d.open_time, d.entry_price);
-      const tpPt     = toXY(d.open_time, d.visual_tp || d.profit_top || d.entry_price);
-      const slPt     = toXY(d.open_time, d.stop_loss  || d.loss_bottom || d.entry_price);
-      if(!entryPt || !tpPt || !slPt) continue;
-      const entryY = entryPt.y, tpY = tpPt.y, slY = slPt.y;
-      const yTop   = Math.min(tpY, slY);
-      const yBot   = Math.max(tpY, slY);
-      // Edge handles (resize)
-      if(Math.abs(cx - x1) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
-        return{id:d.id, handle:'left'};
-      if(Math.abs(cx - x2) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
-        return{id:d.id, handle:'right'};
-      if(Math.abs(cy - entryY) < HIT_R && cx >= x1 && cx <= x2)
-        return{id:d.id, handle:'entry'};
-      if(Math.abs(cy - tpY) < HIT_R && cx >= x1 && cx <= x2)
-        return{id:d.id, handle:'tp'};
-      if(Math.abs(cy - slY) < HIT_R && cx >= x1 && cx <= x2)
-        return{id:d.id, handle:'sl'};
-      // Interior (move)
-      if(cx >= x1 && cx <= x2 && cy >= yTop && cy <= yBot)
-        return{id:d.id, handle:'interior'};
-    }
+    // A drag: only what is unlocked and this page may change (v1.3.0)...
+    if(!includeAll && (d.locked || !mayChange(d))) continue;
+    const hit=hitDrawing(liveEnded(d),cx,cy);     // v1.3.0: a running end as drawn
+    if(!hit) continue;
+    // ...and only by a handle its `editable` names
+    if(!includeAll && !handleAxes(d,hit.handle)) continue;
+    return hit;
   }
   return null;
+}
+
+// Where the point is on drawing d: a handle, its body or its inside; or null.
+function hitDrawing(d,cx,cy){
+  if(d.type==='hline'){
+    const xy=toXY(allBars.length?allBars[Math.floor(allBars.length/2)].time:0,d.price);
+    if(!xy) return null;
+    if(Math.abs(cy-xy.y)<HIT_R) return{id:d.id,handle:'body'};
+  }
+  else if(d.type==='trendline'||d.type==='fib'){
+    const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+    if(!p1||!p2) return null;
+    if(dist(cx,cy,p1.x,p1.y)<HIT_R) return{id:d.id,handle:'p1'};
+    if(dist(cx,cy,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'p2'};
+    if(d.type==='fib'){                            // v1.3.0: its other two corners
+      const c3=toXY(d.time2,d.price1), c4=toXY(d.time1,d.price2);
+      if(c3&&dist(cx,cy,c3.x,c3.y)<HIT_R) return{id:d.id,handle:'c3'};
+      if(c4&&dist(cx,cy,c4.x,c4.y)<HIT_R) return{id:d.id,handle:'c4'};
+    }
+    const mx=(p1.x+p2.x)/2, my=(p1.y+p2.y)/2;
+    if(dist(cx,cy,mx,my)<HIT_R) return{id:d.id,handle:'body'};
+    if(d.type==='trendline'&&distToSeg(cx,cy,p1.x,p1.y,p2.x,p2.y)<HIT_R) return{id:d.id,handle:'body'};
+    if(d.type==='fib'){
+      const xL=Math.min(p1.x,p2.x), xR=Math.max(p1.x,p2.x);
+      const range=d.price2-d.price1;
+      for(const lvl of (d.levels||FIB_DEFAULT)){
+        const pt=toXY(d.time1,d.price1+range*lvl); if(!pt) continue;
+        if(cx>=xL&&cx<=xR&&Math.abs(cy-pt.y)<HIT_R) return{id:d.id,handle:'body'};
+      }
+    }
+  }
+  else if(d.type==='box'){
+    const p1=toXY(d.time1,d.price1), p2=toXY(d.time2,d.price2);
+    if(!p1||!p2) return null;
+    const x=Math.min(p1.x,p2.x), y=Math.min(p1.y,p2.y);
+    const w=Math.abs(p2.x-p1.x), h=Math.abs(p2.y-p1.y), cx2=x+w/2, cy2=y+h/2;
+    const handles=[['tl',x,y],['tc',cx2,y],['tr',x+w,y],['rc',x+w,cy2],
+                   ['br',x+w,y+h],['bc',cx2,y+h],['bl',x,y+h],['lc',x,cy2]];
+    for(const [hname,hx,hy] of handles)
+      if(dist(cx,cy,hx,hy)<HIT_R) return{id:d.id,handle:hname};
+    // An edge can be grabbed anywhere along it (v1.3.0): a zone that reaches into
+    // the future has its middle handles off the screen.
+    const alongX=cx>=x&&cx<=x+w, alongY=cy>=y&&cy<=y+h;
+    if(alongX&&Math.abs(cy-y)<HIT_R)     return{id:d.id,handle:'tc'};
+    if(alongX&&Math.abs(cy-(y+h))<HIT_R) return{id:d.id,handle:'bc'};
+    if(alongY&&Math.abs(cx-x)<HIT_R)     return{id:d.id,handle:'lc'};
+    if(alongY&&Math.abs(cx-(x+w))<HIT_R) return{id:d.id,handle:'rc'};
+    // v1.3.0: the rest of the inside moves it. It kept 11 px clear of every edge,
+    // which left a box 18–22 px tall a band across its middle that nothing could
+    // grab or select (the edges take 9 px).
+    if(cx>x&&cx<x+w&&cy>y&&cy<y+h) return{id:d.id,handle:'interior'};
+  }
+  else if(d.type==='signal'){
+    const price=d.price||(d.side==='buy'?findBarLow(d.time):findBarHigh(d.time));
+    const pt=toXY(d.time,price); if(!pt) return null;
+    if(dist(cx,cy,pt.x,pt.y)<HIT_R+4) return{id:d.id,handle:'body'};
+  }
+  else if(d.type==='text'){
+    const pt=toXY(d.time,d.price); if(!pt) return null;
+    const fs=d.fontSize||drawingFontSize;
+    if(cx>=pt.x&&cx<=pt.x+d.text.length*fs*0.62&&cy>=pt.y-fs-2&&cy<=pt.y+4)
+      return{id:d.id,handle:'body'};
+  }
+  else if(d.type==='position_box'){
+    const openPt  = toXY(d.open_time,  d.entry_price);
+    const closePt = toXY(d.close_time, d.entry_price);
+    if(!openPt) return null;
+    const x1 = openPt.x;
+    const x2 = closePt ? closePt.x : x1 + 60;
+    const entryPt  = toXY(d.open_time, d.entry_price);
+    const tpPt     = toXY(d.open_time, d.visual_tp || d.profit_top || d.entry_price);
+    const slPt     = toXY(d.open_time, d.stop_loss  || d.loss_bottom || d.entry_price);
+    if(!entryPt || !tpPt || !slPt) return null;
+    const entryY = entryPt.y, tpY = tpPt.y, slY = slPt.y;
+    const yTop   = Math.min(tpY, slY);
+    const yBot   = Math.max(tpY, slY);
+    // Edge handles (resize)
+    if(Math.abs(cx - x1) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
+      return{id:d.id, handle:'left'};
+    if(Math.abs(cx - x2) < HIT_R && cy >= yTop - HIT_R && cy <= yBot + HIT_R)
+      return{id:d.id, handle:'right'};
+    if(Math.abs(cy - entryY) < HIT_R && cx >= x1 && cx <= x2)
+      return{id:d.id, handle:'entry'};
+    if(Math.abs(cy - tpY) < HIT_R && cx >= x1 && cx <= x2)
+      return{id:d.id, handle:'tp'};
+    if(Math.abs(cy - slY) < HIT_R && cx >= x1 && cx <= x2)
+      return{id:d.id, handle:'sl'};
+    // Interior (move)
+    if(cx >= x1 && cx <= x2 && cy >= yTop && cy <= yBot)
+      return{id:d.id, handle:'interior'};
+  }
+  else if(d.type==='vline'){
+    const x=vlineX(d.time), band=mainPaneBand();
+    if(x==null||!band) return null;
+    if(Math.abs(cx-x)<HIT_R&&cy>=band.top&&cy<=band.bottom) return{id:d.id,handle:'body'};
+  }
+  return null;
+}
+
+// A program's drawing (source 'server') changes only on a page with the edit key;
+// the viewer's own drawings never leave the browser (v1.3.0).
+function mayChange(d){ return canEdit || d.source !== 'server'; }
+
+// What a handle moves (v1.3.0): its vertical part is "price", its horizontal part
+// "time", and the body or the inside "move". A horizontal line's body is its price.
+function handleMoves(d,h){
+  if(d.type==='hline') return {price:true};
+  if(h==='body'||h==='interior') return {move:true};
+  if(d.type==='box'){
+    if(h==='tc'||h==='bc') return {price:true};
+    if(h==='lc'||h==='rc') return {time:true};
+    return {price:true, time:true};                 // a corner
+  }
+  if(d.type==='position_box'){
+    if(h==='left'||h==='right') return {time:true};
+    return {price:true};                            // entry, stop, target
+  }
+  return {price:true, time:true};                   // a line's end point
+}
+
+// Which of them `editable` lets move, or null when none: true is all of them
+// (as before), false none, a list names them.
+function handleAxes(d,h){
+  const e=d.editable, moves=handleMoves(d,h);
+  if(e===false) return null;
+  if(!Array.isArray(e)) return moves;
+  const ok={price:!!moves.price&&e.includes('price'), time:!!moves.time&&e.includes('time'),
+            move:!!moves.move&&e.includes('move')};
+  if(d.type==='hline'&&e.includes('move')) ok.price=true;   // moving it is its price
+  return (ok.price||ok.time||ok.move) ? ok : null;
+}
+
+// The main pane's top and bottom, in the overlay's coordinates
+function mainPaneBand(){
+  if(!panes.main) return null;
+  const wR=panes.main.paneWrap.getBoundingClientRect();
+  const pR=document.getElementById('panes').getBoundingClientRect();
+  return {top:wR.top-pR.top, bottom:wR.top-pR.top+wR.height};
+}
+
+// A vertical line sits on the candle that holds its time, on every timeframe;
+// right of the last candle, on the opening of a candle not there yet.
+function vlineX(t){
+  const bars=scaleBars();
+  if(!bars.length) return null;
+  let at=t;
+  const last=bars[bars.length-1].time;
+  if(t>=last){
+    const tf=displayTfSec();
+    at = tf>0 ? last+Math.floor((t-last)/tf)*tf : last;
+  } else if(t>=bars[0].time){
+    let a=0, b=bars.length-1;
+    while(b-a>1){ const mid=(a+b)>>1; if(bars[mid].time<=t) a=mid; else b=mid; }
+    at=bars[a].time;
+  }
+  return timeToX(at);
 }
 function dist(x1,y1,x2,y2){return Math.sqrt((x2-x1)**2+(y2-y1)**2);}
 function distToSeg(px,py,x1,y1,x2,y2){
@@ -2579,13 +3296,29 @@ drawCv.addEventListener('mousedown',e=>{
   if(e.button!==0) return;
   const r=document.getElementById('panes').getBoundingClientRect();
   const cx=e.clientX-r.left, cy=e.clientY-r.top;
-  const hit=hitTest(cx,cy); if(!hit) return;
+  const hit=hitTest(cx,cy);
+  if(!hit){
+    // v1.3.0: one this page may not drag is selected all the same, for Ctrl+C
+    const any=hitTestAny(cx,cy);
+    if(any&&selectedId!==any.id){ selectedId=any.id; redrawAll(); }
+    return;
+  }
   e.stopPropagation();
   selectedId=hit.id; hoverId=hit.id;
   dragState={id:hit.id,handle:hit.handle,startX:cx,startY:cy,
-             startCoord:fromXY(cx,cy),orig:JSON.parse(JSON.stringify(drawings[hit.id]))};
+             startCoord:fromXY(cx,cy),orig:JSON.parse(JSON.stringify(drawings[hit.id])),
+             axes:handleAxes(drawings[hit.id],hit.handle)};
   redrawAll();
 });
+
+// v1.3.0: a press on the chart away from every drawing ends the selection, so
+// Ctrl+C copies what was clicked last, never an old selection
+document.getElementById('panes').addEventListener('mousedown',e=>{
+  if(e.button!==0||selectedId==null||activeTool!=='cursor') return;
+  const r=document.getElementById('panes').getBoundingClientRect();
+  if(hitTestAny(e.clientX-r.left, e.clientY-r.top)) return;
+  selectedId=null; redrawAll();
+}, true);
 
 document.addEventListener('mousemove',e=>{
   if(!dragState) return;
@@ -2663,13 +3396,13 @@ document.getElementById('panes').addEventListener('click',e=>{
   const id=activeTool+'_'+Date.now(); let d=null;
   if(activeTool==='tline')
     d={type:'trendline',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
-       color:'#2196f3',lineWidth:1.5,extend:false,label:''};
+       color:'#2196f3',lineWidth:1.5,extend:false,label:'',source:'user'};
   else if(activeTool==='box')
     d={type:'box',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
-       color:'#26a69a',opacity:.15,borderColor:'#26a69a',label:''};
+       color:'#26a69a',opacity:.15,borderColor:'#26a69a',label:'',source:'user'};
   else if(activeTool==='fib')
     d={type:'fib',id,time1:draftState.time1,price1:draftState.price1,time2:time,price2:price,
-       color:'#9c27b0',levels:[0,.236,.382,.5,.618,.786,1],label:''};
+       color:'#9c27b0',levels:fibLevels.slice(),label:'',source:'user'};
   if(d){ drawings[d.id]=d; notifyDrawingChanged(d); }
   draftState=null; gCtx.clearRect(0,0,ghostCv.width,ghostCv.height);
   redrawAll(); setTool('cursor');
@@ -2681,7 +3414,9 @@ document.getElementById('panes').addEventListener('click',e=>{
 function onDragMove(cx,cy){
   const coord=fromXY(cx,cy); if(!coord) return;
   const{time,price}=coord;
-  const d=drawings[dragState.id], o=dragState.orig, h=dragState.handle;
+  // v1.3.0: the geometry of a running drawing is the one drawn (its end five
+  // candles out); what a handle does not move is put back as it was — running.
+  const d=drawings[dragState.id], o0=dragState.orig, o=liveEnded(o0), h=dragState.handle;
   const isMove=(h==='body'||h==='interior');
 
   if(d.type==='hline'){
@@ -2690,6 +3425,8 @@ function onDragMove(cx,cy){
   else if(d.type==='trendline'||d.type==='fib'){
     if(h==='p1'){ d.time1=time; d.price1=price; }
     else if(h==='p2'){ d.time2=time; d.price2=price; }
+    else if(h==='c3'){ d.time2=time; d.price1=price; }        // v1.3.0: a fib's corners
+    else if(h==='c4'){ d.time1=time; d.price2=price; }
     else if(isMove){
       const sc=dragState.startCoord;
       d.price1=o.price1+(price-sc.price); d.price2=o.price2+(price-sc.price);
@@ -2712,13 +3449,18 @@ function onDragMove(cx,cy){
       if(h==='tr'||h==='rc'||h==='br') newRight=Math.max(cx,origLeft+10);
       if(h==='tl'||h==='tc'||h==='tr') newTop  =Math.min(cy,origBot-10);
       if(h==='bl'||h==='bc'||h==='br') newBot  =Math.max(cy,origTop+10);
-      const tL=mainChart.timeScale().coordinateToTime(newLeft);
-      const tR=mainChart.timeScale().coordinateToTime(newRight);
+      // Only the edges this handle moves are read back from the pointer; the others
+      // keep their values exactly (v1.3.0). An edge past the last candle has a time
+      // too (xToTime): before, a box reaching into the future could not be resized.
       const wR=panes.main.paneWrap.getBoundingClientRect();
       const pR=document.getElementById('panes').getBoundingClientRect();
       const offY=wR.top-pR.top;
-      const priceTop=mainSeries.coordinateToPrice(newTop-offY);
-      const priceBot=mainSeries.coordinateToPrice(newBot-offY);
+      const tL=(h==='tl'||h==='lc'||h==='bl') ? xToTime(newLeft)  : Math.min(o.time1,o.time2);
+      const tR=(h==='tr'||h==='rc'||h==='br') ? xToTime(newRight) : Math.max(o.time1,o.time2);
+      const priceTop=(h==='tl'||h==='tc'||h==='tr')
+        ? mainSeries.coordinateToPrice(newTop-offY) : Math.max(o.price1,o.price2);
+      const priceBot=(h==='bl'||h==='bc'||h==='br')
+        ? mainSeries.coordinateToPrice(newBot-offY) : Math.min(o.price1,o.price2);
       if(tL==null||tR==null||priceTop==null||priceBot==null) return;
       const t1WasLeft=(o.time1<=o.time2);
       d.time1=t1WasLeft?tL:tR; d.time2=t1WasLeft?tR:tL;
@@ -2736,7 +3478,7 @@ function onDragMove(cx,cy){
       const dPrice = price - sc.price;
       const dTime  = time  - sc.time;
       d.open_time   = o.open_time   + dTime;
-      d.close_time  = o.close_time  + dTime;
+      d.close_time  = o0.close_time == null ? null : o.close_time + dTime;   // running stays
       d.entry_price = o.entry_price + dPrice;
       d.stop_loss   = o.stop_loss   + dPrice;
       d.visual_tp   = (o.visual_tp  || o.entry_price) + dPrice;
@@ -2744,7 +3486,7 @@ function onDragMove(cx,cy){
       _recomputePosBoxZones(d);
     } else if(h==='left'){
       // Drag left edge → change open_time
-      d.open_time = Math.min(time, d.close_time - 1);
+      d.open_time = Math.min(time, (d.close_time ?? o.close_time) - 1);
     } else if(h==='right'){
       // Drag right edge → change close_time
       d.close_time = Math.max(time, d.open_time + 1);
@@ -2765,6 +3507,18 @@ function onDragMove(cx,cy){
       d.stop_loss = price;
       _recomputePosBoxZones(d);
     }
+  }
+  // v1.3.0: what `editable` leaves out stays where it was. A price-only box keeps
+  // its time edges whatever is dragged; its corners move vertically only.
+  // v1.3.0: a running end stays running unless this handle moved that end
+  if(o0 && 'time2' in o0 && o0.time2==null && d.time1!=null){
+    const endHandles = d.type==='box' ? ['tr','rc','br'] : ['p2','c3'];
+    if(!endHandles.includes(h)) d.time2=null;
+  }
+  const ax=dragState.axes;
+  if(ax&&!ax.move){
+    if(!ax.time)  ['time1','time2'].forEach(k=>{ if(o0[k]!==undefined) d[k]=o0[k]; });
+    if(!ax.price) ['price1','price2'].forEach(k=>{ if(o0[k]!==undefined) d[k]=o0[k]; });
   }
   redrawAll();
 }
@@ -2792,12 +3546,22 @@ drawCv.addEventListener('contextmenu',e=>{
   const r=document.getElementById('panes').getBoundingClientRect();
   // hitTestAny includes locked drawings for right-click
   const hit=hitTestAny(e.clientX-r.left, e.clientY-r.top);
-  if(!hit){ ctxMenu.style.display='none'; return; }
+  if(!hit){ ctxMenu.style.display='none'; return; }     // the candle menu may open
+  e.stopPropagation();
 
   ctxTargetId=hit.id; selectedId=hit.id; redrawAll();
+  closeCandleMenu();
   const d=drawings[hit.id];
   const isServer=(d.source==='server');
   const isLocked=!!d.locked;
+  // v1.3.0: what this page may do with it
+  const may=mayChange(d), canUnlock=may&&d.editable!==false, canDelete=may&&d.deletable!==false;
+  const titleRow=document.getElementById('ctx-title');
+  titleRow.textContent=d.title||''; titleRow.style.display=d.title?'':'none';
+  document.getElementById('ctx-lock-row').style.display=canUnlock?'':'none';
+  document.getElementById('ctx-lock-sep').style.display=canUnlock?'':'none';
+  document.getElementById('ctx-delete-row').style.display=canDelete?'':'none';
+  document.getElementById('ctx-delete-sep').style.display=canDelete?'':'none';
 
   // 1. Source badge
   document.getElementById('ctx-source-badge').textContent = isServer ? 'Server' : 'User';
@@ -2807,9 +3571,17 @@ drawCv.addEventListener('contextmenu',e=>{
   document.getElementById('ctx-lock-icon').textContent  = isLocked ? '🔒' : '🔓';
   document.getElementById('ctx-lock-label').textContent = isLocked ? 'Unlock' : 'Lock';
 
-  // 3. Edit rows — greyed out when locked
-  document.getElementById('ctx-rename-row').classList.toggle('disabled', isLocked);
-  document.getElementById('ctx-color-row').classList.toggle('disabled',  isLocked);
+  // 3. Edit rows — greyed out when locked, or on a page that may not change it
+  document.getElementById('ctx-rename-row').classList.toggle('disabled', isLocked||!may);
+  document.getElementById('ctx-color-row').classList.toggle('disabled',  isLocked||!may);
+
+  // 4. v1.3.0: a fib's levels; the program's items on a drawing you drew
+  const levelsRow=document.getElementById('ctx-levels-row');
+  levelsRow.style.display=d.type==='fib'?'':'none';
+  levelsRow.classList.toggle('disabled', isLocked||!may);
+  // 5. v1.3.0: the six kinds you can draw may be copied, the program's too
+  document.getElementById('ctx-copy-row').style.display=COPYABLE[d.type]?'':'none';
+  renderDrawingActions(d);
 
   ctxMenu.style.left=e.clientX+'px'; ctxMenu.style.top=e.clientY+'px';
   ctxMenu.style.display='block';
@@ -2817,7 +3589,7 @@ drawCv.addEventListener('contextmenu',e=>{
 document.addEventListener('click',()=>ctxMenu.style.display='none');
 
 function ctxToggleLock(){
-  const d=drawings[ctxTargetId]; if(!d) return;
+  const d=drawings[ctxTargetId]; if(!d||!mayChange(d)||d.editable===false) return;
   d.locked=!d.locked;
   // Update the menu while it may still be open
   document.getElementById('ctx-lock-icon').textContent  = d.locked ? '🔒' : '🔓';
@@ -2831,21 +3603,93 @@ function ctxToggleLock(){
 }
 
 function ctxRename(){
-  const d=drawings[ctxTargetId]; if(!d||d.locked) return;
+  const d=drawings[ctxTargetId]; if(!d||d.locked||!mayChange(d)) return;
   const cur=d.type==='text'?d.text:(d.label||'');
   const val=prompt('Label / text:',cur); if(val===null) return;
   if(d.type==='text') d.text=val; else d.label=val;
   redrawAll(); notifyDrawingChanged(d);
 }
+// v1.3.0: a fib's levels, in percent: «0, 50, 100, 200»
+function parseFibLevels(text){
+  const out = String(text || '').split(/[\s,;]+/).filter(Boolean).map(Number);
+  if(!out.length || out.some(v => !Number.isFinite(v))) return null;
+  return [...new Set(out)].sort((a, b) => a - b).map(v => v / 100);
+}
+function fibLevelsText(levels){
+  return levels.map(v => String(Math.round(v * 1000) / 10)).join(', ');
+}
+function ctxFibLevels(){
+  const d=drawings[ctxTargetId]; if(!d||d.type!=='fib'||d.locked||!mayChange(d)) return;
+  const val=prompt('Levels in %, e.g. 0, 50, 100, 200:', fibLevelsText(d.levels||FIB_DEFAULT));
+  if(val==null) return;
+  const levels=parseFibLevels(val);
+  if(!levels){ flashStatus('Levels: numbers in percent, separated by commas'); return; }
+  d.levels=levels;
+  redrawAll(); notifyDrawingChanged(d);
+}
+
+// The levels a new fib starts with: Settings → «Fib levels», kept in this browser
+const FIB_KEY = 'atk.chart.fib.v1';
+let fibLevels = FIB_DEFAULT.slice();
+function loadFibLevels(){
+  if(snapshot) return;
+  try{
+    const levels = parseFibLevels(window.localStorage.getItem(FIB_KEY));
+    fibLevels = levels || FIB_DEFAULT.slice();
+  }catch{ fibLevels = FIB_DEFAULT.slice(); }
+  const el = document.getElementById('sf-fib-levels');
+  if(el) el.value = fibLevelsText(fibLevels);
+}
+function onFibLevelsChange(text){
+  const levels = parseFibLevels(text);
+  if(!levels){ flashStatus('Fib levels: numbers in percent, separated by commas'); return; }
+  fibLevels = levels;
+  if(!snapshot){ try{ window.localStorage.setItem(FIB_KEY, fibLevelsText(levels)); }catch{} }
+  const el = document.getElementById('sf-fib-levels');
+  if(el) el.value = fibLevelsText(levels);
+  postToPage({t:'style'});
+}
+
+// The program's items on a drawing the viewer drew (Chart.add_drawing_action)
+let drawingActions = [];
+function setDrawingActions(list){
+  drawingActions = Array.isArray(list) ? list.filter(l => typeof l === 'string') : [];
+}
+function renderDrawingActions(d){
+  const box = document.getElementById('ctx-dactions');
+  if(!box) return;
+  box.innerHTML = '';
+  if(!canEdit || !isViewerDrawing(d) || !drawingActions.length) return;
+  box.appendChild(document.createElement('hr'));
+  drawingActions.forEach(label => {
+    const row = document.createElement('div');
+    row.className = 'mi'; row.textContent = label;
+    row.onclick = () => sendDrawingAction(label, d.id);
+    box.appendChild(row);
+  });
+}
+function sendDrawingAction(label, id){
+  const d = drawings[id];
+  if(!d || !canEdit) return;
+  if(ws && ws.readyState === 1) ws.send(JSON.stringify({type:'drawing_action', label, drawing:d}));
+  ctxMenu.style.display = 'none';
+}
+
 function ctxEditColor(){
-  const d=drawings[ctxTargetId]; if(!d||d.locked) return;
+  const d=drawings[ctxTargetId]; if(!d||d.locked||!mayChange(d)) return;
   const val=prompt('Color (hex):',d.color); if(!val) return;
   d.color=val; if(d.borderColor) d.borderColor=val;
   redrawAll(); notifyDrawingChanged(d);
 }
-// Delete works regardless of lock state
+// Delete works regardless of lock state; not for a drawing that is not deletable,
+// nor for a program's drawing on a page without the edit key (v1.3.0). A keyed
+// drawing asks first: the program hears about it.
 function ctxDelete(){
   if(!ctxTargetId) return;
+  const d=drawings[ctxTargetId];
+  if(d&&(!mayChange(d)||d.deletable===false)) return;
+  if(d&&d.key!=null&&!confirm(`Delete ${d.title||d.label||d.type}? The program is told.`))
+    return;
   delete drawings[ctxTargetId];
   if(selectedId===ctxTargetId) selectedId=null;
   redrawAll();
@@ -2859,6 +3703,358 @@ function clearDrawings(){
 }
 function notifyDrawingChanged(d){
   if(ws&&ws.readyState===1) ws.send(JSON.stringify({type:'drawing_updated',drawing:d}));
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  COPY AND PASTE (v1.3.0)
+//  A copied drawing goes to the PC's clipboard as one line of text, and to this
+//  browser's memory for the page's address (every chart of a page, its tabs).
+//  A page served over plain http has no clipboard API, but the copy and paste
+//  events of Ctrl+C and Ctrl+V carry text both ways: Ctrl+V reads the PC's
+//  clipboard, so a drawing goes from one page to another, another port too. A
+//  menu cannot read it: «Paste here» takes the drawing last copied on this
+//  address. A copy is the viewer's own — no key, no title, no lock, no limits
+//  from the program — and lands where the original is, or at a click.
+// ═══════════════════════════════════════════════════════════════
+const CLIP_KEY = 'atk.chart.clipboard.v1';
+// What may be copied — the six kinds the toolbar draws — with the name the status
+// bar gives it, the prefix of a copy's id, and what a copy keeps of it
+const COPYABLE = {
+  box:          {name: 'box', prefix: 'box',
+                 keep: ['time1','price1','time2','price2','color','opacity','borderColor','label']},
+  trendline:    {name: 'trend line', prefix: 'tline',
+                 keep: ['time1','price1','time2','price2','color','lineWidth','extend','label']},
+  fib:          {name: 'Fibonacci', prefix: 'fib',
+                 keep: ['time1','price1','time2','price2','color','levels','label']},
+  hline:        {name: 'horizontal line', prefix: 'hline',
+                 keep: ['price','color','lineWidth','lineStyle','label']},
+  text:         {name: 'text label', prefix: 'txt',
+                 keep: ['time','price','text','color','fontSize']},
+  position_box: {name: 'position box', prefix: 'posbox',
+                 keep: ['open_time','close_time','entry_price','stop_loss','visual_tp',
+                        'profit_color','loss_color','opacity']},
+};
+// Fields that hold a number. An end may be null: the drawing runs to the live edge.
+const CLIP_NUMBERS = new Set(['time1','price1','time2','price2','time','price','open_time',
+  'close_time','entry_price','stop_loss','visual_tp','opacity','lineWidth','lineStyle','fontSize']);
+const CLIP_RUNNING = new Set(['time2','close_time']);
+// What a drawing of each kind cannot be without
+const CLIP_NEEDS = {
+  box: ['time1','price1','time2','price2'], trendline: ['time1','price1','time2','price2'],
+  fib: ['time1','price1','time2','price2'], hline: ['price'], text: ['time','price','text'],
+  position_box: ['open_time','close_time','entry_price','stop_loss','visual_tp'],
+};
+let clipMemory = null;            // the last copy, for a browser that keeps nothing
+let _menuCopy = null;             // what the menu's «Copy» is putting on the clipboard
+
+// A drawing as a copy keeps it, or null when it is not one the page copies. It
+// reads the PC's clipboard too, so every field is checked: a number is a finite
+// number, a text a string of reasonable length, a Fib's levels numbers.
+function clipShape(raw){
+  if(!raw || typeof raw !== 'object') return null;
+  const kind = COPYABLE[raw.type];
+  if(!kind) return null;
+  const d = {type: raw.type};
+  for(const k of kind.keep){
+    const v = raw[k];
+    if(v === undefined) continue;
+    if(CLIP_NUMBERS.has(k)){
+      if(v === null && CLIP_RUNNING.has(k)) d[k] = null;
+      else if(typeof v === 'number' && Number.isFinite(v)) d[k] = v;
+    }
+    else if(k === 'levels'){
+      if(Array.isArray(v) && v.length && v.length <= 40
+         && v.every(x => typeof x === 'number' && Number.isFinite(x))) d.levels = v.slice();
+    }
+    else if(k === 'extend') d.extend = v === true;
+    else if(typeof v === 'string' && v.length <= (k === 'text' ? 2000 : 200)) d[k] = v;
+  }
+  if(raw.type === 'position_box'){        // a trade's box names its stop and target by side
+    const long = raw.direction !== 'short';
+    const take = (k, alt) => {
+      if(d[k] == null && typeof raw[alt] === 'number' && Number.isFinite(raw[alt])) d[k] = raw[alt];
+    };
+    take('visual_tp', long ? 'profit_top' : 'profit_bottom');
+    take('stop_loss', long ? 'loss_bottom' : 'loss_top');
+  }
+  if(!CLIP_NEEDS[raw.type].every(k => k in d)) return null;
+  if(raw.type === 'text' && !d.text) return null;
+  return d;
+}
+
+// The line a copy is on the PC's clipboard: {"atk":"drawing","v":1,"drawing":{…}}
+function clipText(shape){ return JSON.stringify({atk: 'drawing', v: 1, drawing: shape}); }
+function readClipText(text){
+  if(typeof text !== 'string' || !text || text.length > 200000) return null;
+  let msg = null;
+  try{ msg = JSON.parse(text); }catch{ return null; }
+  if(!msg || typeof msg !== 'object' || msg.atk !== 'drawing' || msg.v !== 1) return null;
+  return clipShape(msg.drawing);
+}
+
+// This browser's memory of the last copy, for every chart of this address
+function rememberCopy(shape){
+  clipMemory = shape;
+  if(snapshot) return;
+  try{ window.localStorage.setItem(CLIP_KEY, clipText(shape)); }catch{}
+}
+function rememberedCopy(){
+  try{
+    const shape = readClipText(window.localStorage.getItem(CLIP_KEY));
+    if(shape) return shape;
+  }catch{}
+  return clipMemory;
+}
+
+// Copy drawing *id* into this browser's memory; the copy event that asked for it
+// puts it on the PC's clipboard. Returns what was copied, or null.
+function copyDrawing(id){
+  const shape = id != null && drawings[id] ? clipShape(drawings[id]) : null;
+  if(!shape) return null;
+  rememberCopy(shape);
+  flashStatus(`Copied: ${COPYABLE[shape.type].name} — Ctrl+V pastes it; `
+              + 'right-click the chart → Paste here');
+  return shape;
+}
+
+// «📋 Copy» on a drawing's menu. A click may start a copy event (never read the
+// clipboard), so the copy reaches the PC's clipboard here as well.
+function ctxCopy(){
+  ctxMenu.style.display = 'none';
+  const shape = copyDrawing(ctxTargetId);
+  if(!shape) return;
+  _menuCopy = shape;
+  try{ if(document.execCommand) document.execCommand('copy'); }catch{}
+  _menuCopy = null;
+}
+
+// A new drawing's id, as the toolbar names them: box_1793…
+function newDrawingId(prefix){
+  let n = Date.now();
+  while(drawings[`${prefix}_${n}`]) n++;
+  return `${prefix}_${n}`;
+}
+
+// The point of a copy that goes to a click: a box's top-left corner, a line's or
+// a Fib's left end, a horizontal line's price, a text's point, a position box's
+// entry at its opening. The rest keeps its distance from that point; an end that
+// runs to the live edge still runs.
+function moveCopyTo(d, at){
+  if(d.type === 'hline'){ d.price = at.price; return; }
+  if(d.type === 'text'){ d.time = at.time; d.price = at.price; return; }
+  if(d.type === 'position_box'){
+    const dt = at.time - d.open_time, dp = at.price - d.entry_price;
+    d.open_time = at.time;
+    if(d.close_time != null) d.close_time += dt;
+    d.entry_price = at.price; d.stop_loss += dp; d.visual_tp += dp;
+    return;
+  }
+  const running = d.time2 == null;
+  const leftIs1 = running || d.time1 <= d.time2;
+  const at1 = d.type === 'box' ? d.price1 >= d.price2 : leftIs1;   // whose price goes there
+  const dt = at.time - (leftIs1 ? d.time1 : d.time2);
+  const dp = at.price - (at1 ? d.price1 : d.price2);
+  d.time1 += dt;
+  if(!running) d.time2 += dt;
+  if(at1){ d.price1 = at.price; d.price2 += dp; } else { d.price2 = at.price; d.price1 += dp; }
+}
+
+// A copy of *shape* on this chart: where the original is (at null), or with one of
+// its points at a click (at = {time, price}). It is the viewer's own, selected, so
+// the next drag moves it.
+function pasteDrawing(shape, at){
+  if(snapshot) return null;
+  const kind = shape && COPYABLE[shape.type];
+  if(!kind) return null;
+  if(activeTool !== 'cursor') setTool('cursor');       // a half-made drawing goes
+  const d = JSON.parse(JSON.stringify(shape));
+  if(at) moveCopyTo(d, at);
+  d.id = newDrawingId(kind.prefix);
+  d.locked = false;
+  d.source = 'user';
+  if(d.type === 'position_box'){                        // a plan, not a trade
+    Object.assign(d, {net_pnl: 0, close_reason: '', trade_id: -1, rr_ratio: 0});
+    _recomputePosBoxZones(d);
+  }
+  drawings[d.id] = d;
+  selectedId = d.id;
+  redrawAll(); notifyDrawingChanged(d);
+  flashStatus(`Pasted: ${kind.name}`);
+  return d;
+}
+
+// The drawing Ctrl+V brought here: it is now this address's copy too
+function pasteCopied(shape){
+  rememberCopy(shape);
+  return pasteDrawing(shape, null);
+}
+
+// Text keeps its keys: in a text field, or (for Ctrl+C) with text selected on the
+// page, the browser copies and pastes as it always does
+function keysBelongToText(e, paste){
+  const t = e && e.target;
+  if(t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable)) return true;
+  if(paste) return false;
+  try{
+    const sel = window.getSelection ? window.getSelection() : null;
+    if(sel && !sel.isCollapsed && String(sel)) return true;
+  }catch{}
+  return false;
+}
+
+// Ctrl+C (⌘C): the selected drawing
+document.addEventListener('copy', e => {
+  if(snapshot) return;
+  let shape = _menuCopy;
+  if(!shape){
+    if(keysBelongToText(e, false)) return;
+    shape = copyDrawing(selectedId);
+  }
+  if(!shape) return;                        // nothing to copy: the browser's own copy
+  try{ e.clipboardData.setData('text/plain', clipText(shape)); e.preventDefault(); }catch{}
+});
+
+// Ctrl+V (⌘V): the drawing on the PC's clipboard, where the original is. In a page
+// of several charts it goes to the chart the pointer is on: this one passes it to
+// the page when the pointer has left it.
+document.addEventListener('paste', e => {
+  if(snapshot || keysBelongToText(e, true)) return;
+  let text = '';
+  try{ text = e.clipboardData.getData('text/plain'); }catch{}
+  const shape = readClipText(text);
+  if(!shape) return;                        // not a drawing: the browser's own paste
+  e.preventDefault();
+  if(embedded && !hasPointer){ postToPage({t: 'paste', text}); return; }
+  pasteCopied(shape);
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  THE CANDLE MENU (v1.3.0)
+//  The program's actions (chart.add_action), on a right-click on the price
+//  pane away from any drawing. With none, a right-click does what it did.
+// ═══════════════════════════════════════════════════════════════
+let chartActions = [];
+const candleMenu = document.getElementById('candle-menu');
+
+function setChartActions(list){
+  chartActions = Array.isArray(list) ? list.filter(l => typeof l === 'string') : [];
+  closeCandleMenu();
+}
+function closeCandleMenu(){ candleMenu.style.display='none'; }
+
+// The candle under the pointer: its opening, in seconds. Right of the last candle,
+// the opening of a candle not there yet.
+function candleTimeAt(cx){
+  const bars=scaleBars();
+  if(!bars.length||!mainChart) return null;
+  let logical=null;
+  try{ logical=mainChart.timeScale().coordinateToLogical(cx); }catch{}
+  if(logical==null) return null;
+  const i=Math.round(logical), n=bars.length, tf=displayTfSec();
+  if(i>=0&&i<n) return bars[i].time;
+  if(i>=n) return bars[n-1].time+(i-(n-1))*tf;
+  return bars[0].time+i*tf;
+}
+
+function openCandleMenu(e){
+  if(snapshot) return false;
+  // The program's items, for a page with the key; v1.3.0: «Paste here» for any
+  // page, while this browser holds a drawing copied on this address
+  const actions=canEdit?chartActions:[];
+  const copied=rememberedCopy();
+  if(!actions.length&&!copied) return false;
+  const band=mainPaneBand(); if(!band) return false;
+  const r=document.getElementById('panes').getBoundingClientRect();
+  const cx=e.clientX-r.left, cy=e.clientY-r.top;
+  if(cy<band.top||cy>band.bottom) return false;          // the price pane only
+  if(hitTestAny(cx,cy)) return false;                     // a drawing has its own menu
+  const time=candleTimeAt(cx);
+  if(time==null) return false;
+  let price=null;
+  try{ price=mainSeries.coordinateToPrice(cy-band.top); }catch{}
+  const paste=!!copied&&typeof price==='number'&&Number.isFinite(price);
+  if(!paste&&!actions.length) return false;
+  ctxMenu.style.display='none';
+  candleMenu.innerHTML='';
+  if(paste){
+    const item=document.createElement('div');
+    item.className='mi'; item.textContent='📋 Paste here';
+    item.onclick=()=>{ closeCandleMenu(); pasteDrawing(copied, {time, price}); };
+    candleMenu.appendChild(item);
+    if(actions.length) candleMenu.appendChild(document.createElement('hr'));
+  }
+  actions.forEach(label=>{
+    const item=document.createElement('div');
+    item.className='mi'; item.textContent=label;
+    item.onclick=()=>{ closeCandleMenu(); sendMsg({type:'chart_action', label, time, price}); };
+    candleMenu.appendChild(item);
+  });
+  candleMenu.style.left=e.clientX+'px'; candleMenu.style.top=e.clientY+'px';
+  candleMenu.style.display='block';
+  return true;
+}
+document.getElementById('panes').addEventListener('contextmenu', e=>{
+  if(openCandleMenu(e)) e.preventDefault();
+});
+document.addEventListener('click', closeCandleMenu);
+
+// ═══════════════════════════════════════════════════════════════
+//  ACCESS (v1.3.0)
+//  Without the edit key a page may look, scroll, replay and draw its own
+//  lines, and changes nothing another viewer sees: no program drawing moves
+//  or goes, no action runs, the timeframe and the indicators stay.
+// ═══════════════════════════════════════════════════════════════
+const NO_EDIT = 'needs the edit key';
+const _editTitles = {};
+
+// The program's toolbar buttons (v1.3.0): shown to a page that may edit. A click
+// asks the button's question first, when it has one.
+let programButtons = [];
+function setProgramButtons(list){
+  programButtons = Array.isArray(list)
+    ? list.filter(b => b && typeof b.label === 'string') : [];
+  renderProgramButtons();
+}
+function renderProgramButtons(){
+  const box = document.getElementById('prog-btns');
+  box.innerHTML = '';
+  if(!canEdit || snapshot) return;
+  programButtons.forEach(b => {
+    const btn = document.createElement('button');
+    btn.className = 'tb'; btn.textContent = b.label;
+    btn.onclick = () => {
+      if(b.confirm && !confirm(b.confirm)) return;
+      sendMsg({type:'button', label:b.label});
+    };
+    box.appendChild(btn);
+  });
+}
+
+function applyAccess(){
+  document.body.classList.toggle('no-edit', !canEdit);
+  renderProgramButtons();
+  ['tf-btn','ind-btn'].forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    if(!(id in _editTitles)) _editTitles[id]=el.title;
+    el.title=canEdit?_editTitles[id]:NO_EDIT;
+  });
+  if(!canEdit){
+    closeTfMenu(); closeIndPanel(); closeCandleMenu();
+    ctxMenu.style.display='none';
+    dragState=null;
+  }
+  redrawAll();
+}
+// A control a page without the key may not use says why, briefly
+function refuseNoEdit(){ flashStatus(NO_EDIT, 3000); return true; }
+
+// A line in the status bar that clears itself
+let _sbTimer=null;
+function flashStatus(text, ms=6000){
+  const el=document.getElementById('sbmsg'); if(!el) return;
+  el.textContent=text;
+  clearTimeout(_sbTimer);
+  _sbTimer=setTimeout(()=>{ el.textContent=''; }, ms);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3018,11 +4214,6 @@ function replayExit(){
 }
 
 // ── Rendering ──────────────────────────────────────────────────
-function volPoint(b){
-  return {time:b.time, value:b.volume||0,
-          color:b.close>=b.open?'#3fb95055':'#f8514955'};
-}
-
 function countClosed(T, tf){
   // number of display candles whose close is at or before the cursor
   let lo = 0, hi = allBars.length;
@@ -3123,16 +4314,44 @@ function drawingStartTime(d){
 
 function replayVisibleDrawings(){
   const all = Object.values(drawings);
-  if(!replay.active || replay.cursor == null) return all;
+  if(!replay.active || replay.cursor == null) return all.map(liveEnded);
   const T = replay.cursor;
   const out = [];
   for(const d of all){
+    // v1.3.0: a drawing the viewer drew tells no future: never hidden or cut
+    if(isViewerDrawing(d)){ out.push(liveEnded(d)); continue; }
     const start = drawingStartTime(d);
     if(start != null && start > T) continue;      // has not happened yet
     const shape = clipDrawingTo(d, T);
-    if(shape) out.push(shape);
+    if(shape) out.push(liveEnded(shape));
   }
   return out;
+}
+
+// v1.3.0: what the viewer drew on this page (a program's drawings say «server»)
+function isViewerDrawing(d){
+  return d.source === 'user' || (d.source == null && /^(tline|box|fib)_\d+$/.test(d.id || ''));
+}
+
+// v1.3.0: where a running drawing ends — five candles past the last one, or past
+// the replay's cursor, on the timeframe shown. A drawing runs when its end is
+// not given: time2 (a box, a line, a fib) or close_time (a position box).
+const LIVE_AHEAD = 5;
+function liveEndTime(){
+  const bars = scaleBars();
+  if(!bars.length) return null;
+  return bars[bars.length - 1].time + LIVE_AHEAD * (displayTfSec() || 60);
+}
+function liveEnded(d){
+  if(!d) return d;
+  if(d.type === 'position_box'){
+    if(d.close_time != null) return d;
+    const t = liveEndTime();
+    return t == null ? d : Object.assign({}, d, {close_time: t});
+  }
+  if(!('time2' in d) || d.time2 != null || d.time1 == null) return d;
+  const t = liveEndTime();
+  return t == null ? d : Object.assign({}, d, {time2: t});
 }
 
 // A shape that runs past the cursor is drawn up to it. A zone that will last
@@ -3146,10 +4365,14 @@ function clipDrawingTo(d, T){
     out[key] = value;
   };
 
-  // A trade still open at the cursor: its label announces how it ends.
-  if(d.close_time != null && d.close_time > T){ set('close_time', T); set('label', ''); }
+  // A trade still open at the cursor: its label announces how it ends — so it
+  // shows the RR it was opened with instead (v1.3.0).
+  if(d.close_time != null && d.close_time > T){
+    set('close_time', T); set('label', d.planned_label || '');
+  }
 
-  // Spans: box, trendline, fib — clip whichever end runs ahead
+  // Spans: box, trendline, fib — clip whichever end runs ahead. A drawing still
+  // running (no end given) is drawn five candles past the cursor (liveEnded).
   if(d.time1 != null && d.time2 != null){
     if(d.time1 > T && d.time2 > T) return null;   // wholly in the future
     if(d.time1 > T) set('time1', T);
@@ -3165,8 +4388,7 @@ function updateReplayUI(){
   const clock = document.getElementById('rp-clock');
   if(!clock) return;
   if(!replay.active || replay.cursor == null){ clock.textContent = ''; return; }
-  const d = new Date(replay.cursor * 1000);
-  clock.textContent = d.toISOString().slice(0,16).replace('T',' ') + ' UTC';
+  clock.textContent = shownLabel(replay.cursor) + ' ' + zones.display;   // v1.3.0
 }
 
 // ── Driven by a ChartPage ──────────────────────────────────────
@@ -3229,6 +4451,7 @@ function renderTfSelector(){
 }
 
 function toggleTfMenu(){
+  if(!canEdit && refuseNoEdit()) return;
   const menu = document.getElementById('tf-menu');
   if(menu.classList.contains('open')){ closeTfMenu(); return; }
   // Place it under the button by viewport coordinates, since it is fixed
@@ -3244,6 +4467,7 @@ function closeTfMenu(){
 
 function selectTimeframe(tf){
   closeTfMenu();
+  if(!canEdit && refuseNoEdit()) return;
   if(tf === (displayTimeframe||sourceTimeframe)) return;
   tfPending = tf;
   renderTfSelector();
@@ -3255,7 +4479,205 @@ function selectTimeframe(tf){
 document.addEventListener('mousedown', e => {
   const wrap=document.getElementById('tf-wrap');
   if(wrap && !wrap.contains(e.target)) closeTfMenu();
+  const go=document.getElementById('goto-wrap');
+  if(go && go.contains && !go.contains(e.target)) closeGoto();
 });
+
+// ═══════════════════════════════════════════════════════════════
+//  GO TO A DATE AND TIME (v1.3.0)
+//  The time is the chart's own, as its axis shows it — the feed's stamps,
+//  shown as UTC: Binance's UTC, MetaTrader's broker time. The candle that
+//  holds it goes to the middle at the zoom the chart has, under the crosshair.
+// ═══════════════════════════════════════════════════════════════
+// v1.3.0: in the zone the chart shows its times in
+function gotoValue(sec){ return shownLabel(sec).replace(' ', 'T'); }
+function gotoLabel(sec){ return shownLabel(sec); }
+function gotoParse(value){
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value || '');
+  if(!m) return null;
+  const wall = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
+  if(!Number.isFinite(wall)) return null;
+  return msToStamp(wallToInstant(zones.display, wall));
+}
+// What the chart shows: in a replay, only as far as the replay has come
+function gotoBars(){ return replay.active && replay.shown ? replay.shown : allBars; }
+
+function toggleGoto(open){
+  const box = document.getElementById('goto-box');
+  if(!box) return;
+  const willOpen = open === undefined ? !box.classList.contains('open') : open;
+  if(!willOpen){ closeGoto(); return; }
+  const r = document.getElementById('goto-btn').getBoundingClientRect();
+  box.style.left = r.left + 'px';
+  box.style.top  = (r.bottom + 4) + 'px';
+  const input = document.getElementById('goto-at');
+  const bars = gotoBars();
+  if(bars.length){                            // start from the middle of the view
+    let mid = bars.length - 1;
+    try{
+      const v = mainChart.timeScale().getVisibleLogicalRange();
+      if(v) mid = Math.round((v.from + v.to) / 2);
+    }catch{}
+    input.value = gotoValue(bars[Math.max(0, Math.min(bars.length - 1, mid))].time);
+  }
+  box.classList.add('open');
+  try{ input.focus(); }catch{}
+}
+function closeGoto(){
+  const box = document.getElementById('goto-box');
+  if(box) box.classList.remove('open');
+}
+function onGotoKey(e){
+  if(e.key === 'Enter'){ gotoSubmit(); e.preventDefault(); }
+  else if(e.key === 'Escape'){ closeGoto(); e.preventDefault(); }
+}
+function gotoSubmit(){
+  const t = gotoParse(document.getElementById('goto-at').value);
+  if(t == null){ flashStatus('Go to: that is not a date and a time'); return; }
+  closeGoto();
+  goToTime(t, {announce: true});
+}
+
+// The candle that holds *t* — the last one opening at or before it — and what
+// to say when the chart has none.
+function gotoTarget(bars, t){
+  const first = bars[0], last = bars[bars.length - 1];
+  if(t < first.time){
+    return {i: 0, why: `${gotoLabel(t)} is before the first candle on this chart (${gotoLabel(first.time)})`};
+  }
+  let lo = 0, hi = bars.length - 1;
+  while(lo < hi){
+    const mid = (lo + hi + 1) >> 1;
+    if(bars[mid].time <= t) lo = mid; else hi = mid - 1;
+  }
+  if(lo === bars.length - 1 && t >= last.time + Math.max(displayTfSec() || 0, 1)){
+    return {i: lo, why: replay.active
+      ? `the replay has not reached ${gotoLabel(t)}`
+      : `${gotoLabel(t)} is after the last candle on this chart (${gotoLabel(last.time)})`};
+  }
+  return {i: lo, why: null};
+}
+
+function goToTime(t, opts){
+  if(!mainChart || !mainSeries) return;
+  const bars = gotoBars();
+  if(!bars.length) return;
+  const {i, why} = gotoTarget(bars, t);
+  let half = 50;                               // the zoom the chart has
+  try{
+    const v = mainChart.timeScale().getVisibleLogicalRange();
+    if(v) half = Math.max(5, (v.to - v.from) / 2);
+  }catch{}
+  muteSync(400);                               // a jump, not a user scroll
+  try{ mainChart.timeScale().setVisibleLogicalRange({from: i - half, to: i + half}); }catch{}
+  const bar = bars[i];
+  try{ mainChart.setCrosshairPosition(bar.close, bar.time, mainSeries); }catch{}
+  redrawAll();
+  if(why) flashStatus(why);
+  if(opts && opts.announce) postToPage({t: 'navigate', time: t, keep: true});
+}
+
+document.addEventListener('keydown', e => {
+  if(snapshot) return;
+  if(e.altKey && !e.ctrlKey && !e.metaKey && (e.code === 'KeyG' || e.key === 'g' || e.key === 'G')){
+    toggleGoto(true); e.preventDefault();
+  }
+});
+window.addEventListener('resize', closeGoto);
+
+// ═══════════════════════════════════════════════════════════════
+//  TIME TO THE CANDLE'S CLOSE (v1.3.0)
+//  Counted on the feed's clock, which the server learns from the live candles
+//  and sends as {type:'clock', now}: a chart with no live feed shows none.
+//  The switch is kept in this browser and travels with the colours' relay.
+// ═══════════════════════════════════════════════════════════════
+const COUNTDOWN_KEY = 'atk.chart.countdown.v1';
+let countdownOn = true;
+let venueDelta = null;                         // the feed's clock minus this browser's (ms)
+
+function readCountdown(){
+  if(snapshot) return null;
+  try{
+    const v = window.localStorage.getItem(COUNTDOWN_KEY);
+    return v === null ? null : v === '1';
+  }catch{ return null; }
+}
+function loadCountdown(){
+  const v = readCountdown();
+  countdownOn = v === null ? true : v;
+  const el = document.getElementById('stog-countdown');
+  if(el) el.checked = countdownOn;
+}
+function onCountdownToggle(on){
+  countdownOn = !!on;
+  if(!snapshot){ try{ window.localStorage.setItem(COUNTDOWN_KEY, countdownOn ? '1' : '0'); }catch{} }
+  updateCountdown();
+  postToPage({t:'style'});
+}
+
+// 3:48 under an hour, 2:30:11 under a day, 2d 04:20:11 beyond
+function countdownText(ms){
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600);
+  const m = Math.floor(s % 3600 / 60), sec = s % 60;
+  const p2 = n => String(n).padStart(2, '0');
+  if(d) return `${d}d ${p2(h)}:${p2(m)}:${p2(sec)}`;
+  if(h) return `${h}:${p2(m)}:${p2(sec)}`;
+  return `${m}:${p2(sec)}`;
+}
+
+// What the tag says now — {text, bar} — or null when it shows nothing: switched
+// off, a picture, a replay, no feed clock, or the last candle long closed (the
+// market is shut). Between a close and the next candle's first update: 0:00.
+function countdownNow(){
+  if(!countdownOn || snapshot || replay.active || venueDelta == null) return null;
+  if(!mainSeries || !allBars.length) return null;
+  const tf = displayTfSec();
+  if(!tf) return null;
+  const bar = allBars[allBars.length - 1];
+  const left = (bar.time + tf) * 1000 - (Date.now() + venueDelta);
+  if(left < -60000 || left > tf * 1000 + 2000) return null;
+  return {text: countdownText(left), bar};
+}
+
+// Readable text on the tag's colour, as the price label picks it
+// Black or white, whichever has the higher contrast on *c* (WCAG): black on every
+// yellow and gold, where a brightness threshold had given white (v1.3.0).
+function tagInk(c){
+  const n = parseInt(rgbOf(c).slice(1), 16);
+  if(!Number.isFinite(n)) return '#ffffff';
+  const lin = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const L = 0.2126 * lin(n >> 16 & 255) + 0.7152 * lin(n >> 8 & 255) + 0.0722 * lin(n & 255);
+  return (L + 0.05) / 0.05 >= 1.05 / (L + 0.05) ? '#000000' : '#ffffff';
+}
+
+function updateCountdown(){
+  const tag = document.getElementById('cd-tag');
+  if(!tag) return;
+  const c = countdownNow();
+  let y = null, scaleW = 0, wr = null;
+  if(c && panes.main){
+    try{ y = mainSeries.priceToCoordinate(c.bar.close); }catch{}
+    try{ scaleW = mainChart.priceScale('right').width(); }catch{}
+    try{ wr = panes.main.paneWrap.getBoundingClientRect(); }catch{}
+  }
+  if(!c || y == null || !scaleW || !wr || y < 0 || y > wr.height){
+    tag.style.display = 'none';
+    return;
+  }
+  const h = axisFontSize + 5;
+  const colour = c.bar.close >= c.bar.open ? chartStyle.upColor : chartStyle.downColor;
+  tag.textContent = c.text;
+  tag.style.font = `${axisFontSize}px ${axisFont}`;
+  tag.style.background = colour;
+  tag.style.color = tagInk(colour);
+  tag.style.left = (wr.right - scaleW) + 'px';
+  tag.style.width = scaleW + 'px';
+  tag.style.top = (wr.top + y + h / 2) + 'px';
+  tag.style.height = h + 'px';
+  tag.style.lineHeight = h + 'px';
+  tag.style.display = 'block';
+}
 // It is placed by viewport coordinates, so a resize would leave it stranded
 window.addEventListener('resize', closeTfMenu);
 
@@ -3274,7 +4696,11 @@ let ws=null, retryTimer=null;
 function wsConnect(){
   const dot=document.getElementById('wsdot'), lbl=document.getElementById('wslbl');
   dot.className='conn'; lbl.textContent='Connecting…';
-  ws=new WebSocket(`ws://${location.host}/ws${viewId ? '?view='+encodeURIComponent(viewId) : ''}`);
+  const wsQuery = new URLSearchParams();
+  if(viewId) wsQuery.set('view', viewId);
+  if(editKey) wsQuery.set('key', editKey);
+  const query = wsQuery.toString();
+  ws=new WebSocket(`ws://${location.host}/ws${query ? '?' + query : ''}`);
   ws.onopen=()=>{ dot.className='live'; lbl.textContent='Live'; };
   ws.onclose=()=>{ dot.className=''; lbl.textContent='Disconnected';
     clearTimeout(retryTimer); retryTimer=setTimeout(wsConnect,2000); };
@@ -3304,6 +4730,10 @@ function handleMsg(msg){
 
       theme=msg.theme||'dark';
       document.body.classList.toggle('light',theme==='light');
+      programTheme=theme;                     // the program's colours belong to it
+      programStyle=fromProgram(msg.style);
+      loadSavedStyle();
+      chartStyle=styleFor(theme);
       chartType=msg.chartType||'candlestick';
       volumeInMain=msg.volumeInMain!==false;
       candleCountLimit=msg.candleCountLimit||null;
@@ -3314,6 +4744,10 @@ function handleMsg(msg){
       renderTfSelector();
       document.getElementById('chart-title').textContent=msg.title||'Chart';
       document.getElementById('ct-btn').textContent=chartType==='candlestick'?'CANDLE':'HA';
+      setChartActions(msg.actions);
+      setProgramButtons(msg.buttons);
+      setDrawingActions(msg.drawingActions);              // v1.3.0
+      programZones = {source: msg.sourceTimezone || null, display: msg.timezone || null};
 
       initMain(); resizeOverlays();
       setData(msg.bars||[]);
@@ -3321,6 +4755,8 @@ function handleMsg(msg){
       (msg.drawings||[]).forEach(d=>{ drawings[d.id]=d; });
       enforceCandleLimit();   // server already trims; belt-and-braces
       redrawAll(); fitAll();
+      syncStylePanel();
+      applyZones();                                       // v1.3.0: the program's zones
       setCanvasInteractive(false);
       if(snapshot) snapshotApply();
       // A timeframe switch mid-replay arrives as a fresh init: re-cut the new
@@ -3357,6 +4793,34 @@ function handleMsg(msg){
       console.warn('timeframe:', msg.message);
       alert(msg.message);
       break;
+    case 'style':
+      // chart.set_style(): the program's whole style, in place of the one the
+      // page had. The viewer's own choice stays on top of it.
+      programStyle=fromProgram(msg.style);
+      applyStyle(); syncStylePanel();
+      break;
+    case 'clock':
+      // v1.3.0: the feed's clock, fresh on every connection (the countdown's)
+      if(Number.isFinite(Number(msg.now))){ venueDelta = Number(msg.now) - Date.now(); updateCountdown(); }
+      break;
+    case 'access':
+      // v1.3.0: what this page may change. It comes once, after the first init.
+      canEdit = msg.edit !== false;
+      applyAccess();
+      break;
+    case 'actions':
+      setChartActions(msg.actions);
+      break;
+    case 'drawing_actions':                               // v1.3.0
+      setDrawingActions(msg.actions);
+      break;
+    case 'buttons':
+      setProgramButtons(msg.buttons);
+      break;
+    case 'edit_refused':
+      // The program put the drawing back (an update_drawing came first)
+      flashStatus('Refused: ' + (msg.message || ''));
+      break;
     case 'set_candle_limit':
       // Rolling window (v1.0.0): arm/disarm and apply immediately
       candleCountLimit=msg.limit||null;
@@ -3383,10 +4847,12 @@ function toggleSettings(){
   document.getElementById('sf-drawing').value = drawingFont;
   document.getElementById('sf-size').value    = drawingFontSize;
   document.getElementById('sf-size-val').textContent = drawingFontSize+'px';
+  buildZoneLists(); syncZonePanel();                 // v1.3.0: filled on the first opening
   ov.classList.add('open');
   document.getElementById('settings-btn').classList.add('on');
   document.getElementById('stog-last-close').checked  = showLastClose;
   document.getElementById('stog-ind-prices').checked  = showIndLastPrices;
+  syncStylePanel();
 }
 function closeSettings(){
   document.getElementById('settings-overlay').classList.remove('open');
@@ -3417,6 +4883,7 @@ const indSpecs = {};
 let _editingGroup = null;
 
 function toggleIndPanel(){
+  if(!canEdit && refuseNoEdit()) return;
   const ov=document.getElementById('ind-overlay');
   if(ov.classList.contains('open')){ closeIndPanel(); return; }
   ov.classList.add('open');
@@ -3436,6 +4903,7 @@ function onIndOverlayClick(e){ if(e.target.id==='ind-overlay') closeIndPanel(); 
 
 // ── Open the panel pre-filled to EDIT an existing indicator group ─────────
 function openEditPanel(grpName){
+  if(!canEdit && refuseNoEdit()) return;
   const spec = indSpecs[grpName];
   if(!spec){ toggleIndPanel(); return; }   // no stored spec — fall back to add
   const ov = document.getElementById('ind-overlay');
@@ -3509,6 +4977,7 @@ function _gv(id){ return document.getElementById(id).value; }
 function _gi(id){ return parseInt(_gv(id),10); }
 
 function submitIndicator(){
+  if(!canEdit && refuseNoEdit()) return;
   const kind = _gv('ind-type');
   const color = _gv('ind-color');
   let params = { kind, color };
@@ -3618,6 +5087,9 @@ function applyAxisLabelSettings(){
 //  BOOT
 // ═══════════════════════════════════════════════════════════════
 window.addEventListener('resize',()=>{ resizeOverlays(); redrawAll(); });
+loadSavedStyle(); chartStyle=styleFor(theme); loadCountdown();
+loadZones(); pickZones(); loadFibLevels();               // v1.3.0
+setInterval(updateCountdown, 250);         // v1.3.0: the countdown ticks
 initMain(); resizeOverlays(); wsConnect(); setTool('cursor');
 // Only run the periodic redraw when there are visible drawings or a visible cloud
 // (keeps the chart smooth when no canvas work is needed)

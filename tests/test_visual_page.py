@@ -115,6 +115,15 @@ class TestLayout:
             {"id": "v1", "title": "A"}, {"id": "v2", "title": "B"}
         ]
 
+    def test_a_page_stacks_upright_unless_told_not_to(self):
+        """v1.3.0 Part 4h: on a screen taller than wide a row's charts stack."""
+        page = ChartPage()
+        page.add(_chart("A"))
+        assert page._layout_payload()["stackUpright"] is True
+        flat = ChartPage(stack_upright=False)
+        flat.add(_chart("A"))
+        assert flat._layout_payload()["stackUpright"] is False
+
     def test_showing_an_empty_page_is_refused(self):
         with pytest.raises(ValueError, match="has no charts"):
             ChartPage().show()
@@ -220,6 +229,8 @@ class TestServedPage:
         with connect(f"{url}?view=v1") as w1, connect(f"{url}?view=v2") as w2:
             init1 = json.loads(w1.recv(timeout=5))
             init2 = json.loads(w2.recv(timeout=5))
+            for ws in (w1, w2):       # v1.3.0: each page is then told what it may change
+                assert json.loads(ws.recv(timeout=5)) == {"type": "access", "edit": True}
             assert init1["title"] == "BTC 3m" and init1["displayTimeframe"] == "3m"
             assert init2["title"] == "BTC 5m" and init2["displayTimeframe"] == "5m"
             assert len(init1["bars"]) == 100          # 300 one-minute candles
@@ -238,6 +249,7 @@ class TestServedPage:
         url = f"ws://127.0.0.1:{page._server.port}/ws?view=v2"
         with connect(url) as ws:
             ws.recv(timeout=5)                        # the replayed init
+            ws.recv(timeout=5)                        # v1.3.0: and what it may change
             ws.send(json.dumps({"type": "set_timeframe", "tf": "15m"}))
             answer = json.loads(ws.recv(timeout=5))
 
@@ -323,3 +335,80 @@ class TestShutdownRace:
         server.start(open_browser=False)
         assert server._uvicorn.config.timeout_graceful_shutdown == _SHUTDOWN_GRACE
         server.stop()
+
+
+# ---------------------------------------------------------------------------
+# What a reload shows (v1.3.0)
+# ---------------------------------------------------------------------------
+
+def _connect_and_read(page: ChartPage, view: str, timeout: float = 5.0) -> dict:
+    """The first message a browser opening *view* gets: what a reload shows."""
+    from websockets.sync.client import connect
+
+    with connect(f"ws://127.0.0.1:{page._server.port}/ws?view={view}") as ws:
+        return json.loads(ws.recv(timeout=timeout))
+
+
+@pytest.fixture
+def shown_page():
+    page = ChartPage(title="Reload")
+    page.add(_chart("BTC 3m", "3m"))
+    page.show(block=False, open_browser=False)
+    yield page
+    page.stop()
+
+
+class TestWhatAReloadShows:
+    def test_gap_3_a_box_added_after_show_is_in_the_reloaded_page(self, shown_page):
+        chart = shown_page.charts[0]
+        start = ANCHOR // 1000
+        chart.add_box(start, 100.0, start + 600, 120.0, label="Zone")
+        chart.set_style(background="#000000")
+        init = _connect_and_read(shown_page, "v1")
+        assert init["type"] == "init"
+        assert [d["label"] for d in init["drawings"]] == ["Zone"]
+        assert init["style"] == {"background": "#000000"}
+
+    def test_q1_4_a_chart_added_to_a_shown_page_gets_its_init(self, shown_page):
+        late = _chart("ETH 5m", "5m")
+        shown_page.add(late)
+        init = _connect_and_read(shown_page, "v2")
+        assert (init["type"], init["title"], len(init["bars"])) == ("init", "ETH 5m", 60)
+        late.add_hline(150.0)
+        assert [d["price"] for d in _connect_and_read(shown_page, "v2")["drawings"]] == [150.0]
+
+
+# ---------------------------------------------------------------------------
+# The edit key on a page (v1.3.0)
+# ---------------------------------------------------------------------------
+
+def _access(page: ChartPage, view: str, key: str | None = None) -> dict:
+    """The message after the init: what a page opened with *key* may change."""
+    from websockets.sync.client import connect
+
+    query = f"view={view}" + (f"&key={key}" if key is not None else "")
+    with connect(f"ws://127.0.0.1:{page._server.port}/ws?{query}") as ws:
+        assert json.loads(ws.recv(timeout=5))["type"] == "init"
+        return json.loads(ws.recv(timeout=5))
+
+
+class TestEditKeyOnAPage:
+    def test_each_view_is_checked_against_its_own_charts_key(self, monkeypatch):
+        import webbrowser
+
+        opened = []
+        monkeypatch.setattr(webbrowser, "open", opened.append)
+        keyed = Chart(title="Keyed", edit_key="k1")
+        keyed.set_data(_frame())
+        page = ChartPage(title="Keys")
+        page.add(keyed)                                  # v1
+        page.add(_chart("Open"))                         # v2: no key
+        page.show(block=False, open_browser=True)
+        try:
+            assert opened == [f"{page.url}/?key=k1"]     # the page's own tab may edit
+            assert _access(page, "v1", "k1") == {"type": "access", "edit": True}
+            assert _access(page, "v1", "k2") == {"type": "access", "edit": False}
+            assert _access(page, "v1") == {"type": "access", "edit": False}
+            assert _access(page, "v2") == {"type": "access", "edit": True}
+        finally:
+            page.stop()

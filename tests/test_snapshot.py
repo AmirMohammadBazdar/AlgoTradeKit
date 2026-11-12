@@ -153,3 +153,52 @@ class TestTheRealPicture:
 
         assert any(magenta(row, 600) for row in range(y - 2, y + 3))
         assert not any(magenta(row, 600) for row in range(max(0, y - 40), y - 10))
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 — the program's colours, and a chart on a page
+# ---------------------------------------------------------------------------
+
+from AlgoTradeKit.visual import ChartPage  # noqa: E402
+
+DEEP = (0x10, 0x18, 0x20)                  # "#101820"
+#: Above the candles, which rise left to right: (x0, y0, x1, y1), inclusive.
+EMPTY_CORNER = (100, 150, 300, 250)
+
+
+def _rising() -> pd.DataFrame:
+    first = int(pd.Timestamp("2026-10-14 00:00", tz="UTC").timestamp() * 1000)
+    return pd.DataFrame([
+        {"timestamp": first + k * 900_000, "open": 64_000 + k, "high": 64_010 + k,
+         "low": 63_990 + k, "close": 64_005 + k, "volume": 1.0 + k % 5} for k in range(96)])
+
+
+def _share(picture: bytes, colour: tuple[int, int, int], box: tuple[int, ...]) -> float:
+    """The share of the pixels inside *box* that are exactly *colour*."""
+    _width, _height, channels, rows = _png_rows(picture, box[3])
+    pixels = [tuple(rows[y][x * channels:x * channels + 3])
+              for y in range(box[1], box[3] + 1) for x in range(box[0], box[2] + 1)]
+    return sum(pixel == colour for pixel in pixels) / len(pixels)
+
+
+class TestTheProgramsColours:
+    def test_the_background_is_in_an_empty_corner(self, chart):     # `chart`: the skips
+        styled = Chart(title="BTCUSDT", style={"background": "#101820"})
+        styled.set_data(_rising())
+        picture = styled.screenshot("2026-10-14 08:00", "2026-10-14 14:00")
+        assert _share(picture, DEEP, EMPTY_CORNER) > 0.9
+        plain = chart.screenshot("2026-10-14 08:00", "2026-10-14 14:00")
+        assert _share(plain, DEEP, EMPTY_CORNER) == 0                # the theme's, otherwise
+
+    def test_q1_3_a_chart_on_a_page_is_photographed(self, chart):
+        page = ChartPage(title="Desk")
+        page.add(Chart(title="ETHUSDT")).set_data(_rising())
+        styled = page.add(Chart(title="BTCUSDT", style={"background": "#101820"}))
+        styled.set_data(_rising())
+        page.show(open_browser=False)
+        try:
+            picture = styled.screenshot("2026-10-14 08:00", "2026-10-14 14:00")
+        finally:
+            page.stop()
+        assert struct.unpack(">II", picture[16:24]) == (1280, 720)
+        assert _share(picture, DEEP, EMPTY_CORNER) > 0.9

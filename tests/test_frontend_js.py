@@ -13,6 +13,7 @@ so the assertions are about what the code *does*.  Skipped when node is absent
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -1527,3 +1528,1809 @@ out.title = document.getElementById('chart-title').textContent;
     assert result["toolbar"] == ""
     assert result["zoned"] == 0
     assert result["title"] == "BTCUSDT"
+
+
+# ---------------------------------------------------------------------------
+# index.html / page.html — colours and the grid (v1.3.0)
+# ---------------------------------------------------------------------------
+# Three layers, each over the one before: the theme's default, the program's
+# style (the init's, for the theme the chart starts in), and the browser's own
+# choice from the Settings panel, saved per theme.
+
+# Every chart the page builds: the options it was made with, what was applied to
+# it after, and its candle and volume series.
+_STYLE_RECORD = """
+ctx.__charts = [];
+ctx.LightweightCharts = autoStub('LightweightCharts', {createChart: (el, opts) => {
+  const chart = makeChartStub();
+  const rec = {made: opts || {}, applied: [], candles: null, volume: null};
+  ctx.__charts.push(rec);
+  chart.applyOptions = o => { rec.applied.push(o); };
+  chart.addCandlestickSeries = o => {
+    const series = autoStub('candles');
+    rec.candles = {made: o || {}, applied: []};
+    series.applyOptions = more => { rec.candles.applied.push(more); };
+    return series;
+  };
+  chart.addHistogramSeries = () => {
+    const series = autoStub('volume');
+    rec.volume = series;
+    return series;
+  };
+  return chart;
+}});
+// What a chart or a series shows now: the options it was made with, then every
+// applyOptions on top, merged the way lightweight-charts merges them.
+ctx.__merge = (made, applied) => {
+  const deep = (to, from) => {
+    Object.entries(from || {}).forEach(([k, v]) => {
+      to[k] = v && typeof v === 'object' && !Array.isArray(v)
+        ? deep(to[k] && typeof to[k] === 'object' ? {...to[k]} : {}, v) : v;
+    });
+    return to;
+  };
+  return applied.reduce((acc, o) => deep(acc, o), deep({}, made));
+};
+"""
+
+# A browser's storage, which a test can read and fill
+_STORAGE = """
+ctx.__store = {};
+ctx.window.localStorage = {
+  getItem: k => (k in ctx.__store ? ctx.__store[k] : null),
+  setItem: (k, v) => { ctx.__store[k] = String(v); },
+};
+"""
+
+_STYLE_KEY = "atk.chart.style.v1"
+
+# An up candle, then a down one; `look()` is what the newest main chart shows.
+_STYLE_INIT = """
+const bars = [{time: 1700000000, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1},
+              {time: 1700000060, open: 1.5, high: 2, low: 0.5, close: 1, volume: 1}];
+const init = (extra = {}) => ev('handleMsg')(Object.assign(
+  {type: 'init', title: 'BTC', theme: 'dark', bars, indicators: [], drawings: [],
+   timeframes: []}, extra));
+const look = () => {
+  const m = ctx.__charts[ctx.__charts.length - 1];
+  const opts = ctx.__merge(m.made, m.applied);
+  const candles = ctx.__merge(m.candles.made, m.candles.applied);
+  return {background: opts.layout.background.color,
+          grid: [opts.grid.vertLines.visible, opts.grid.horzLines.visible],
+          up: candles.upColor, down: candles.downColor,
+          borders: [candles.borderUpColor, candles.borderDownColor],
+          wicks: [candles.wickUpColor, candles.wickDownColor],
+          volume: (m.volume.setData._last || []).map(p => p.color)};
+};
+const saved = () => JSON.parse(ctx.__store['atk.chart.style.v1'] || 'null');
+"""
+
+_DEFAULT_LOOK = {
+    "background": "#0d1117", "grid": [True, True], "up": "#3fb950", "down": "#f85149",
+    "borders": ["#3fb950", "#f85149"], "wicks": ["#3fb950", "#f85149"],
+    "volume": ["#3fb95055", "#f8514955"],
+}
+
+
+@pytest.fixture(scope="module")
+def colours_result() -> dict:
+    """A chart with no style of its own, in a browser that has saved nothing:
+    every control of the panel in turn, in both themes."""
+    return _run(CHART_HTML, _STYLE_INIT + """
+init();
+out.start = look();
+
+ev("onStyleInput('background', '#000000')");
+out.background = look().background;
+ev("onStyleInput('upColor', '#ffffff')");
+ev("onStyleInput('downColor', '#808080')");
+out.candles = look();
+ev("onGridToggle(false)");
+out.gridOff = look().grid;
+out.savedDark = saved();
+
+ev('toggleTheme()');                          // ☀: light keeps its own colours
+out.light = look();
+out.savedAfterSun = saved();
+ev("onStyleInput('background', '#eeeeee')");
+out.lightChanged = look().background;
+ev('toggleTheme()');                          // and dark has kept its own
+out.darkAgain = look();
+
+ev('resetStyle()');                           // forgets dark's, never light's
+out.afterReset = look();
+out.savedAfterReset = saved();
+""", extra_globals=_STYLE_RECORD + _STORAGE)
+
+
+class TestColours:
+    def test_page_script_runs_clean(self, colours_result):
+        assert colours_result["topLevelError"] is None
+
+    def test_a_chart_starts_in_its_themes_colours(self, colours_result):
+        assert colours_result["start"] == _DEFAULT_LOOK
+
+    def test_the_background_control_sets_the_charts_background(self, colours_result):
+        assert colours_result["background"] == "#000000"
+
+    def test_the_candle_controls_set_body_border_wick_and_volume(self, colours_result):
+        look = colours_result["candles"]
+        assert (look["up"], look["down"]) == ("#ffffff", "#808080")
+        assert look["borders"] == ["#ffffff", "#808080"]
+        assert look["wicks"] == ["#ffffff", "#808080"]
+        assert look["volume"] == ["#ffffff55", "#80808055"]       # at a third, as before
+
+    def test_grid_off_hides_both_lines(self, colours_result):
+        assert colours_result["gridOff"] == [False, False]
+
+    def test_only_what_was_changed_is_saved_for_the_theme(self, colours_result):
+        assert colours_result["savedDark"] == {
+            "dark": {"background": "#000000", "upColor": "#ffffff", "downColor": "#808080",
+                     "grid": False},
+            "light": {},
+        }
+
+    def test_each_theme_keeps_its_own_colours(self, colours_result):
+        assert colours_result["light"] == dict(_DEFAULT_LOOK, background="#ffffff")
+        assert colours_result["savedAfterSun"] == colours_result["savedDark"]  # ☀ not saved
+        assert colours_result["lightChanged"] == "#eeeeee"
+        dark = colours_result["darkAgain"]
+        assert (dark["background"], dark["up"], dark["grid"]) == ("#000000", "#ffffff",
+                                                                  [False, False])
+
+    def test_reset_forgets_the_current_themes_choice_only(self, colours_result):
+        assert colours_result["afterReset"] == _DEFAULT_LOOK
+        assert colours_result["savedAfterReset"] == {"dark": {},
+                                                     "light": {"background": "#eeeeee"}}
+
+
+@pytest.fixture(scope="module")
+def program_style_result() -> dict:
+    """A program's style, with this browser's own choice saved over part of it."""
+    return _run(CHART_HTML, _STYLE_INIT + f"""
+ctx.__store[{_STYLE_KEY!r}] = JSON.stringify({{dark: {{background: '#000000'}}}});
+init({{style: {{background: '#101820', up_color: '#ffffff', grid: false}}}});
+out.start = look();
+ev('resetStyle()');
+out.afterReset = look();
+ev('toggleTheme()');
+out.light = look();
+ev('toggleTheme()');
+
+// chart.set_style(): the program's whole style, the browser's choice still on top
+ev("onStyleInput('downColor', '#808080')");
+ev('handleMsg')({{type: 'style', style: {{background: '#202020', down_color: '#00ff00'}}}});
+out.afterSetStyle = look();
+""", extra_globals=_STYLE_RECORD + _STORAGE)
+
+
+class TestProgramColours:
+    def test_the_browsers_choice_sits_over_the_programs(self, program_style_result):
+        look = program_style_result["start"]
+        assert look["background"] == "#000000"                    # the browser's
+        assert (look["up"], look["grid"]) == ("#ffffff", [False, False])   # the program's
+        assert look["down"] == "#f85149"                           # the theme's
+
+    def test_reset_shows_the_programs_colours_again(self, program_style_result):
+        look = program_style_result["afterReset"]
+        assert (look["background"], look["up"], look["grid"]) == ("#101820", "#ffffff",
+                                                                  [False, False])
+
+    def test_q1_2_a_the_programs_colours_belong_to_its_theme(self, program_style_result):
+        """☀ on a chart whose program set dark colours: light as it has always been."""
+        assert program_style_result["light"] == dict(_DEFAULT_LOOK, background="#ffffff")
+
+    def test_set_style_replaces_the_programs_style_under_the_browsers(
+            self, program_style_result):
+        look = program_style_result["afterSetStyle"]
+        assert look["background"] == "#202020"
+        assert look["down"] == "#808080"                           # the browser's, on top
+        assert look["up"] == "#3fb950" and look["grid"] == [True, True]   # no longer set
+
+
+def test_a_colour_with_alpha_or_three_digits_reaches_the_panel_and_the_volume():
+    result = _run(CHART_HTML, _STYLE_INIT + """
+init({style: {background: '#abc', up_color: '#11223344'}});
+ev('toggleSettings()');
+out.panel = ['sc-background', 'sc-up', 'sc-down']
+  .map(id => document.getElementById(id).value);
+out.grid = document.getElementById('stog-grid').checked;
+out.look = look();
+""", extra_globals=_STYLE_RECORD + _STORAGE)
+    assert result["topLevelError"] is None
+    assert result["panel"] == ["#aabbcc", "#112233", "#f85149"]   # what a picker can hold
+    assert result["grid"] is True
+    assert result["look"]["background"] == "#abc"                 # the colour as written
+    assert result["look"]["up"] == "#11223344"
+    assert result["look"]["volume"] == ["#11223355", "#f8514955"]  # 55 in place of 44
+
+
+def test_a_selected_drawings_hollow_handles_take_the_charts_background():
+    result = _run(CHART_HTML, _STYLE_INIT + """
+init({style: {background: '#101820'}});
+const pen = {save() {}, restore() {}, beginPath() {}, arc() {}, fill() {}, stroke() {}};
+ev('drawHandle')(pen, 10, 10, '#ff0000', false);
+out.hollow = pen.fillStyle;
+ev('drawHandle')(pen, 10, 10, '#ff0000', true);
+out.filled = pen.fillStyle;
+""", extra_globals=_STYLE_RECORD + _STORAGE)
+    assert (result["hollow"], result["filled"]) == ("#101820", "#ff0000")
+
+
+def test_a_picture_shows_the_programs_colours_and_never_touches_storage():
+    stored = json.dumps({"dark": {"background": "#000000", "grid": False}})
+    result = _run(CHART_HTML, _STYLE_INIT + f"""
+ctx.__store[{_STYLE_KEY!r}] = {json.dumps(stored)};
+init({{style: {{background: '#101820'}}}});
+out.look = look();
+ev("onStyleInput('background', '#ff0000')");
+out.stored = ctx.__store[{_STYLE_KEY!r}];
+""", extra_globals=_STYLE_RECORD + _STORAGE
+        + f"ctx.location.search = '?snapshot=1&from={_T0800}&to={_T1400}&tz=UTC';\n")
+    assert result["topLevelError"] is None
+    assert result["look"]["background"] == "#101820"
+    assert result["look"]["grid"] == [True, True]
+    assert result["stored"] == stored
+
+
+@pytest.mark.parametrize("storage", [
+    # a private window, or site data blocked: the property itself throws
+    "Object.defineProperty(ctx.window, 'localStorage', "
+    "{get() { throw new Error('SecurityError'); }});\n",
+    # storage there, but every call refused
+    "ctx.window.localStorage = {getItem() { throw new Error('SecurityError'); },"
+    " setItem() { throw new Error('QuotaExceededError'); }};\n",
+], ids=["no-storage", "refused"])
+def test_storage_that_throws_leaves_a_working_chart(storage):
+    result = _run(CHART_HTML, _STYLE_INIT + """
+init({style: {background: '#101820'}});
+out.start = look().background;
+ev("onStyleInput('background', '#000000')");
+ev("onGridToggle(false)");
+out.changed = look();
+ev('resetStyle()');
+out.reset = look().background;
+""", extra_globals=_STYLE_RECORD + storage)
+    assert result["topLevelError"] is None
+    assert result["start"] == "#101820"
+    assert result["changed"]["background"] == "#000000"     # applies, though not kept
+    assert result["changed"]["grid"] == [False, False]
+    assert result["reset"] == "#101820"
+
+
+def test_a_frame_tells_the_page_when_a_colour_is_picked_and_follows_the_others():
+    result = _run(CHART_HTML, _STYLE_INIT + f"""
+init();
+ctx.__toParent.length = 0;
+ev("onStyleInput('background', '#000000')");     // the picker moving: this chart only
+out.whileMoving = ctx.__toParent.slice();
+ev('onStylePicked()');                           // a colour picked: the page follows
+ev('onGridToggle(false)');
+ev('resetStyle()');
+out.told = ctx.__toParent.slice();
+
+// another chart of the page saved the grid off, and the shell says so
+ctx.__toParent.length = 0;
+ctx.__store[{_STYLE_KEY!r}] = JSON.stringify({{dark: {{grid: false}}, light: {{}}}});
+(docListeners.message || []).forEach(fn =>
+  fn({{source: ctx.window.parent, data: {{t: 'style'}}}}));
+out.followed = look().grid;
+out.panelGrid = document.getElementById('stog-grid').checked;
+out.echoed = ctx.__toParent.slice();
+""", extra_globals=_STYLE_RECORD + _STORAGE + _EMBED)
+    assert result["topLevelError"] is None
+    assert result["whileMoving"] == []
+    assert result["told"] == [{"view": "v2", "t": "style"}] * 3
+    assert result["followed"] == [False, False]
+    assert result["panelGrid"] is False
+    assert result["echoed"] == []                   # a relayed change is not sent back
+
+
+def test_the_shell_passes_a_colour_change_to_every_other_chart():
+    result = _run(PAGE_HTML, _SETTLE + """
+clearAll();
+fromFrame('v2', {t: 'style'});
+out.posted = Object.fromEntries(['v1', 'v2', 'v3'].map(id => [id, win(id)._posted.slice()]));
+""", extra_globals=_LAYOUT)
+    assert result["topLevelError"] is None
+    assert result["posted"] == {"v1": [{"t": "style"}], "v2": [], "v3": [{"t": "style"}]}
+
+
+# ---------------------------------------------------------------------------
+# index.html / page.html — edits on the page reach Python (v1.3.0, Part 2)
+# ---------------------------------------------------------------------------
+# A 5m display of 1m data: ten 5m candles 300 s apart, 10 px apart on screen.
+# Prices map linearly: y = 1000 - 10 * price, so 100 is the top of the 400 px pane.
+
+# Elements that keep their listeners, a socket that keeps its address, and a
+# canvas pen that records what is drawn.
+_EDIT_HARNESS = """
+['draw-cv', 'panes'].forEach(id => {
+  const el = document.getElementById(id);
+  el._ls = {};
+  el.addEventListener = (type, fn) => { (el._ls[type] ??= []).push(fn); };
+});
+ctx.__fireOn = (id, type, ev) =>
+  (document.getElementById(id)._ls[type] || []).forEach(fn => fn(ev));
+ctx.__wsUrls = [];
+ctx.WebSocket = function (url) {
+  ctx.__wsUrls.push(url);
+  return {readyState: 0, send() {}, close() {}};
+};
+ctx.__penCalls = [];
+ctx.__pen = new Proxy({}, {
+  get: (t, k) => (k in t ? t[k] : (...a) => { ctx.__penCalls.push([String(k), ...a]);
+                                              return {width: 10}; }),
+  set: (t, k, v) => { t[k] = v; return true; },
+});
+document.getElementById('draw-cv').getContext = () => ctx.__pen;
+ctx.__confirms = [];
+ctx.__confirmAnswer = true;
+ctx.confirm = text => { ctx.__confirms.push(text); return ctx.__confirmAnswer; };
+"""
+
+_EDIT_SETUP = """
+const bars = [];
+for (let i = 0; i < 10; i++) bars.push({time: 1000 + i * 300, open: 90, high: 95, low: 85,
+                                        close: 92, volume: 1});
+ctx.__bars = bars;
+ev('ws = {readyState: 1, send: m => globalThis.__sent.push(JSON.parse(m))}');
+const init = (extra = {}) => {
+  ev('handleMsg')(Object.assign({type: 'init', title: 'BTC', bars, indicators: [],
+    drawings: [], sourceTimeframe: '1m', displayTimeframe: '5m', timeframes: ['1m', '5m']},
+    extra));
+  const chart = mainChartStub();
+  chart._state.barTimes = bars.map(b => b.time);
+  const scale = chart.timeScale();
+  scale.coordinateToTime = x => 1000 + x * 30;
+  scale.coordinateToLogical = x => x / 10;
+  const series = ev('mainSeries');
+  series.priceToCoordinate = p => 1000 - p * 10;
+  series.coordinateToPrice = y => (1000 - y) / 10;
+};
+// A box from candle 2 to candle 6 (x 20 to 60), price 90 to 80 (y 100 to 200)
+const box = (extra = {}) => Object.assign({type: 'box', id: 'zone', time1: 1600, price1: 90,
+  time2: 2800, price2: 80, color: '#26a69a', borderColor: '#26a69a', opacity: 0.2, label: 'Zone',
+  locked: false, source: 'server'}, extra);
+const press = (x, y) => ctx.__fireOn('draw-cv', 'mousedown',
+  {button: 0, clientX: x, clientY: y, stopPropagation() {}});
+const dragTo = (x, y) => fire('mousemove', document.body, {clientX: x, clientY: y});
+const release = () => fire('mouseup', document.body);
+const lastSent = type => ctx.__sent.filter(m => m.type === type).slice(-1)[0];
+const rightClick = (id, x, y) => {
+  const e = {clientX: x, clientY: y, prevented: false,
+             preventDefault() { this.prevented = true; }, stopPropagation() {}};
+  ctx.__fireOn(id, 'contextmenu', e);
+  return e;
+};
+const shown = id => document.getElementById(id).style.display;
+"""
+
+
+def _edits(body: str, extra_globals: str = "") -> dict:
+    return _run(CHART_HTML, _EDIT_SETUP + body, extra_globals=_EDIT_HARNESS + extra_globals)
+
+
+def test_a_price_only_box_moves_only_its_prices():
+    result = _edits("""
+init({drawings: [box({editable: ['price']})]});
+out.rightEdge = ev('hitTest(60, 150)');         // its time edge: nothing to grab
+out.inside    = ev('hitTest(40, 150)');         // its inside would move it: no
+out.topEdge   = ev('hitTest(40, 100)');
+
+press(40, 100); dragTo(40, 80); release();      // the top edge, 2 up in price
+const top = lastSent('drawing_updated').drawing;
+out.afterTop = [top.time1, top.time2, top.price1, top.price2];
+
+press(60, 80); dragTo(90, 70); release();       // a corner, up and to the right
+const corner = lastSent('drawing_updated').drawing;
+out.afterCorner = [corner.time1, corner.time2, corner.price1, corner.price2];
+""")
+    assert result["topLevelError"] is None
+    assert result["rightEdge"] is None and result["inside"] is None
+    assert result["topEdge"] == {"id": "zone", "handle": "tc"}
+    assert result["afterTop"] == [1600, 2800, 92, 80]
+    assert result["afterCorner"] == [1600, 2800, 93, 80]   # vertically only
+
+
+def test_an_editable_box_moves_as_before():
+    result = _edits("""
+init({drawings: [box()]});
+press(60, 150); dragTo(90, 150); release();     // its right edge, three candles on
+const d = lastSent('drawing_updated').drawing;
+out.after = [d.time1, d.time2, d.price1, d.price2];
+""")
+    assert result["after"] == [1600, 3700, 90, 80]
+
+
+def test_the_menu_follows_editable_and_deletable():
+    result = _edits("""
+init({drawings: [box({editable: false, deletable: false, locked: true, title: 'Sell POI'})]});
+rightClick('draw-cv', 40, 150);
+out.fixed = {menu: shown('ctx-menu'), title: document.getElementById('ctx-title').textContent,
+             unlock: shown('ctx-lock-row'), del: shown('ctx-delete-row')};
+ev('ctxTargetId = "zone"'); ev('ctxToggleLock()'); ev('ctxDelete()');
+out.fixedAfter = {locked: ev('drawings.zone.locked'), there: ev('"zone" in drawings'),
+                  sent: ctx.__sent.length};
+
+ev('handleMsg')({type: 'add_drawing', drawing: box({id: 'free', time1: 2200, time2: 2500,
+                                                     price1: 98, price2: 96})});
+rightClick('draw-cv', 55, 30);                  // inside the second box
+out.free = {title: shown('ctx-title'), unlock: shown('ctx-lock-row'), del: shown('ctx-delete-row')};
+""")
+    assert result["fixed"] == {"menu": "block", "title": "Sell POI", "unlock": "none",
+                               "del": "none"}
+    assert result["fixedAfter"] == {"locked": True, "there": True, "sent": 0}
+    assert result["free"] == {"title": "none", "unlock": "", "del": ""}
+
+
+def test_deleting_a_keyed_drawing_asks_first():
+    result = _edits("""
+init({drawings: [box({key: 'poi:sell:1', title: 'Sell POI 4019.5–4026.7'}),
+                 box({id: 'labelled', key: 'poi:buy:2', label: 'Buy POI', time1: 1000,
+                      time2: 1300}),
+                 box({id: 'plain', label: '', time1: 1000, time2: 1300, key: 'z:3'}),
+                 box({id: 'unkeyed', time1: 1000, time2: 1300})]});
+ctx.__confirmAnswer = false;
+ev('ctxTargetId = "zone"'); ev('ctxDelete()');
+out.kept = ev('"zone" in drawings') && !lastSent('drawing_deleted');
+ctx.__confirmAnswer = true;
+['zone', 'labelled', 'plain', 'unkeyed'].forEach(id => {
+  ev(`ctxTargetId = "${id}"`);
+  ev('ctxDelete()');
+});
+out.confirms = ctx.__confirms;
+out.deleted = ctx.__sent.filter(m => m.type === 'drawing_deleted').map(m => m.id);
+""")
+    assert result["kept"] is True
+    assert result["confirms"] == [
+        "Delete Sell POI 4019.5–4026.7? The program is told.",
+        "Delete Sell POI 4019.5–4026.7? The program is told.",
+        "Delete Buy POI? The program is told.",
+        "Delete box? The program is told.",
+    ]                                           # the unkeyed box goes without asking
+    assert result["deleted"] == ["zone", "labelled", "plain", "unkeyed"]
+
+
+def test_the_candle_menu_sends_the_candles_opening():
+    result = _edits("""
+init({actions: ['Mark here', 'Restart here']});
+const e = rightClick('panes', 34, 150);         // over candle 3 (x 30), price 85
+out.menu = shown('candle-menu');
+out.items = document.getElementById('candle-menu').children.map(c => c.textContent);
+out.prevented = e.prevented;
+document.getElementById('candle-menu').children[1].onclick();
+out.sent = lastSent('chart_action');
+out.closed = shown('candle-menu');
+
+rightClick('panes', 112, 120);                  // two candles past the last one
+document.getElementById('candle-menu').children[0].onclick();
+out.future = lastSent('chart_action');
+
+ev('handleMsg')({type: 'actions', actions: []});
+out.noneLeft = rightClick('panes', 34, 150).prevented;
+""")
+    assert result["topLevelError"] is None
+    assert result["menu"] == "block" and result["prevented"] is True
+    assert result["items"] == ["Mark here", "Restart here"]
+    assert result["sent"] == {"type": "chart_action", "label": "Restart here", "time": 1900,
+                              "price": 85}
+    assert result["closed"] == "none"
+    assert result["future"]["time"] == 1000 + 11 * 300       # a candle not there yet
+    assert result["noneLeft"] is False                       # the browser's own menu
+
+
+def test_without_actions_a_right_click_is_left_alone():
+    result = _edits("""
+init();
+const e = rightClick('panes', 34, 150);
+out.prevented = e.prevented;
+out.menu = shown('candle-menu');
+""")
+    assert result["prevented"] is False
+    assert result["menu"] in ("", "none")
+
+
+def test_a_vertical_line_sits_on_the_candle_that_holds_its_time():
+    result = _edits("""
+init({drawings: [{type: 'vline', id: 'v', time: 2300, color: '#e3b341', label: 'Restart',
+                  style: 'dashed', locked: true, source: 'server', key: 'restart:1',
+                  editable: false, deletable: true, title: null}]});
+ctx.__penCalls.length = 0;
+ev('redrawAll()');
+const calls = ctx.__penCalls;
+const i = calls.findIndex(c => c[0] === 'moveTo' && c[1] === 40);
+out.line = [calls[i], calls[i + 1]];
+out.dash = calls.slice(0, i).filter(c => c[0] === 'setLineDash').slice(-1)[0];
+out.label = calls.find(c => c[0] === 'fillText' && c[1] === 'Restart');
+out.hit = ev('hitTestAny(42, 300)');
+out.miss = ev('hitTestAny(55, 300)');
+out.drag = ev('hitTest(42, 300)');
+rightClick('draw-cv', 42, 300);
+out.menu = {unlock: shown('ctx-lock-row'), del: shown('ctx-delete-row')};
+""")
+    assert result["topLevelError"] is None
+    assert result["line"] == [["moveTo", 40, 0], ["lineTo", 40, 400]]   # 2300 is in candle 4
+    assert result["dash"] == ["setLineDash", [5, 4]]
+    assert result["label"] is not None
+    assert result["hit"] == {"id": "v", "handle": "body"}
+    assert result["miss"] is None and result["drag"] is None             # never dragged
+    assert result["menu"] == {"unlock": "none", "del": ""}
+
+
+def test_a_page_without_the_key_only_looks():
+    result = _edits("""
+init({actions: ['Mark here'], drawings: [box({key: 'z', title: 'Zone'}),
+     {type: 'box', id: 'mine', time1: 1000, price1: 99, time2: 1300, price2: 97, label: '',
+      locked: false, source: 'user', color: '#fff'}]});
+ev('handleMsg')({type: 'access', edit: false});
+out.body = document.body._cls.has('no-edit');
+out.tfTitle = document.getElementById('tf-btn').title;
+out.dragProgram = ev('hitTest(40, 100)');
+out.dragMine = ev('hitTest(10, 30)');
+rightClick('draw-cv', 40, 150);
+out.programMenu = {unlock: shown('ctx-lock-row'), del: shown('ctx-delete-row'),
+  rename: document.getElementById('ctx-rename-row')._cls.has('disabled')};
+ev('ctxTargetId = "zone"'); ev('ctxDelete()');
+out.zoneThere = ev('"zone" in drawings');
+out.candleMenu = rightClick('panes', 34, 150).prevented;
+ctx.__sent.length = 0;
+ev('selectTimeframe("1m")'); ev('toggleIndPanel()'); ev('removeIndicator("EMA")');
+out.sent = ctx.__sent.slice();
+out.panelOpen = document.getElementById('ind-overlay')._cls.has('open');
+out.status = document.getElementById('sbmsg').textContent;
+ev('ctxTargetId = "mine"'); ev('ctxDelete()');
+out.mineGone = !ev('"mine" in drawings');
+""")
+    assert result["topLevelError"] is None
+    assert result["body"] is True and result["tfTitle"] == "needs the edit key"
+    assert result["dragProgram"] is None
+    assert result["dragMine"] == {"id": "mine", "handle": "br"}   # your own lines move
+    assert result["programMenu"] == {"unlock": "none", "del": "none", "rename": True}
+    assert result["zoneThere"] is True
+    assert result["candleMenu"] is False
+    assert result["sent"] == []
+    assert result["panelOpen"] is False
+    assert result["status"] == "needs the edit key"
+    assert result["mineGone"] is True
+
+
+def test_a_refusal_says_why_in_the_status_bar():
+    result = _edits("""
+init({drawings: [box({key: 'z'})]});
+ev('handleMsg')({type: 'update_drawing', drawing: {id: 'zone', price1: 90}});
+ev('handleMsg')({type: 'edit_refused', id: 'zone', message: 'too tall'});
+out.status = document.getElementById('sbmsg').textContent;
+out.price1 = ev('drawings.zone.price1');
+""")
+    assert result["status"] == "Refused: too tall"
+    assert result["price1"] == 90
+
+
+def test_the_page_gives_its_key_when_it_connects():
+    result = _edits("""
+out.urls = ctx.__wsUrls.slice();
+""", extra_globals=_EMBED.replace("title=BTC%205m'", "title=BTC%205m&key=s%203cret'"))
+    assert result["urls"][-1] == "ws://vps.example:9100/ws?view=v2&key=s+3cret"
+
+
+def test_the_shell_passes_its_key_to_every_frame():
+    keyed = _run(PAGE_HTML, _SETTLE + "out.src = iframes.map(f => f.src);",
+                 extra_globals=_LAYOUT + "ctx.location.search = '?key=s3cret';\n")
+    plain = _run(PAGE_HTML, _SETTLE + "out.src = iframes.map(f => f.src);",
+                 extra_globals=_LAYOUT)
+    assert all(src.endswith("&key=s3cret") for src in keyed["src"]) and len(keyed["src"]) == 3
+    assert not any("key=" in src for src in plain["src"])
+
+
+def test_the_programs_buttons_ask_first_and_only_an_editor_has_them():
+    """``chart.add_button`` (v1.3.0): «Re-run with edits» is one."""
+    result = _edits("""
+const question = 'Re-run with the saved edits? The session stops and starts again.';
+init({buttons: [{label: 'Re-run with edits', confirm: question}, {label: 'Plain', confirm: null}]});
+const bar = document.getElementById('prog-btns');
+out.labels = bar.children.map(b => b.textContent);
+ctx.__confirmAnswer = false;
+bar.children[0].onclick();
+out.afterNo = ctx.__sent.filter(m => m.type === 'button');
+ctx.__confirmAnswer = true;
+bar.children[0].onclick();
+bar.children[1].onclick();
+out.sent = ctx.__sent.filter(m => m.type === 'button');
+out.confirms = ctx.__confirms.slice();
+ev('handleMsg')({type: 'access', edit: false});
+out.viewer = bar.children.length;
+ev('handleMsg')({type: 'buttons', buttons: [{label: 'Another'}]});
+out.viewerLater = bar.children.length;
+""")
+    assert result["topLevelError"] is None
+    assert result["labels"] == ["Re-run with edits", "Plain"]
+    assert result["afterNo"] == []
+    assert result["sent"] == [{"type": "button", "label": "Re-run with edits"},
+                              {"type": "button", "label": "Plain"}]
+    question = "Re-run with the saved edits? The session stops and starts again."
+    assert result["confirms"] == [question, question]
+    assert result["viewer"] == 0 and result["viewerLater"] == 0
+
+
+# A box reaching into the future (v1.3.0, found in the user's check of Part 3): the
+# library's coordinateToTime answers only where it has a candle, so a drag that read
+# a time for the box's far edge gave up, and the box could not be resized at all.
+_ONLY_ON_CANDLES = """
+ev('mainChart').timeScale().coordinateToTime = x =>        // as lightweight-charts does
+  (x >= 0 && x <= 90 ? 1000 + Math.round(x / 10) * 300 : null);
+"""
+
+
+def test_a_box_reaching_past_the_last_candle_can_be_resized():
+    result = _edits("""
+init({drawings: [box({editable: ['price'], time2: 1000 + 12 * 300}),          // to x 120
+                 box({id: 'free', time1: 1600, time2: 4600, price1: 99, price2: 97})]});
+""" + _ONLY_ON_CANDLES + """
+press(70, 100); dragTo(70, 80); release();       // the price-only box's top edge, up 2
+const top = lastSent('drawing_updated').drawing;
+out.priceOnly = [top.time1, top.time2, top.price1, top.price2];
+
+press(120, 20); dragTo(140, 20); release();      // the other box's right edge, further out
+const right = lastSent('drawing_updated').drawing;
+out.further = [right.time1, right.time2, right.price1, right.price2];
+""")
+    assert result["topLevelError"] is None
+    assert result["priceOnly"] == [1600, 4600, 92, 80]      # its edges past the candles kept
+    assert result["further"] == [1600, 5200, 99, 97]        # 3700 + 50 px at 30 s a pixel
+
+
+def test_a_corner_drag_keeps_the_edges_it_does_not_move():
+    result = _edits("""
+init({drawings: [box({time1: 1650, time2: 2750, price1: 90.25, price2: 80.125})]});
+""" + _ONLY_ON_CANDLES + """
+press(60, 98); dragTo(70, 90); release();        // the top-right corner
+const d = lastSent('drawing_updated').drawing;
+out.after = [d.time1, d.time2, d.price1, d.price2];
+""")
+    after = result["after"]
+    assert (after[0], after[3]) == (1650, 80.125)           # left and bottom exactly as they were
+    assert after[1] == 3100 and after[2] == 91
+
+
+def test_a_box_edge_can_be_grabbed_away_from_its_handles():
+    """A zone reaching into the future has its middle handles off the screen: its
+    edges answer anywhere along them (v1.3.0, the user's check of Part 3)."""
+    result = _edits("""
+init({drawings: [box({editable: ['price']})]});      // x 20 to 60, y 100 to 200
+out.alongTop  = ev('hitTest(30, 101)');              // between the handles at 20 and 40
+out.alongLeft = ev('hitTest(20, 130)');              // a time edge, and this box is price only
+press(30, 101); dragTo(30, 80); release();
+const d = lastSent('drawing_updated').drawing;
+out.after = [d.time1, d.time2, d.price1, d.price2];
+""")
+    assert result["alongTop"] == {"id": "zone", "handle": "tc"}
+    assert result["alongLeft"] is None
+    assert result["after"] == [1600, 2800, 92, 80]
+
+
+def test_a_view_address_without_its_view_opens_the_page():
+    """A ChartPage's frame is ``/view?view=<id>``.  Typed without the view — the
+    user's check of Part 4: ``/view?key=…`` stayed blank — it opens the page, with
+    the key; a frame, and a chart served on its own, stay where they are."""
+    go = ("ctx.location.pathname = '/view';\n"
+          "ctx.location.replace = u => { ctx.__replaced = u; };\n")
+    read = "out.to = ctx.__replaced === undefined ? null : ctx.__replaced;"
+    keyed = _run(CHART_HTML, read, extra_globals=go + "ctx.location.search = '?key=s 3';\n")
+    bare = _run(CHART_HTML, read, extra_globals=go)
+    framed = _run(CHART_HTML, read,
+                  extra_globals=go + "ctx.location.search = '?view=v1&key=k';\n")
+    alone = _run(CHART_HTML, read, extra_globals=go.replace("'/view'", "'/'")
+                 + "ctx.location.search = '?key=k';\n")
+    assert keyed["to"] == "/?key=s%203"
+    assert bare["to"] == "/"
+    assert framed["to"] is None and alone["to"] is None
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Part 4b — go to a date and time, the brand, the countdown
+# ---------------------------------------------------------------------------
+
+#: 200 five-minute candles from T0; `chart` is the main chart's stub.
+_TOOLS_INIT = """
+const T0 = 1793000100;
+const bars = [];
+for (let i = 0; i < 200; i++) {
+  bars.push({time: T0 + i * 300, open: 1, high: 2, low: 0.5, close: 1.5 + (i % 2) * 0.1,
+             volume: 1});
+}
+ev('handleMsg')({type: 'init', title: 'BTC', bars, indicators: [], drawings: [],
+                 timeframes: ['5m'], sourceTimeframe: '5m', displayTimeframe: '5m'});
+const chart = mainChartStub();
+let cross = null;
+chart.setCrosshairPosition = (price, time) => { cross = [price, time]; };
+const status = () => document.getElementById('sbmsg').textContent;
+"""
+
+
+def _utc_minute(sec: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(sec, timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def test_go_to_centres_the_candle_that_holds_the_time_at_the_zoom_the_chart_has():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+chart._state.logical = {from: 10, to: 70};             // a view 60 candles wide
+ctx.__toParent.length = 0;
+ev('goToTime')(T0 + 120 * 300 + 170, {announce: true});  // 2 min 50 s into candle 120
+out.range = chart._state.logical;
+out.cross = cross;
+out.told = ctx.__toParent.filter(m => m.t === 'navigate');
+out.status = status();
+""", extra_globals=_EMBED_SYNC)
+    t0 = 1793000100
+    assert result["topLevelError"] is None
+    assert result["range"] == {"from": 90, "to": 150}          # candle 120 in the middle
+    assert result["cross"] == [1.5, t0 + 120 * 300]           # the crosshair on it
+    assert result["told"] == [{"view": "v2", "t": "navigate", "time": t0 + 120 * 300 + 170,
+                               "keep": True}]
+    assert result["status"] == ""
+
+
+def test_go_to_before_the_first_after_the_last_and_past_the_replay():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+ev('goToTime')(T0 - 86400);
+out.before = [chart._state.logical, status()];
+ev('goToTime')(T0 + 400 * 300);
+out.after = [chart._state.logical, status()];
+ev('replay').active = true;
+ev('replay').shown = bars.slice(0, 50);
+ev('goToTime')(T0 + 80 * 300);
+out.replay = [chart._state.logical, status()];
+""")
+    t0 = 1793000100
+    before, after, replay = result["before"], result["after"], result["replay"]
+    assert before == [{"from": -50, "to": 50},
+                      f"{_utc_minute(t0 - 86400)} is before the first candle on this chart "
+                      f"({_utc_minute(t0)})"]
+    assert after == [{"from": 149, "to": 249},
+                     f"{_utc_minute(t0 + 400 * 300)} is after the last candle on this chart "
+                     f"({_utc_minute(t0 + 199 * 300)})"]
+    assert replay == [{"from": -1, "to": 99},
+                      f"the replay has not reached {_utc_minute(t0 + 80 * 300)}"]
+
+
+def test_a_go_to_relayed_by_the_shell_keeps_this_charts_zoom_and_is_not_sent_back():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+chart._state.logical = {from: 0, to: 20};
+ctx.__toParent.length = 0;
+(docListeners.message || []).forEach(fn => fn({source: ctx.window.parent,
+  data: {t: 'navigate', time: T0 + 100 * 300, keep: true}}));
+out.range = chart._state.logical;
+out.sentBack = ctx.__toParent.filter(m => m.t === 'navigate');
+""", extra_globals=_EMBED_SYNC)
+    assert result["range"] == {"from": 90, "to": 110}
+    assert result["sentBack"] == []
+
+
+def test_the_shell_relays_a_go_to_with_keep():
+    result = _run(PAGE_HTML, _SETTLE + """
+clearAll();
+fromFrame('v1', {t: 'navigate', time: 1700001234, keep: true});
+out.v2 = win('v2')._posted.slice();
+""", extra_globals=_LAYOUT)
+    assert result["v2"] == [{"t": "navigate", "time": 1700001234, "keep": True}]
+
+
+def test_alt_g_opens_go_to_at_the_middle_of_the_view_and_enter_goes():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+chart._state.logical = {from: 40, to: 60};
+const box = document.getElementById('goto-box');
+const input = document.getElementById('goto-at');
+fire('keydown', document.body, {altKey: true, code: 'KeyG', key: 'g', preventDefault() {}});
+out.open = box.classList.contains('open');
+out.value = input.value;
+input.value = ev('gotoValue')(T0 + 30 * 300 + 60);
+ev('onGotoKey')({key: 'Enter', preventDefault() {}});
+out.afterEnter = [box.classList.contains('open'), chart._state.logical];
+fire('keydown', document.body, {altKey: true, code: 'KeyG', key: 'g', preventDefault() {}});
+ev('onGotoKey')({key: 'Escape', preventDefault() {}});
+out.afterEscape = box.classList.contains('open');
+input.value = 'not a time';
+ev('gotoSubmit')();
+out.bad = status();
+out.parsed = [ev('gotoParse')('2026-10-26T18:00'), ev('gotoParse')('')];
+""")
+    t0 = 1793000100
+    assert result["open"] is True
+    assert result["value"] == _utc_minute(t0 + 50 * 300).replace(" ", "T")
+    assert result["afterEnter"] == [False, {"from": 20, "to": 40}]   # candle 30, 20 wide
+    assert result["afterEscape"] is False
+    assert result["bad"] == "Go to: that is not a date and a time"
+    assert result["parsed"] == [1793037600, None]
+
+
+def test_the_countdown_reads_minutes_hours_and_days():
+    result = _run(CHART_HTML, """
+const f = ev('countdownText');
+out.texts = [f(228000), f(9011000), f(((2 * 24 + 4) * 3600 + 20 * 60 + 11) * 1000),
+             f(0), f(-5000), f(59999)];
+""")
+    assert result["texts"] == ["3:48", "2:30:11", "2d 04:20:11", "0:00", "0:00", "0:59"]
+
+
+_COUNTDOWN_STAGE = """
+const last = bars[bars.length - 1];
+const closeMs = (last.time + 300) * 1000;
+const clockAt = left => ev('handleMsg')({type: 'clock', now: closeMs - left});
+ev('mainChart').priceScale = () => ({width: () => 60});
+ev('mainSeries').priceToCoordinate = () => 120;
+ev('panes').main.paneWrap.getBoundingClientRect =
+  () => ({left: 0, top: 40, right: 800, bottom: 440, width: 800, height: 400});
+const tag = document.getElementById('cd-tag');
+const look = () => { ev('updateCountdown')();
+  return tag.style.display === 'block' ? [tag.textContent, tag.style.left, tag.style.top,
+                                           tag.style.width, tag.style.background] : null; };
+"""
+
+
+def test_the_countdown_shows_under_the_last_price_once_the_feeds_clock_is_known():
+    result = _run(CHART_HTML, _TOOLS_INIT + _COUNTDOWN_STAGE + """
+out.noClock = look();
+clockAt(228500);                                  // 3:48 left, with half a second to spare
+out.shown = look();
+clockAt(-30000);                                  // closed 30 s ago, no new candle yet
+out.justClosed = look();
+clockAt(-90000);                                  // closed a minute and a half ago: shut
+out.shut = look();
+clockAt(228500);
+ev('onCountdownToggle')(false);
+out.off = [look(), ctx.__store['atk.chart.countdown.v1']];
+ev('onCountdownToggle')(true);
+ev('replay').active = true;
+out.replay = look();
+""", extra_globals=_STORAGE + _EMBED_SYNC)
+    assert result["topLevelError"] is None
+    assert result["noClock"] is None
+    # 1.6 is the last close, over its open: the up colour; 12px font → 17px tall
+    assert result["shown"] == ["3:48", "740px", "168.5px", "60px", "#3fb950"]
+    assert result["justClosed"][0] == "0:00"
+    assert result["shut"] is None
+    assert result["off"] == [None, "0"]
+    assert result["replay"] is None
+
+
+def test_the_countdown_switch_is_kept_and_travels_with_the_colours():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+out.atStart = [ev('countdownOn'), document.getElementById('stog-countdown').checked];
+ctx.__store['atk.chart.countdown.v1'] = '1';      // another chart of the page switched it on
+(docListeners.message || []).forEach(fn => fn({source: ctx.window.parent,
+  data: {t: 'style'}}));
+out.relayed = ev('countdownOn');
+""", extra_globals=_STORAGE + _EMBED_SYNC + "ctx.__store['atk.chart.countdown.v1'] = '0';\n")
+    assert result["atStart"] == [False, False]
+    assert result["relayed"] is True
+
+
+def test_a_picture_never_shows_the_countdown():
+    result = _run(CHART_HTML, _TOOLS_INIT + """
+ev('handleMsg')({type: 'clock', now: (bars[199].time + 100) * 1000});
+out.now = ev('countdownNow')();
+""", extra_globals="ctx.location.search = '?snapshot=1&from=1&to=2&tz=UTC';\n")
+    assert result["now"] is None
+
+
+def test_the_brand_opens_the_repository_in_a_new_tab_on_both_pages():
+    from html.parser import HTMLParser
+
+    class Find(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.logo = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id") == "logo":
+                self.logo = (tag, attrs)
+
+    for page in (CHART_HTML, PAGE_HTML):
+        finder = Find()
+        finder.feed(page.read_text(encoding="utf-8"))
+        tag, attrs = finder.logo
+        assert tag == "a"
+        assert attrs["href"] == "https://github.com/AmirMohammadBazdar/AlgoTradeKit"
+        assert attrs["target"] == "_blank" and "noopener" in attrs["rel"]
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Part 4c — time zones, the countdown's ink, the replay, running ends,
+# room after the last candle, the fib, the menu on the viewer's own drawings
+# ---------------------------------------------------------------------------
+
+#: 2026-10-30 22:45 as MetaTrader stamps it (EET): 20:45 UTC, 00:15 in Tehran.
+_STAMP = 1_793_400_300
+
+
+def test_the_programs_zones_label_the_times_and_only_then_are_formatters_applied():
+    result = _run(CHART_HTML, f"""
+const init = extra => ev('handleMsg')(Object.assign({{type: 'init', title: 'XAU',
+  bars: [{{time: {_STAMP}, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1}}],
+  indicators: [], drawings: [], timeframes: []}}, extra));
+init({{}});
+out.utc = [ev('zonesActive')(), ev('zoneTickLabel')({_STAMP}, 3)];
+const applied = () => ctx.__applied.flat()
+  .filter(o => o.timeScale && o.timeScale.tickMarkFormatter).length;
+out.formattersAtUtc = applied();
+init({{timezone: 'Asia/Tehran', sourceTimezone: 'Europe/Athens'}});
+out.zoned = [ev('zones'), ev('zoneTickLabel')({_STAMP}, 3), ev('zoneTimeLabel')({_STAMP}),
+             ev('gotoValue')({_STAMP}), ev('gotoParse')('2026-10-31T00:15')];
+out.formattersZoned = applied() > 0;
+out.note = document.getElementById('sz-source-note').textContent;
+ev('streamBar')({{time: {_STAMP}, open: 1, high: 2, low: 0.5, close: 1.6, volume: 2}});
+out.updated = document.getElementById('lupd').textContent;
+""", extra_globals=_RECORD_OPTIONS)
+    assert result["topLevelError"] is None
+    assert result["utc"] == [False, "22:45"]
+    assert result["formattersAtUtc"] == 0
+    zones, tick, cross, field, back = result["zoned"]
+    assert zones == {"source": "Europe/Athens", "display": "Asia/Tehran"}
+    assert (tick, cross, field, back) == ("00:15", "31 Oct '26 00:15", "2026-10-31T00:15", _STAMP)
+    assert result["formattersZoned"] is True
+    assert result["note"].startswith("Set by the program (Europe/Athens).")
+    assert re.fullmatch(r"⟳ \d\d:\d\d:\d\d", result["updated"])   # 24 h, the zone shown
+
+
+def test_a_viewers_zones_are_kept_and_travel_to_the_pages_other_charts():
+    result = _run(CHART_HTML, f"""
+ev('handleMsg')({{type: 'init', title: 'XAU', bars: [{{time: {_STAMP}, open: 1, high: 2,
+  low: 0.5, close: 1.5, volume: 1}}], indicators: [], drawings: [], timeframes: [],
+  sourceTimezone: 'Europe/Athens'}});
+document.getElementById('sz-source').value = 'Europe/Athens';
+document.getElementById('sz-display').value = 'Asia/Tehran';
+ctx.__toParent.length = 0;
+ev('onZoneChange')();
+out.stored = JSON.parse(ctx.__store['atk.chart.zones.v1']);
+out.relayed = ctx.__toParent.filter(m => m.t === 'style').length;
+out.clock = (ev('replay').active = true, ev('replay').cursor = {_STAMP}, ev('updateReplayUI')(),
+             document.getElementById('rp-clock').textContent);
+ctx.__store['atk.chart.zones.v1'] = JSON.stringify({{display: 'UTC'}});
+(docListeners.message || []).forEach(fn => fn({{source: ctx.window.parent, data: {{t: 'style'}}}}));
+out.afterRelay = ev('zones');
+""", extra_globals=_STORAGE + _EMBED_SYNC)
+    assert result["topLevelError"] is None
+    assert result["stored"] == {"display": "Asia/Tehran"}     # the source was the program's
+    assert result["relayed"] == 1
+    assert result["clock"] == "2026-10-31 00:15 Asia/Tehran"
+    assert result["afterRelay"] == {"source": "Europe/Athens", "display": "UTC"}
+
+
+def test_a_picture_reads_its_zones_from_its_address():
+    result = _run(CHART_HTML, f"""
+out.label = ev('snapParts')({_STAMP});
+""", extra_globals="ctx.location.search = '?snapshot=1&from=1&to=2&tz=Asia%2FTehran"
+                   "&stz=Europe%2FAthens';\n")
+    assert (result["label"]["hour"], result["label"]["minute"], result["label"]["day"]) == (
+        "00", "15", "31")
+
+
+def test_the_countdowns_ink_is_the_higher_contrast():
+    result = _run(CHART_HTML, """
+const ink = ev('tagInk');
+out.inks = ['#cca300', '#ffff00', '#d4a017', '#3fb950', '#1f6feb', '#f85149', '#0d1117']
+  .map(c => [c, ink(c)]);
+""")
+    assert dict(result["inks"]) == {"#cca300": "#000000", "#ffff00": "#000000",
+                                    "#d4a017": "#000000", "#3fb950": "#000000",
+                                    "#1f6feb": "#ffffff", "#f85149": "#000000",
+                                    "#0d1117": "#ffffff"}
+
+
+def test_the_chart_keeps_room_after_its_last_candle():
+    result = _run(CHART_HTML, "out.room = [ev('tOpts')().timeScale.rightOffset];")
+    assert result["room"] == [8]
+
+
+def test_in_a_replay_your_drawings_stay_and_an_open_trade_shows_its_planned_rr():
+    result = _edits("""
+init({drawings: [box({id: 'mine', time1: 3100, time2: 3700, source: 'user'}),
+                 {type: 'position_box', id: 'trade', open_time: 1300, close_time: 3400,
+                  entry_price: 90, stop_loss: 89, label: '✓ TP  +2.00R',
+                  planned_label: 'L  1:2.0R'}]});
+ev('replay').active = true; ev('replay').cursor = 2200;
+ev('replay').shown = ctx.__bars.slice(0, 5);
+const vis = Object.fromEntries(ev('replayVisibleDrawings')().map(d => [d.id, d]));
+out.mine = [vis.mine.time1, vis.mine.time2];
+out.trade = [vis.trade.close_time, vis.trade.label];
+""")
+    assert result["mine"] == [3100, 3700]                    # past the cursor, whole
+    assert result["trade"] == [2200, "L  1:2.0R"]            # cut, its plan, not its result
+
+
+def test_a_running_drawing_ends_five_candles_past_the_last_and_keeps_running():
+    result = _edits("""
+init({drawings: [box({editable: ['price'], time2: null})]});
+out.drawnTo = ev('liveEnded')(ev('drawings').zone).time2;   // 3700 + 5 × 300
+press(70, 100); dragTo(70, 80); release();                   // its top edge, up 2
+const d = ev('drawings').zone;
+out.after = [d.time2, d.price1];
+out.trade = ev('liveEnded')({type: 'position_box', open_time: 3000, close_time: null}).close_time;
+""")
+    assert result["drawnTo"] == 5200
+    assert result["after"] == [None, 92]                     # still running, moved
+    assert result["trade"] == 5200
+
+
+def test_a_running_box_stays_running_unless_its_end_is_dragged_and_is_never_trimmed():
+    result = _edits("""
+init({drawings: [box({id: 'run', time2: null, source: 'user'})]});
+press(40, 100); dragTo(40, 80); release();                   // its top edge: a price
+out.top = [ev('drawings').run.time2, ev('drawings').run.price1];
+press(40, 150); dragTo(30, 150); release();                  // inside: moved, still running
+out.moved = [ev('drawings').run.time1, ev('drawings').run.time2];
+out.kept = ev('drawingEndTime')(ev('drawings').run);
+press(140, 150); dragTo(80, 150); release();                 // its right edge (x 140): fixed
+out.ended = ev('drawings').run.time2;
+""")
+    assert result["topLevelError"] is None
+    assert result["top"] == [None, 92]
+    assert result["moved"] == [1300, None]                   # 10 px left = 300 s earlier
+    assert result["kept"] is None
+    assert result["ended"] == 3400                           # x 80
+
+
+def test_a_fib_resizes_from_its_other_corners_and_takes_its_own_levels():
+    result = _edits("""
+init({drawings: [{type: 'fib', id: 'f', time1: 1600, price1: 90, time2: 2800, price2: 80,
+                  color: '#9c27b0', levels: [0, 0.5, 1], source: 'user', locked: false}]});
+out.corner = ev('hitTest(60, 100)');                 // (time2, price1): the 3rd corner
+press(60, 100); dragTo(70, 90); release();
+const f = ev('drawings').f;
+out.afterCorner = [f.time2, f.price1, f.time1, f.price2];
+ctx.prompt = () => '0, 50, 100, 200';
+rightClick('draw-cv', 45, 150);
+out.levelsShown = shown('ctx-levels-row');
+ev('ctxFibLevels')();
+out.levels = ev('drawings').f.levels;
+out.sent = lastSent('drawing_updated').drawing.levels;
+ev('onFibLevelsChange')('0, 61.8, 100');
+out.defaults = [ev('fibLevels'), ctx.__store['atk.chart.fib.v1']];
+out.parsed = [ev('parseFibLevels')('0 50 100 200'), ev('parseFibLevels')('a, 50')];
+""", extra_globals=_STORAGE)
+    assert result["corner"] == {"id": "f", "handle": "c3"}
+    assert result["afterCorner"] == [3100, 91, 1600, 80]     # 10 px up = 1.0
+    assert result["levelsShown"] == ""
+    assert result["levels"] == [0, 0.5, 1, 2] and result["sent"] == [0, 0.5, 1, 2]
+    assert result["defaults"] == [[0, 0.618, 1], "0, 61.8, 100"]
+    assert result["parsed"] == [[0, 0.5, 1, 2], None]
+
+
+def test_the_programs_items_show_on_your_drawings_only_and_send_the_drawing():
+    result = _edits("""
+init({drawingActions: ['Make it a buy POI', 'Make it a sell POI'],
+      drawings: [box({id: 'mine', source: 'user'}),
+                 box({id: 'theirs', time1: 2500, time2: 3700, price1: 70, price2: 60})]});
+const rows = () => document.getElementById('ctx-dactions').children
+  .filter(c => c.className === 'mi').map(c => c.textContent);
+rightClick('draw-cv', 40, 150);                       // mine
+out.mine = rows();
+document.getElementById('ctx-dactions').children.filter(c => c.className === 'mi')[0].onclick();
+const sent = lastSent('drawing_action');
+out.sent = [sent.label, sent.drawing.id];
+rightClick('draw-cv', 70, 350);                       // theirs (x 50–90, y 300–400)
+out.theirs = rows();
+ev('canEdit = false');
+rightClick('draw-cv', 40, 150);
+out.viewer = rows();
+""")
+    assert result["mine"] == ["Make it a buy POI", "Make it a sell POI"]
+    assert result["sent"] == ["Make it a buy POI", "mine"]
+    assert result["theirs"] == []
+    assert result["viewer"] == []
+
+
+def test_the_pages_replay_clock_reads_the_zones_of_the_chart_in_use():
+    result = _run(PAGE_HTML, _SETTLE + f"""
+ev('replayToggle()');
+['v1', 'v2', 'v3'].forEach(id => fromFrame(id, {{t: 'replay-info', first: {_STAMP - 3600},
+                                                 last: {_STAMP + 3600}, step: 300, tf: 300}}));
+fromFrame('v1', {{t: 'replay-pick', time: {_STAMP}}});
+out.utc = document.getElementById('rp-clock').textContent;
+fromFrame('v2', {{t: 'zones', source: 'Europe/Athens', display: 'Asia/Tehran'}});
+fromFrame('v1', {{t: 'zones', source: 'UTC', display: 'UTC'}});
+fromFrame('v1', {{t: 'focus'}});
+out.v1 = document.getElementById('rp-clock').textContent;
+fromFrame('v2', {{t: 'focus'}});
+out.v2 = document.getElementById('rp-clock').textContent;
+""", extra_globals=_LAYOUT)
+    assert result["topLevelError"] is None
+    assert result["utc"] == "2026-10-30 22:45 UTC"
+    assert result["v1"] == "2026-10-30 22:45 UTC"
+    assert result["v2"] == "2026-10-31 00:15 Asia/Tehran"
+
+
+# ---------------------------------------------------------------------------
+# v1.3.0 Part 4d — the zone lists: the offset first, then the city, by offset
+# ---------------------------------------------------------------------------
+
+def test_the_zone_lists_show_the_offset_first_and_go_by_it():
+    result = _run(CHART_HTML, f"""
+ev('handleMsg')({{type: 'init', title: 'XAU', bars: [{{time: {_STAMP}, open: 1, high: 2,
+  low: 0.5, close: 1.5, volume: 1}}], indicators: [], drawings: [], timeframes: [],
+  sourceTimezone: 'Europe/Athens'}});
+const list = ev('zoneChoices')({_STAMP} * 1000);              // 2026-10-30
+const label = z => (list.find(c => c.zone === z) || {{}}).label;
+out.labels = ['UTC', 'Asia/Tehran', 'Europe/Athens', 'America/St_Johns', 'Asia/Kathmandu',
+              'America/Argentina/Buenos_Aires', 'Asia/Dubai', 'Europe/Kyiv'].map(label);
+out.oldNames = list.filter(c => /Kiev|Calcutta|Katmandu|Saigon/.test(c.label + c.zone)).length;
+out.bratislava = label('Europe/Bratislava');          // its own city, though Prague's rules
+out.inOrder = list.every((c, i) => i === 0 || list[i - 1].offset < c.offset
+  || (list[i - 1].offset === c.offset && list[i - 1].city.localeCompare(c.city) <= 0));
+out.ends = [list[0].label.slice(0, 3), list[list.length - 1].label.slice(0, 6)];
+out.beforeSettings = document.getElementById('sz-source').children.length;   // not yet
+ev('toggleSettings')();
+const options = document.getElementById('sz-source').children;
+const tehran = options.find(o => o.value === 'Asia/Tehran');
+out.option = [options.length === list.length, tehran.textContent.slice(7), tehran.title,
+              document.getElementById('sz-source').value];
+""")
+    assert result["topLevelError"] is None
+    assert result["labels"] == ["+00:00 UTC", "+03:30 Tehran", "+02:00 Athens",
+                                "-02:30 St Johns", "+05:45 Kathmandu", "-03:00 Buenos Aires",
+                                "+04:00 Dubai", "+02:00 Kyiv"]
+    assert result["oldNames"] == 0                       # ICU's old names, shown as today's
+    assert result["bratislava"] == "+01:00 Bratislava"
+    assert result["inOrder"] is True
+    assert result["ends"] == ["-11", "+14:00"]
+    assert result["beforeSettings"] == 0                 # filled when Settings first opens
+    assert result["option"] == [True, "Tehran", "Asia/Tehran", "Europe/Athens"]
+
+
+# ---------------------------------------------------------------------------
+# index.html / page.html — copy and paste a drawing (v1.3.0, Part 4f)
+# ---------------------------------------------------------------------------
+# Ctrl+C and Ctrl+V reach a page as copy and paste events whose clipboardData
+# carries text both ways; a page served over plain http has no clipboard API.
+# `clip.text` stands for the PC's clipboard. The example: XAUUSD 5m on 2026-11-10,
+# candle i at x = 10 i, price p at y = (4060 - p) * 10.
+
+_CLIP = """
+const clip = {text: ''};
+const clipEvent = (type, target) => {
+  const e = {prevented: false};
+  fire(type, target || document.body, {
+    clipboardData: {setData: (t, v) => { if (t === 'text/plain') clip.text = v; },
+                    getData: t => (t === 'text/plain' ? clip.text : '')},
+    preventDefault: () => { e.prevented = true; },
+  });
+  return e;
+};
+const copyKey = target => clipEvent('copy', target);
+const pasteKey = target => clipEvent('paste', target);
+const mine = () => Object.values(ev('drawings')).filter(d => d.source === 'user');
+const status = () => document.getElementById('sbmsg').textContent;
+const T0 = Date.UTC(2026, 10, 10, 6, 0) / 1000;                  // 06:00
+const at = (h, m) => T0 + ((h - 6) * 60 + m) * 60;
+const xOf = (h, m) => (at(h, m) - T0) / 30;
+const yOf = p => (4060 - p) * 10;
+const xau = [];
+for (let i = 0; i < 84; i++) xau.push({time: T0 + i * 300, open: 4025, high: 4030, low: 4020,
+                                       close: 4026, volume: 1});
+const stage = (drawings, extra = {}) => {
+  init(Object.assign({bars: xau, drawings}, extra));
+  const chart = mainChartStub();
+  chart._state.barTimes = xau.map(b => b.time);
+  const scale = chart.timeScale();
+  scale.coordinateToTime = x => {
+    const i = Math.round(x / 10);
+    return i >= 0 && i < xau.length ? xau[i].time : null;
+  };
+  scale.coordinateToLogical = x => x / 10;
+  const series = ev('mainSeries');
+  series.priceToCoordinate = p => (4060 - p) * 10;
+  series.coordinateToPrice = y => 4060 - y / 10;
+};
+// The program's sell POI from 08:00 to 09:00, 4,010.20–4,015.80: locked, keyed
+const poi = (extra = {}) => Object.assign({type: 'box', id: 'poi', time1: at(8, 0),
+  price1: 4015.80, time2: at(9, 0), price2: 4010.20, color: '#f85149', borderColor: '#f85149',
+  opacity: 0.2, label: 'Sell POI', title: 'Sell POI 4010.2–4015.8', key: 'poi:sell:1',
+  locked: true, editable: ['price'], deletable: false, source: 'server'}, extra);
+const r2 = v => Math.round(v * 100) / 100;
+"""
+
+
+def _clip(body: str, extra_globals: str = "") -> dict:
+    return _edits(_CLIP + body, extra_globals=_STORAGE + extra_globals)
+
+
+def test_ctrl_c_copies_the_selected_drawing_and_ctrl_v_pastes_it_where_it_was():
+    result = _clip("""
+stage([poi()]);
+out.nothingSelected = copyKey().prevented;
+press(xOf(8, 30), yOf(4013));                    // inside the POI: locked, but selected
+out.selected = ev('selectedId');
+out.copied = copyKey().prevented;
+out.text = JSON.parse(clip.text);
+out.stored = ctx.__store['atk.chart.clipboard.v1'] === clip.text;
+out.copyStatus = status();
+const p = pasteKey();
+out.pasted = p.prevented;
+const copy = mine()[0];
+out.copy = copy;
+out.copySelected = ev('selectedId') === copy.id;
+out.told = lastSent('drawing_updated').drawing.id === copy.id;
+out.pasteStatus = status();
+ev("setTool('fib')"); ev("draftState = {tool: 'fib', time1: 1794294000, price1: 4040}");
+pasteKey();                                      // a half-made Fib goes first
+out.tool = [ev('activeTool'), ev('draftState')];
+out.copies = mine().map(d => d.id);
+out.original = ['key', 'title', 'locked', 'source'].map(k => ev('drawings').poi[k]);
+""")
+    assert result["topLevelError"] is None
+    assert result["nothingSelected"] is False            # the browser's own copy
+    assert result["selected"] == "poi"
+    assert result["copied"] is True
+    assert result["text"] == {"atk": "drawing", "v": 1, "drawing": {
+        "type": "box", "time1": 1794297600, "price1": 4015.8, "time2": 1794301200,
+        "price2": 4010.2, "color": "#f85149", "opacity": 0.2, "borderColor": "#f85149",
+        "label": "Sell POI"}}                            # 08:00–09:00: its look, not its key
+    assert result["stored"] is True
+    assert result["copyStatus"] == ("Copied: box — Ctrl+V pastes it; right-click the chart → "
+                                    "Paste here")
+    assert result["pasted"] is True
+    copy = result["copy"]
+    assert re.fullmatch(r"box_\d+", copy["id"])
+    assert {k: copy[k] for k in ("time1", "price1", "time2", "price2", "locked", "source")} == {
+        "time1": 1794297600, "price1": 4015.8, "time2": 1794301200, "price2": 4010.2,
+        "locked": False, "source": "user"}               # where it was, yours
+    assert not {"key", "title", "editable", "deletable"} & set(copy)
+    assert result["copySelected"] is True and result["told"] is True
+    assert result["pasteStatus"] == "Pasted: box"
+    assert result["tool"] == ["cursor", None]
+    assert len(set(result["copies"])) == 2               # each paste a new copy
+    assert result["original"] == ["poi:sell:1", "Sell POI 4010.2–4015.8", True, "server"]
+
+
+def test_paste_here_puts_each_kind_at_the_click_and_keeps_its_size():
+    """Q4f.1 (c): a right-click at 11:27 and 4,031.00 → «📋 Paste here»."""
+    result = _clip("""
+stage([poi(),
+  {type: 'fib', id: 'fib', time1: at(6, 0), price1: 4050, time2: at(7, 30), price2: 4000,
+   color: '#9c27b0', levels: [0, 0.382, 0.618, 1], source: 'user', locked: false},
+  {type: 'hline', id: 'level', price: 4045, color: '#ef5350', lineWidth: 1, lineStyle: 2,
+   label: 'H', source: 'user', locked: false},
+  {type: 'text', id: 'note', time: at(7, 0), price: 4055, text: 'look', color: '#e6edf3',
+   fontSize: 12, source: 'user', locked: false},
+  {type: 'position_box', id: 'plan', open_time: at(9, 30), close_time: at(10, 30),
+   entry_price: 4040, stop_loss: 4035, visual_tp: 4050, profit_color: '#3fb950',
+   loss_color: '#f85149', opacity: 0.15, direction: 'long', label: 'L  1:2.0R',
+   source: 'user', locked: false},
+  {type: 'trendline', id: 'order', time1: at(10, 0), price1: 4045, time2: null, price2: 4035,
+   color: '#2196f3', lineWidth: 1, label: 'SL', source: 'server', locked: true}]);
+const pasteHere = id => {
+  ev('copyDrawing')(id);
+  rightClick('panes', xOf(11, 27), yOf(4031));
+  const items = document.getElementById('candle-menu').children;
+  out.item = items[0].textContent;
+  items[0].onclick();
+  const d = ev('drawings')[ev('selectedId')];
+  ev(`delete drawings[${JSON.stringify(d.id)}]`);        // out of the next click's way
+  return d;
+};
+const zone = pasteHere('poi');
+out.box = [zone.time1 - at(11, 25), zone.time2 - at(12, 25), r2(zone.price1), r2(zone.price2)];
+const fib = pasteHere('fib');
+out.fib = [fib.time1 - at(11, 25), fib.time2 - at(12, 55), r2(fib.price1), r2(fib.price2),
+           r2(fib.price1 + (fib.price2 - fib.price1) * 0.618), fib.levels];
+out.hline = pasteHere('level').price;
+const note = pasteHere('note');
+out.text = [note.time - at(11, 25), note.price, note.text];
+const plan = pasteHere('plan');
+out.plan = [plan.open_time - at(11, 25), plan.close_time - at(12, 25), plan.entry_price,
+            plan.stop_loss, plan.visual_tp, plan.label];
+const order = pasteHere('order');
+out.order = [order.time1 - at(11, 25), order.time2, order.price1, order.price2, order.source];
+""")
+    assert result["topLevelError"] is None
+    assert result["item"] == "📋 Paste here"
+    assert result["box"] == [0, 0, 4031.0, 4025.4]          # 11:25–12:25, its top at the click
+    assert result["fib"] == [0, 0, 4031.0, 3981.0, 4000.1, [0, 0.382, 0.618, 1]]
+    assert result["hline"] == 4031
+    assert result["text"] == [0, 4031, "look"]
+    assert result["plan"] == [0, 0, 4031, 4026, 4041, "L  1:2.0R"]
+    assert result["order"] == [0, None, 4031, 4021, "user"]   # still runs to the live edge
+
+
+def test_paste_here_needs_no_key_and_sits_above_the_programs_items():
+    result = _clip("""
+stage([poi({id: 'mine', source: 'user', key: undefined, title: undefined, locked: false})],
+      {actions: ['Mark here']});
+const items = () => document.getElementById('candle-menu').children
+  .map(c => c.tagName === 'HR' ? '—' : c.textContent);
+rightClick('panes', xOf(11, 27), yOf(4031));
+out.before = items();                                      // nothing copied yet
+ev('copyDrawing')('mine');
+rightClick('panes', xOf(11, 27), yOf(4031));
+out.editor = items();
+ev('handleMsg')({type: 'access', edit: false});
+const e = rightClick('panes', xOf(11, 27), yOf(4031));
+out.viewer = [items(), e.prevented];
+document.getElementById('candle-menu').children[0].onclick();
+out.pasted = mine().length;
+""")
+    assert result["topLevelError"] is None
+    assert result["before"] == ["Mark here"]
+    assert result["editor"] == ["📋 Paste here", "—", "Mark here"]
+    assert result["viewer"] == [["📋 Paste here"], True]   # a page without the key pastes too
+    assert result["pasted"] == 2
+
+
+def test_the_menu_copies_any_of_the_six_kinds_and_a_copy_keeps_only_its_look():
+    result = _clip("""
+document.execCommand = cmd => { if (cmd === 'copy') copyKey(); return true; };
+stage([
+  {type: 'position_box', id: 'trade', open_time: at(9, 30), close_time: at(10, 30),
+   entry_price: 4040, stop_loss: 4035, visual_tp: 4050, profit_top: 4050,
+   profit_bottom: 4040, loss_top: 4040, loss_bottom: 4035, profit_color: '#3fb950',
+   loss_color: '#f85149', opacity: 0.15, direction: 'long', net_pnl: 12.5,
+   close_reason: 'tp', trade_id: 7, rr_ratio: 2, label: '✓ TP  +2.00R', planned_tp: 4050,
+   locked: true, source: 'server'},
+  {type: 'trendline', id: 'dotted', time1: at(10, 0), price1: 4045, time2: null, price2: 4045,
+   color: '#2196f3', lineWidth: 1, dots: true, alpha: 0.45, key: 'order:1', locked: true,
+   source: 'server'},
+  {type: 'vline', id: 'restart', time: at(7, 0), label: 'RESTART_AT', source: 'server'},
+  {type: 'signal', id: 'sig', time: at(8, 0), side: 'buy', price: 4021, source: 'server'}],
+  {drawingActions: ['Make it a buy POI', 'Make it a sell POI']});
+rightClick('draw-cv', xOf(10, 15), yOf(4047));             // the trade box, inside
+out.tradeRow = shown('ctx-copy-row');
+ev('ctxCopy')();
+out.tradeText = JSON.parse(clip.text).drawing;
+pasteKey();
+const trade = mine()[0];
+out.tradeCopy = [trade.label, trade.net_pnl, trade.trade_id, trade.close_reason,
+                 trade.direction, trade.profit_top, trade.loss_bottom];
+rightClick('draw-cv', xOf(10, 15), yOf(4047));             // the copy, on top of it
+out.programsItems = document.getElementById('ctx-dactions').children
+  .filter(c => c.className === 'mi').map(c => c.textContent);
+out.badge = document.getElementById('ctx-source-badge').textContent;
+ev('ctxCopy')(); ev('ctxTargetId = "dotted"'); ev('ctxCopy')();
+out.lineText = JSON.parse(clip.text).drawing;
+rightClick('draw-cv', xOf(7, 0), yOf(4040));               // the vertical line
+out.vlineRow = shown('ctx-copy-row');
+clip.text = 'unchanged';
+out.vlineKey = copyKey().prevented;
+rightClick('draw-cv', xOf(8, 0), yOf(4021) + 5);          // the signal arrow
+out.signalRow = shown('ctx-copy-row');
+out.after = clip.text;
+""")
+    assert result["topLevelError"] is None
+    assert result["tradeRow"] == ""
+    assert result["tradeText"] == {
+        "type": "position_box", "open_time": 1794303000, "close_time": 1794306600,
+        "entry_price": 4040, "stop_loss": 4035, "visual_tp": 4050, "profit_color": "#3fb950",
+        "loss_color": "#f85149", "opacity": 0.15}         # no result, no trade number
+    assert result["tradeCopy"] == ["L  1:2.0R", 0, -1, "", "long", 4050, 4035]
+    assert result["programsItems"] == ["Make it a buy POI", "Make it a sell POI"]
+    assert result["badge"] == "User"
+    assert result["lineText"] == {"type": "trendline", "time1": 1794304800, "price1": 4045,
+                                  "time2": None, "price2": 4045, "color": "#2196f3",
+                                  "lineWidth": 1}         # running; a program's dots stay its own
+    assert result["vlineRow"] == "none" and result["vlineKey"] is False
+    assert result["signalRow"] == "none"
+    assert result["after"] == "unchanged"
+
+
+def test_what_is_not_a_drawing_and_text_fields_are_left_to_the_browser():
+    result = _clip("""
+stage([poi({id: 'mine', source: 'user', locked: false, key: undefined})]);
+const tries = {
+  words: 'hello',
+  json: '{"a": 1}',
+  badTime: JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'box', time1: 'x',
+    price1: 1, time2: 2, price2: 3}}),
+  vline: JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'vline', time: 5}}),
+  later: JSON.stringify({atk: 'drawing', v: 2, drawing: {type: 'hline', price: 4031}}),
+};
+out.refused = Object.fromEntries(Object.entries(tries).map(([k, text]) => {
+  clip.text = text;
+  return [k, pasteKey().prevented];
+}));
+clip.text = JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'fib', time1: 10,
+  price1: 4050, time2: 20, price2: 4000, levels: [0, 'x'], color: 5, label: 'F'}});
+pasteKey();
+const fib = mine().find(d => d.type === 'fib');
+out.fib = [fib.levels, fib.color, fib.label];             // what is wrong is left out
+out.count = mine().length;
+
+press(xOf(8, 30), yOf(4013));                             // select the box
+clip.text = 'before';
+out.inField = copyKey({tagName: 'INPUT'}).prevented;
+ctx.window.getSelection = () => ({isCollapsed: false, toString: () => 'Sell POI'});
+out.withText = copyKey().prevented;
+ctx.window.getSelection = () => ({isCollapsed: true, toString: () => ''});
+out.clip = clip.text;
+out.selectedOnly = copyKey().prevented;
+out.pasteInField = pasteKey({tagName: 'TEXTAREA'}).prevented;
+out.countAfter = mine().length;
+""")
+    assert result["topLevelError"] is None
+    assert result["refused"] == {"words": False, "json": False, "badTime": False,
+                                 "vline": False, "later": False}
+    assert result["fib"] == [None, None, "F"]
+    assert result["count"] == 2
+    assert result["inField"] is False and result["withText"] is False
+    assert result["clip"] == "before"
+    assert result["selectedOnly"] is True
+    assert result["pasteInField"] is False
+    assert result["countAfter"] == 2
+
+
+def test_a_click_selects_any_drawing_and_a_click_away_ends_the_selection():
+    result = _clip("""
+stage([poi()]);
+ev('handleMsg')({type: 'access', edit: false});
+press(xOf(8, 30), yOf(4013));                             // the program's, on a viewer's page
+out.selected = [ev('selectedId'), ev('dragState')];
+const away = {button: 0, clientX: xOf(11, 0), clientY: yOf(4031)};
+ctx.__fireOn('panes', 'mousedown', Object.assign({}, away, {button: 2}));
+out.rightKept = ev('selectedId');
+ctx.__fireOn('panes', 'mousedown', away);
+out.cleared = ev('selectedId');
+clip.text = 'kept';
+out.copied = [copyKey().prevented, clip.text];
+""")
+    assert result["topLevelError"] is None
+    assert result["selected"] == ["poi", None]               # selected, never dragged
+    assert result["rightKept"] == "poi"
+    assert result["cleared"] is None
+    assert result["copied"] == [False, "kept"]               # no old selection copied
+
+
+def test_in_a_page_a_chart_passes_ctrl_v_to_the_chart_the_pointer_is_on():
+    result = _clip("""
+stage([poi()]);
+ctx.__toParent.length = 0;
+clip.text = JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'hline', price: 4031,
+  color: '#ef5350'}});
+const passed = pasteKey();
+out.passed = [passed.prevented, mine().length, ctx.__toParent.slice()];
+(docListeners.message || []).forEach(fn =>
+  fn({source: ctx.window.parent, data: {t: 'paste', text: clip.text}}));
+out.fromPage = mine().map(d => [d.type, d.price]);
+ev('hasPointer = true');
+pasteKey();
+out.here = mine().length;
+out.toParent = ctx.__toParent.length;
+""", extra_globals=_EMBED_SYNC)
+    assert result["topLevelError"] is None
+    text = ('{"atk":"drawing","v":1,"drawing":{"type":"hline","price":4031,'
+            '"color":"#ef5350"}}')
+    assert result["passed"] == [True, 0, [{"view": "v2", "t": "paste", "text": text}]]
+    assert result["fromPage"] == [["hline", 4031]]
+    assert result["here"] == 2 and result["toParent"] == 1
+
+
+def test_the_page_passes_a_paste_to_the_chart_in_use():
+    result = _run(PAGE_HTML, _SETTLE + """
+const text = JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'hline', price: 4031}});
+const posted = () => Object.fromEntries(['v1', 'v2', 'v3'].map(id =>
+  [id, win(id)._posted.filter(m => m.t === 'paste').length]));
+fromFrame('v3', {t: 'focus'});
+clearAll();
+fromFrame('v1', {t: 'paste', text});                 // v1 had the keyboard, v3 the pointer
+out.relayed = [posted(), win('v3')._posted[0]];
+clearAll();
+const own = (data, target) => {
+  let prevented = false;
+  fire('paste', target || document.body, {clipboardData: {getData: () => data},
+                                          preventDefault: () => { prevented = true; }});
+  return prevented;
+};
+out.own = [own(text), posted()];
+clearAll();
+out.words = [own('hello'), own(text, {tagName: 'INPUT'}), posted()];
+""", extra_globals=_LAYOUT)
+    assert result["topLevelError"] is None
+    text = '{"atk":"drawing","v":1,"drawing":{"type":"hline","price":4031}}'
+    assert result["relayed"] == [{"v1": 0, "v2": 0, "v3": 1}, {"t": "paste", "text": text}]
+    assert result["own"] == [True, {"v1": 0, "v2": 0, "v3": 1}]
+    assert result["words"] == [False, False, {"v1": 0, "v2": 0, "v3": 0}]
+
+
+def test_a_picture_never_copies_or_pastes():
+    result = _run(CHART_HTML, _CLIP.split("const T0")[0] + """
+ev('handleMsg')({type: 'init', title: 'XAU', bars: [{time: 1794290400, open: 1, high: 2,
+  low: 0.5, close: 1.5, volume: 1}], indicators: [], drawings: [{type: 'hline', id: 'h',
+  price: 1.2, color: '#fff', source: 'user'}]});
+ev('selectedId = "h"');
+clip.text = JSON.stringify({atk: 'drawing', v: 1, drawing: {type: 'hline', price: 1.4}});
+out.keys = [copyKey().prevented, pasteKey().prevented];
+out.drawings = Object.keys(ev('drawings'));
+""", extra_globals="ctx.location.search = '?snapshot=1&from=1794290400&to=1794290460';")
+    assert result["topLevelError"] is None
+    assert result["keys"] == [False, False]
+    assert result["drawings"] == ["h"]
+
+
+def test_a_box_20_px_tall_can_be_grabbed_and_selected_in_its_middle():
+    """Its inside kept 11 px clear of each edge and the edges reach 9 px: a box 18 to
+    22 px tall had a band across its middle that no click reached (Part 4f, found in
+    Chromium on a running zone 21.7 px tall)."""
+    result = _edits("""
+init({drawings: [box({price1: 90, price2: 88, locked: false})]});    // y 100 to 120
+out.middle = ev('hitTest(40, 110)');
+out.edge = ev('hitTest(40, 111)');                  // 11 px below the top: in the band
+out.top = ev('hitTest(40, 101)');
+""")
+    assert result["topLevelError"] is None
+    assert result["middle"] == {"id": "zone", "handle": "interior"}
+    assert result["edge"] == {"id": "zone", "handle": "interior"}
+    assert result["top"] == {"id": "zone", "handle": "tc"}
+
+
+# ---------------------------------------------------------------------------
+# page.html — the page on a phone, and the viewer's own arrangement (v1.3.0, Part 4h)
+# ---------------------------------------------------------------------------
+# _LAYOUT's page: v1 across the top, v2 and v3 side by side under it. The harness's
+# window is 1200 × 900, wide; `upright()` turns it to a phone held upright.
+
+_ARRANGE = """
+// a browser's document forgets a listener; the stub's could not
+document.removeEventListener = (type, fn) => {
+  const list = docListeners[type] || [];
+  if (list.includes(fn)) list.splice(list.indexOf(fn), 1);
+};
+const upright = () => { ctx.window.innerWidth = 390; ctx.window.innerHeight = 844;
+                        fire('resize', ctx.window); };
+const wide = () => { ctx.window.innerWidth = 1200; ctx.window.innerHeight = 900;
+                     fire('resize', ctx.window); };
+const rows = () => ev('rowsNow');
+const KEY = 'atk.page.layout.v2';
+const saved = () => JSON.parse(ctx.__store[KEY] || 'null');
+const rect = (left, top, width, height) => () => ({left, top, width, height});
+const place = () => {                      // v1 across the top, v2 | v3 under it
+  document.getElementById('cell-v1').getBoundingClientRect = rect(0, 34, 1200, 430);
+  document.getElementById('cell-v2').getBoundingClientRect = rect(0, 469, 597, 431);
+  document.getElementById('cell-v3').getBoundingClientRect = rect(602, 469, 598, 431);
+};
+const drag = (id, x, y) => {
+  ev('arrangeStart')({preventDefault() {}, currentTarget: null}, id);
+  fire('pointermove', document.body, {clientX: x, clientY: y});
+  const label = document.getElementById('drop').textContent;
+  fire('pointerup', document.body, {clientX: x, clientY: y});
+  return label;
+};
+"""
+
+
+def _layout_with(**extra) -> str:
+    """_LAYOUT's page with more in its /layout answer."""
+    return _LAYOUT.replace("rows: [['v1'], ['v2', 'v3']],",
+                           "rows: [['v1'], ['v2', 'v3']], " + json.dumps(extra)[1:-1] + ",")
+
+
+def test_upright_a_rows_charts_stack_and_no_frame_is_made_again():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+const made = queryAll('iframe').length;
+const pair = queryAll('.row').find(r => r._cls.has('multi'));
+const handle = queryAll('.cdiv')[0];
+handle.parentElement = pair;
+out.wide = [document.body._cls.has('upright'), ev('dividerIsVertical')(handle)];
+upright();
+out.upright = [document.body._cls.has('upright'), ev('dividerIsVertical')(handle)];
+out.stacked = document.body._cls.has('stacked');
+out.multi = queryAll('.row').filter(r => r._cls.has('multi')).length;
+wide();
+out.back = document.body._cls.has('upright');
+out.framesMade = queryAll('iframe').length - made;
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["topLevelError"] is None
+    assert result["wide"] == [False, False]
+    assert result["upright"] == [True, True]          # stacked: its divider drags up and down
+    assert result["stacked"] is True                   # the default for an upright screen
+    assert result["multi"] == 1                        # the v2 | v3 row
+    assert result["back"] is False
+    assert result["framesMade"] == 0                   # a turn is CSS only
+
+
+def test_a_program_may_keep_its_rows_side_by_side():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+upright();
+out.stacked = document.body._cls.has('stacked');
+""", extra_globals=_layout_with(stackUpright=False) + _STORAGE)
+    assert result["stacked"] is False
+
+
+def test_each_drop_moves_a_chart_where_its_label_says():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+const R = ev('rearranged');
+const base = [['v1'], ['v2', 'v3']];
+out.cases = [R(base, 'v1', 'v3', 'swap'), R(base, 'v1', 'v3', 'left'),
+             R(base, 'v3', 'v2', 'left'), R(base, 'v1', 'v2', 'right'),
+             R(base, 'v3', 'v1', 'above'), R(base, 'v1', 'v2', 'below'),
+             R(base, 'v2', 'v2', 'left')];
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["cases"] == [
+        [["v3"], ["v2", "v1"]],                        # swap
+        [["v2", "v1", "v3"]],                          # beside, on the left
+        [["v1"], ["v3", "v2"]],
+        [["v2", "v1", "v3"]],                          # beside, on the right
+        [["v3"], ["v1"], ["v2"]],                      # above, a row of its own
+        [["v2", "v3"], ["v1"]],                        # below
+        [["v1"], ["v2", "v3"]],                        # onto itself: nothing
+    ]
+
+
+def test_arranging_by_dragging_is_kept_and_reset_forgets_it():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+out.button = document.getElementById('lay-btn').style.display;
+ev('arrangeToggle()');
+out.arranging = document.body._cls.has('arranging');
+place();
+out.labels = [drag('v3', 30, 250)];                    // v1's left side
+out.afterLeft = rows();
+out.saved = saved().rows.wide;
+out.labels.push(drag('v2', 900, 680));                 // v3's middle: swap
+out.afterSwap = rows();
+out.labels.push(drag('v1', 1100, 250));                // onto its own cell: nothing
+out.afterSelf = rows();
+ev('arrangeReset()');
+out.reset = [rows(), saved().rows.wide || null];
+ev('arrangeToggle(false)');
+out.done = document.body._cls.has('arranging');
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["topLevelError"] is None
+    assert result["button"] == "" and result["arranging"] is True
+    assert result["labels"] == ["beside it, on the left", "swap places", ""]
+    assert result["afterLeft"] == [["v3", "v1"], ["v2"]]
+    assert result["saved"] == [["v3", "v1"], ["v2"]]
+    assert result["afterSwap"] == [["v2", "v1"], ["v3"]]
+    assert result["afterSelf"] == [["v2", "v1"], ["v3"]]
+    assert result["reset"] == [[["v1"], ["v2", "v3"]], None]
+    assert result["done"] is False
+
+
+def test_a_kept_arrangement_follows_the_programs_changes():
+    store = json.dumps({"rows": {"wide": [["v3", "gone"], ["v1"]]}})
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+out.rows = rows();
+out.active = queryAll('.cell').filter(c => c._cls.has('active')).map(c => c.id);
+""", extra_globals=_LAYOUT + _STORAGE + f"ctx.__store['atk.page.layout.v2'] = {json.dumps(store)};")
+    # «gone» is no longer on the page; v2, new to it, goes beside v3, as the program has it
+    assert result["rows"] == [["v3", "v2"], ["v1"]]
+    assert result["active"] == ["cell-v3"]
+
+
+def test_a_dividers_place_is_kept_for_wide_and_for_upright_apart():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+document.getElementById('cell-v2').style.flex = 2;
+ev('saveSizes()');
+out.kept = saved().sizes.wide.cells.v2;
+upright();
+out.upright = document.getElementById('cell-v2').style.flex;
+document.getElementById('cell-v2').style.flex = 0.5;
+ev('saveSizes()');
+wide();
+out.wide = document.getElementById('cell-v2').style.flex;
+upright();
+out.uprightAgain = document.getElementById('cell-v2').style.flex;
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["kept"] == 2
+    assert result["upright"] == 1 and result["wide"] == 2 and result["uprightAgain"] == 0.5
+
+
+def test_a_moved_chart_keeps_its_frame_where_the_browser_can():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+const made = queryAll('iframe').length;
+const moved = [];
+const mk = document.createElement;
+document.createElement = tag => {
+  const el = mk(tag);
+  el.moveBefore = (node, ref) => { moved.push(node.id); el.children.push(node); };
+  return el;
+};
+['v1', 'v2', 'v3'].forEach(id => { document.getElementById('cell-' + id).parentElement = {}; });
+const before = document.getElementById('cell-v3');
+ev('arrangeTo')([['v2'], ['v3', 'v1']]);
+out.moved = moved;
+out.same = document.getElementById('cell-v3') === before;
+out.framesMade = queryAll('iframe').length - made;
+out.rows = rows();
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["moved"] == ["cell-v2", "cell-v3", "cell-v1"]
+    assert result["same"] is True and result["framesMade"] == 0
+    assert result["rows"] == [["v2"], ["v3", "v1"]]
+
+
+def test_arranging_and_a_replay_exclude_each_other():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+ev('arrangeToggle(true)');
+ev('replayToggle()');
+out.noReplay = [ev('replay.picking'), document.getElementById('rp-btn').disabled];
+ev('arrangeToggle(false)');
+ev('replayToggle()');
+out.replay = [ev('replay.picking'), document.getElementById('lay-btn').disabled];
+ev('arrangeToggle(true)');
+out.noArranging = ev('arranging');
+ev('replayExit()');
+out.after = document.getElementById('lay-btn').disabled;
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["noReplay"] == [False, True]
+    assert result["replay"] == [True, True]
+    assert result["noArranging"] is False
+    assert result["after"] is False
+
+
+def test_one_chart_has_nothing_to_arrange():
+    one = _LAYOUT.replace("rows: [['v1'], ['v2', 'v3']],", "rows: [['v1']],")
+    result = _run(PAGE_HTML, _SETTLE + """
+out.button = document.getElementById('lay-btn').style.display;
+""", extra_globals=one + _STORAGE)
+    assert result["button"] == "none"
+
+
+@pytest.mark.parametrize("room, position, last", [(10, False, 34), (10, True, 34),
+                                                  (20, True, 44), (0, False, 24)])
+def test_a_picture_leaves_its_room_after_the_last_candle(room, position, last):
+    """v1.3.0 Part 4h: the program's room (Chart.picture_room, 10) after the last of the
+    25 candles shown; an open position still gets at least 8."""
+    drawing = (f"ctx.__init.drawings = [{{id: 'pos', type: 'live_position', open_time: {_T1400},"
+               " entry_price: 1.5, stop_loss: 1, direction: 'long', next_tp: 2}];"
+               if position else "")
+    result = _run(CHART_HTML, _SNAPSHOT_INIT + drawing + """
+ev('handleMsg(globalThis.__init)');
+await frames();
+out.logical = ev('Object.values(panes).map(p => p.chart.timeScale().getVisibleLogicalRange())');
+""", extra_globals=_SNAPSHOT + _LOGICAL_FROM_TIME + f"ctx.location.search += '&room={room}';")
+    assert result["logical"] == [{"from": 0, "to": last}] * 2
+
+
+def test_a_pictures_room_is_free_space_when_later_candles_exist():
+    """A picture of 08:00–14:00 on a chart that goes on to 16:00: its room shows no
+    candle after 14:00, nor the indicator past it."""
+    result = _run(CHART_HTML, _SNAPSHOT_INIT + f"""
+for (let t = {_T1400} + 900; t <= {_T1400} + 8 * 900; t += 900)
+  ctx.__init.bars.push({{time: t, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1}});
+ctx.__init.indicators[0].data = ctx.__init.bars.slice(14).map(b => ({{time: b.time, value: 50}}));
+ev('handleMsg(globalThis.__init)');
+await frames();
+const last = s => {{
+  const d = s.setData._last || [];
+  return d.length ? d[d.length - 1].time : null;
+}};
+out.candles = last(ev('mainSeries'));
+out.indicator = last(ev('indMeta')['RSI(14)'].series);
+""", extra_globals=_SNAPSHOT + _LOGICAL_FROM_TIME + "ctx.location.search += '&room=10';")
+    assert result["topLevelError"] is None
+    assert result["candles"] == _T1400 and result["indicator"] == _T1400
+
+
+def test_on_a_phone_the_viewer_may_set_any_layout_and_it_is_kept_for_that_shape():
+    """The user, 2026-11-12: «the user should have this ability to set the layout what he
+    wants» — stacking is only the upright default; on a phone the 5m and 15m charts may
+    go side by side, and that is kept for upright screens, the wide one untouched."""
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+upright();
+out.start = [document.body._cls.has('stacked'), ev('visibleRows')('upright')];
+ev('arrangeToggle()');
+// stacked, one chart under another on a 390 px screen
+document.getElementById('cell-v1').getBoundingClientRect = rect(0, 34, 390, 270);
+document.getElementById('cell-v2').getBoundingClientRect = rect(0, 309, 390, 270);
+document.getElementById('cell-v3').getBoundingClientRect = rect(0, 584, 390, 260);
+out.label = drag('v3', 380, 440);                      // the 5m chart's right side
+out.side = [rows(), document.body._cls.has('stacked'), saved().rows.upright];
+wide();
+out.wide = [rows(), document.body._cls.has('stacked'), saved().rows.wide || null];
+place();
+out.wideLabel = drag('v3', 600, 60);                   // wide: above the 1h chart
+out.wideRows = rows();
+upright();
+out.uprightAgain = [rows(), document.body._cls.has('stacked')];
+ev('arrangeReset()');
+out.reset = [rows(), document.body._cls.has('stacked'), saved().rows.upright || null,
+             saved().rows.wide];
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["topLevelError"] is None
+    assert result["start"] == [True, [["v1"], ["v2"], ["v3"]]]   # what the viewer sees
+    assert result["label"] == "beside it, on the right"
+    assert result["side"] == [[["v1"], ["v2", "v3"]], False, [["v1"], ["v2", "v3"]]]
+    assert result["wide"] == [[["v1"], ["v2", "v3"]], False, None]
+    assert result["wideLabel"] == "above it"
+    assert result["wideRows"] == [["v3"], ["v1"], ["v2"]]
+    assert result["uprightAgain"] == [[["v1"], ["v2", "v3"]], False]
+    assert result["reset"] == [[["v1"], ["v2", "v3"]], True, None, [["v3"], ["v1"], ["v2"]]]

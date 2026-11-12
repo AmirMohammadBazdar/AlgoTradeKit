@@ -78,6 +78,8 @@ signals — by direction, candle index, entry and SL.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
 import warnings
@@ -96,6 +98,18 @@ from ..simulate import (
     SimulateReport,
 )
 from ..simulate._live import LiveSimulation
+from ._chart_edits import (
+    RERUN_CONFIRM,
+    RERUN_LABEL,
+    RERUN_REASON,
+    ChartBridge,
+    EditsFile,
+    chart_address,
+    chart_drawer,
+    drop_drawing,
+    edits_file_for,
+    open_edits_files,
+)
 from ._config import DISPLAY_TRADES_SIM, TraderConfig, TraderPair, validate_pairs
 from ._events import (
     SOURCE_SIM,
@@ -483,6 +497,8 @@ class _StopFlag:
     def __init__(self) -> None:
         self._event = threading.Event()
         self.reason: str | None = None
+        self._lock = threading.Lock()
+        self._over = False
 
     def request(self, reason: str) -> None:
         if self.reason is None:
@@ -491,6 +507,23 @@ class _StopFlag:
 
     def is_set(self) -> bool:
         return self._event.is_set()
+
+    def rerun(self) -> None:
+        """«Re-run with edits» (v1.3.0): stop the session — or, once it is over
+        (its feeds ended and its pages stayed up), start the program again at once."""
+        with self._lock:
+            over = self._over
+            if not over:
+                self.request(RERUN_REASON)
+        if over:
+            _rerun()
+
+    def end(self) -> bool:
+        """The session is over: from now on «Re-run with edits» re-runs at once.
+        True when one was asked for before (while the session was ending, too)."""
+        with self._lock:
+            self._over = True
+            return self.reason == RERUN_REASON
 
 
 @dataclass
@@ -504,6 +537,8 @@ class _PaperSession:
     combined: _CombinedLiveReport | None = None
     combined_label: str = ""
     stop: _StopFlag | None = None   # every pair's, one flag: a command's stop
+    edits: EditsFile | None = None  # where accepted chart edits are saved (v1.3.0)
+    chart_bridge: ChartBridge | None = None
 
     def on_report(self, report) -> None:
         """``LiveSimulation.on_report`` — once per closed candle: bridge
@@ -531,6 +566,8 @@ class _PaperView(PairView):
             self.timeframe_ms = None   # "1M": months have no fixed length
         self.chart_indicators = tuple(dict(spec) for spec in config.chart_indicators)
         self.picture_config = config
+        self.chart_style = config.chart_style
+        self.chart_source_timezone = config.chart_source_timezone   # v1.3.0: the pictures
         self.warmup_candles = max(200, int(session.pair.strategy.warmup_period or 0))
 
     @property
@@ -649,9 +686,63 @@ def _attach_sim(session: _PaperSession, initial_balance: float) -> None:
         open_browser=config.display_open_browser,
         on_event=bridge.on_event,
         on_report=session.on_report,
+        chart_style=config.chart_style,
+        chart_edit_key=config.chart_edit_key,
+        chart_timezone=config.chart_timezone,
+        chart_source_timezone=config.chart_source_timezone,
     )
     bridge.bind(sim)
     session.sim = sim
+
+
+def _wire_chart_edits(session: _PaperSession, stop: _StopFlag) -> None:
+    """After the seed (v1.3.0): the strategy draws on the session's chart, hears
+    the edits and actions on it and on every chart it watches — each under the
+    step's lock — and the chart offers «Re-run with edits» when it can."""
+    sim, strategy, config = session.sim, session.pair.strategy, session.pair.config
+    bridge = ChartBridge(strategy, sim._lock, edits=session.edits,
+                         clock=lambda: sim._last_ts)
+    chart = sim.chart
+    if chart is not None:
+        bridge.wire(chart, strategy.chart_actions, strategy.chart_drawing_actions)
+        strategy._draw_hook = chart_drawer(chart)
+        _offer_rerun(chart, config, stop)
+    else:
+        strategy._draw_hook = drop_drawing
+    for watched, actions, drawing_actions in list(strategy.__dict__.get("_atk_watched", ())):
+        bridge.wire(watched, actions, drawing_actions)
+    strategy._watch_hook = bridge.wire
+    session.chart_bridge = bridge
+
+
+def _offer_rerun(chart, config: TraderConfig, stop: _StopFlag) -> None:
+    """«Re-run with edits» needs the saved edits, and a fixed port for the page
+    to find the new run on.  A session that saves no edits has nothing to re-run
+    with, and says nothing.  The button outlives the session: pressed after its
+    feeds ended — a past window walked, its pages kept up — it re-runs at once."""
+    if config.chart_edits_path is None:
+        return
+    if not config.chart_port:
+        print(f"{_LOG_PREFIX} {config.symbol}: «{RERUN_LABEL}» is not offered — "
+              "chart_port is 0, and a re-run is found only on a fixed port.")
+        return
+    chart.add_button(RERUN_LABEL, stop.rerun, confirm=RERUN_CONFIRM)
+
+
+def _rerun() -> None:
+    """«Re-run with edits» (v1.3.0): the same program again, with the same command
+    line; it reads the saved edits at its start.  Called once the stop messages are
+    out and the notifiers closed; the page reconnects by itself."""
+    print(f"{_LOG_PREFIX}: starting again with the saved chart edits.", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+
+
+def _chart_address(chart, config: TraderConfig) -> str:
+    """A chart's address, with the edit key when the session has one (v1.3.0) —
+    the page's, when a runner has put the chart in a ``ChartPage``."""
+    return chart_address(chart, config.chart_edit_key)
 
 
 def _arm_messages(session: _PaperSession, view: PairView) -> None:
@@ -699,7 +790,7 @@ def _print_urls(session: _PaperSession) -> None:
     symbol = session.pair.config.symbol
     chart = session.sim.chart
     if chart is not None and getattr(chart, "url", None):
-        print(f"{_LOG_PREFIX} {symbol} chart  → {chart.url}")
+        print(f"{_LOG_PREFIX} {symbol} chart  → {_chart_address(chart, session.pair.config)}")
     server = session.sim.report_server
     if server is not None and getattr(server, "url", None):
         print(f"{_LOG_PREFIX} {symbol} report → {server.url}")
@@ -791,6 +882,14 @@ def run_live(
     ``self.notify(...)`` speaks for every closed candle after the seed.  A notifier
     with ``commanders=`` answers /status, /positions and /chart about the session from
     its start on, and /stop ends it.
+
+    The chart (v1.3.0): after the seed, ``self.draw`` puts the strategy's drawings on
+    the session's chart, and its ``on_chart_edit`` / ``on_chart_action`` hear what the
+    user does there and on every chart it watches — between candles, under the step's
+    lock.  With ``chart_edits_path`` the accepted edits are saved and read back at the
+    next start; with a fixed ``chart_port`` too, the chart offers «Re-run with
+    edits»: the session stops (reason ``"re-run with chart edits"``) and, instead of
+    returning, the program starts again with the same command line.
     """
     if pairs is not None:
         if strategy is not None or broker is not None or config is not None:
@@ -825,6 +924,14 @@ def run_live(
     stop = _StopFlag()
     for session in sessions:
         session.stop = stop
+    # Saved chart edits (v1.3.0): read now, so a bad file refuses the start before
+    # the venue is asked anything; the strategy has them before its setup().
+    files = open_edits_files(session.pair.config for session in sessions)
+    for session in sessions:
+        session.edits = edits_file_for(session.pair.config, files)
+        session.pair.strategy.chart_edits = (
+            session.edits.records if session.edits is not None else ()
+        )
     started = False
     reason, error = "feeds ended", None
     try:
@@ -835,6 +942,7 @@ def run_live(
         for session in sessions:
             session.sim.seed()
             session.bridge.prime()
+            _wire_chart_edits(session, stop)
             session_config = session.pair.config
             if session_config.display and not session_config.display_open_browser:
                 _print_urls(session)
@@ -878,6 +986,8 @@ def run_live(
             if session.sim is not None:
                 session.sim.stop()
             session.pair.strategy._notify_hook = None
+            session.pair.strategy._draw_hook = None
+            session.pair.strategy._watch_hook = None
         for session in sessions:
             sim = session.sim
             left = None   # a session that never started has read no positions
@@ -891,5 +1001,7 @@ def run_live(
         notify_session.unlisten()
         notify_session.close()
 
+    if stop.end() or reason == RERUN_REASON:
+        _rerun()
     reports = [session.sim.last_report for session in sessions]
     return reports if multi else reports[0]

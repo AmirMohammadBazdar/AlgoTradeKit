@@ -240,7 +240,9 @@ class StrategyResult:
              "opacity": 0.1, "borderColor": "#3fb950", "source": "server"}
         
         All times must be in **Unix seconds** (not milliseconds) to match
-        the chart frontend's coordinate system.
+        the chart frontend's coordinate system.  ``"time2": None`` (v1.3.0) has
+        a box, a trend line or a fib run to the live edge: five candles past the
+        last candle, or past a replay's cursor.
     """
 
     signals: list[Signal]
