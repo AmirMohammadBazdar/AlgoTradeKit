@@ -379,6 +379,7 @@ class TestSendChart:
         assert asked["query"] == {
             "snapshot": "1", "from": str(T0800), "to": str(T1400), "tz": "UTC",
             "title": "BTCUSDT · 15m · 2026-10-14 08:00 – 14:00 UTC",
+            "room": "10",                                    # v1.3.0: room after the last candle
         }
         assert asked["thread"].startswith("atk-notify")     # never the caller's
         (picture,) = tg.pictures(ME)
@@ -862,7 +863,7 @@ class TestPageChartPictures:
         assert asked["url"].startswith(f"{page.url}/view?view=v2&snapshot=1&")
         assert asked["query"] == {
             "view": "v2", "snapshot": "1", "from": str(T0800), "to": str(T1400), "tz": "UTC",
-            "title": "BTCUSDT · 15m · 2026-10-14 08:00 – 14:00 UTC",
+            "title": "BTCUSDT · 15m · 2026-10-14 08:00 – 14:00 UTC", "room": "10",
         }
         assert page._server._last_init["v2"]["title"] == "BTCUSDT"   # what the view serves
 
