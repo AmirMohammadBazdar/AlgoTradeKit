@@ -115,6 +115,11 @@ class ChartPage:
         **time**, never by candle index.
     sync_crosshair : bool
         The crosshair is mirrored onto the other charts at the same instant.
+    stack_upright : bool
+        On a screen taller than it is wide — a phone held upright — the charts
+        of a row stack, one under the other, each the full width (v1.3.0).
+        ``False`` keeps every row side by side.  Each viewer may also arrange the
+        charts (⊞ LAYOUT in the page's header); that stays in their browser.
     """
 
     def __init__(
@@ -125,11 +130,13 @@ class ChartPage:
         host:  str = "127.0.0.1",
         sync_time: bool = True,
         sync_crosshair: bool = True,
+        stack_upright: bool = True,
     ) -> None:
         self.title = title
         self.theme = theme
         self.sync_time = sync_time
         self.sync_crosshair = sync_crosshair
+        self.stack_upright = bool(stack_upright)
 
         self._server = PageServer(title=title, port=port, host=host)
         self._rows: list[list[str]] = []
@@ -202,6 +209,7 @@ class ChartPage:
             "title": self.title,
             "theme": self.theme,
             "sync":  {"time": self.sync_time, "crosshair": self.sync_crosshair},
+            "stackUpright": self.stack_upright,             # v1.3.0
             "rows":  [list(row) for row in self._rows],
             "views": [
                 {"id": vid, "title": chart.title}
