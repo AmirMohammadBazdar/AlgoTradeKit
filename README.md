@@ -99,13 +99,15 @@ AlgoTradeKit/
 └── report/         Interactive simulation report web page  ← v0.7.0
 ```
 
-Data flows in one direction:
+Data flows in one direction, and a viewer's edits come back to the strategy
+by callbacks *(v1.3.0)*:
 
 ```
 broker ──► data ──► indicator ──► strategy ──► simulate ──► report
-                                       │           └──────► visual
-                                       └──────► trader ◄────┘
-                                                  └──────► notify
+                                     ▲ │           └──────► visual ┄┄┐
+                                     ┆ └──────► trader ◄────┘        ┆
+                                     ┆            └──────► notify    ┆
+                                     └┄┄┄┄┄┄ edits and actions ┄┄┄┄┄┄┘
 ```
 
 `trader` is a leaf: it consumes `broker`, `strategy` and `simulate`, and nothing
@@ -113,6 +115,11 @@ imports from it. That is what keeps the backtest engine free of live-trading
 concerns while both share the same position maths. `trader` hands its events to
 `notify`, which imports no other module when it is imported: a broker reaches it
 as an object, and the chart and the report load only to make a picture.
+
+*(v1.3.0)* One arrow runs back, from the chart page to the strategy: what a
+viewer changes on a live session's chart reaches the strategy's `on_chart_edit`
+and `on_chart_action`. It is made of callbacks the live session installs, never
+of imports — `visual` imports no strategy, and `strategy` no chart.
 
 ---
 
@@ -174,6 +181,12 @@ b.clock_offset_ms()      # venue clock − local clock (median-sampled, cached)
 Binance reports your account's real taker fee and a live book spread;
 MetaTrader reports spread and contract size from `symbol_info`. The live trader
 uses both to size positions correctly and to fire exactly on candle close.
+
+*(v1.3.0)* On MetaTrader the clock is the **trade server's**, read from the
+newest tick and rounded to a quarter hour: a broker two hours ahead of UTC reads
++2:00, and `b.server_time()` is on that clock. MetaTrader stamps its candles in
+that time, so candle closes fire when they happen there, not hours late, and the
+live seeds keep the last closed candle.
 
 **MetaTrader (forex) — Windows and Linux** *(v1.0.0)*
 
@@ -428,6 +441,53 @@ class MyStrategy(BaseStrategy):
 columns back — accurate for windowed indicators, and never revising a value it
 already wrote. Implement the hook if your strategy repaints or builds Python
 objects (order blocks, zones, SMC structures) during `prepare_indicators`.
+
+### Edits from the Chart *(v1.3.0)*
+
+A live session's chart talks back. The strategy draws its own objects with a
+`key` — the object's own name — and the viewer may move, resize or delete them
+on the page. The strategy hears it between two candles, under the session's
+step lock, so it never sees half a candle:
+
+```python
+class Zones(BaseStrategy):
+    chart_actions = ("Add zone here",)            # a right-click on the chart
+    chart_drawing_actions = ("Make it a zone",)   # a right-click on a box the viewer drew
+
+    def generate_signals(self, i, data):
+        ...
+        self.draw({"type": "box", "key": f"zone:{made}", "title": "High zone",
+                   "time1": made // 1000, "price1": top, "time2": None, "price2": bottom,
+                   "editable": ("price",)})       # time2 None: it runs to the live edge
+        ...
+
+    def on_chart_edit(self, edit):                # edit.key, edit.before, edit.after
+        if edit.after is None:                    # deleted
+            self.zones.pop(edit.key, None)
+            return None
+        if too_tall(edit.after):
+            return False                          # refused: it goes back, the page says so
+        self.zones[edit.key].update(top=..., bottom=...)
+
+    def on_chart_action(self, action):            # action.label, .time (UTC ms), .price, .drawing
+        ...
+```
+
+* `draw(dict)` and `erase(key)` put the strategy's drawings on the session's
+  chart; in a backtest `run()` returns them in `StrategyResult.drawings`. Drawing
+  again with a key replaces that drawing.
+* `watch_chart(chart, actions=, drawing_actions=)` brings a chart the strategy
+  builds itself to the same hooks.
+* `TraderConfig(chart_edits_path="chart_edits.json")` saves every edit, delete
+  and action the strategy accepts and hands them back as `self.chart_edits`
+  before `setup()` at the next start, so a zone made again takes its edit. With
+  a fixed `chart_port` the chart's toolbar offers **Re-run with edits**: the
+  session starts again — the same address, the same key — and walks the history
+  with them.
+* `TraderConfig(chart_edit_key="…")` keeps all this to the address with
+  `?key=…`; any other page only looks.
+
+`examples/10_chart_edits.py` runs it on Binance's public candles.
 
 ### Built-in Strategies
 
@@ -722,6 +782,19 @@ TraderConfig(
 `"sim"` shows theoretical strategy performance, `"real"` shows your actual
 fills, `"both"` overlays them.
 
+*(v1.3.0)* The session's chart takes the chart's new settings too:
+
+```python
+TraderConfig(
+    ...,
+    chart_style={"background": "#101820", "grid": False},  # its colours
+    chart_timezone="Asia/Tehran",           # the times it shows
+    chart_source_timezone="Europe/Athens",  # what the venue stamps in (MetaTrader: the broker's)
+    chart_edit_key="a-long-secret",         # only the address with ?key=… may change it
+    chart_edits_path="chart_edits.json",    # the strategy's accepted edits, and «Re-run with edits»
+)
+```
+
 ---
 
 ## notify — Notifications *(v1.2.0)*
@@ -836,6 +909,12 @@ close shows the whole trade with its position box. A caption longer than Telegra
 characters goes on in a reply. Pictures need the `[notify]` extra and its Chromium. A
 headless Chromium photographs the library's own chart page, on the notifier's thread, and
 stays open while the notifier lives: about 450 MB idle.
+
+*(v1.3.0)* A picture leaves **10 empty candles** after its last one.
+`Chart.picture_room = 4` changes that for every picture, the notifiers' included;
+`chart.picture_room = 4` for one chart; `chart.screenshot(right_room=0)` for one
+picture (0: the last candle at the edge). A picture reads its times in the
+chart's own `timezone`.
 
 ### Price alerts
 
@@ -989,6 +1068,86 @@ chart.add_box(time1=1700000000, price1=41_000,
               time2=1700007200, price2=43_000, opacity=0.1)
 chart.add_signal(time=1700000000, side="buy")
 ```
+
+### Colours *(v1.3.0)*
+
+```python
+chart = Chart(style={"background": "#101820", "up_color": "#26a69a",
+                     "down_color": "#ef5350", "grid": False})
+chart.set_style(background=None)          # the theme's background again
+```
+
+Each viewer may pick their own in the chart's **Settings → Colours**: their
+browser keeps it, for each theme apart, on top of the program's, and every chart
+of a page follows a colour picked on one of them.
+
+### Edits, Menus and the Edit Key *(v1.3.0)*
+
+Give a drawing a `key` — the program's own name for it — and the viewer may
+change it on the page; the program hears every change:
+
+```python
+from AlgoTradeKit.visual import Chart, EditRefused
+
+chart = Chart(title="BTCUSDT", edit_key="a-long-secret")   # only ?key=… may change it
+chart.add_box(t1, 64_200, None, 64_000, key="zone:1", editable=("price",),
+              title="Buy zone")            # time2 None: it runs to the live edge
+
+@chart.on_drawing_edit
+def edited(edit):                          # edit.key, edit.before, edit.after
+    if abs(edit.after["price1"] - edit.after["price2"]) > 500:
+        raise EditRefused("a zone is at most 500 tall")   # it goes back; the page says why
+
+@chart.on_drawing_delete
+def deleted(edit):                         # edit.after is None
+    ...
+
+chart.add_action("Mark here", lambda a: print(a.time, a.price))   # the candle menu
+chart.add_drawing_action("Measure", lambda a: print(a.drawing))   # on a drawing the viewer drew
+chart.add_button("Flatten", flatten, confirm="Close everything?") # a toolbar button
+chart.add_vline(t2, label="restart", key="restart:1")             # a vertical line
+```
+
+* `editable=` is `True` (every handle), `False`, or a tuple of `"price"`,
+  `"time"` and `"move"`; `deletable=False` keeps it on the chart; `title` heads
+  its right-click menu.
+* Callbacks run on the chart's own thread, in order. One that raises
+  `EditRefused` puts the drawing back on every open page, whose status bar says
+  «Refused: …» — for an action too.
+* Without `edit_key` every page may change the chart, as before. With it, any
+  other page only looks: it scrolls, replays and draws its own lines, and changes
+  nothing another viewer sees.
+
+### Time Zones *(v1.3.0)*
+
+```python
+Chart(timezone="Asia/Tehran")             # the times the chart shows
+Chart(source_timezone="Europe/Athens")    # the zone the candles are stamped in
+```
+
+A candle's time is what the venue stamps: UTC on Binance, the broker's own clock
+on MetaTrader. The chart cannot tell which, so the program says it with
+`source_timezone`; the axis, the crosshair, GO TO and the pictures read in
+`timezone`. A viewer may pick both in **Settings → Time zone** («+03:30 Tehran»,
+sorted by the offset), and their browser keeps the choice.
+
+### On the Page *(v1.3.0)*
+
+* **GO TO** (or `Alt+G`) takes the chart to a date and time, as its axis shows it.
+* **The countdown** under the last price: the time left until the candle closes,
+  on the feed's own clock (Settings turns it off).
+* **Running drawings**: a box, a line or a Fib with `time2=None` — a position
+  box with `close_time=None` — runs to the live edge, five candles past the last
+  candle, and moves with it.
+* **Room after the last candle**, so the newest one is not on the edge.
+* **Fib**: any of its four corners resizes it; right-click → **Levels…** sets
+  its own levels, Settings → «Fib levels» the ones a new Fib starts with.
+* **Copy and paste**: click a drawing and press `Ctrl+C` (`⌘C`), or right-click →
+  **📋 Copy**. `Ctrl+V` pastes it where it was — on another chart of the page, or
+  another page, too — and a right-click on the chart → **📋 Paste here** puts it
+  at the click. A copy is the viewer's own.
+* **The replay** keeps the viewer's drawings, and a trade still open at the
+  cursor shows the RR it was planned with.
 
 ### Position Boxes (v0.7.0)
 
@@ -1159,6 +1318,15 @@ port**, so viewing a VPS page still needs only one SSH tunnel.
 Attaching a chart changes nothing about how you drive it: indicators, drawings,
 live positions, streaming and `set_timeframe` all work exactly as they do on a
 chart of its own. Charts can also be added after `show()`.
+
+*(v1.3.0)* **On a phone held upright** — a screen taller than wide — the charts
+of a row stack, one under the other, each the full width; turned sideways, they
+are side by side again, and nothing reloads. `ChartPage(stack_upright=False)`
+keeps rows side by side. **⊞ LAYOUT** in the page header lets each viewer
+arrange the charts as they like: drag a chart onto another's side to put it
+beside, above or below it, or onto its middle to swap the two. Their browser
+keeps it, for wide and for upright screens apart; **RESET** brings the program's
+layout back. The dividers drag with a finger too.
 
 ### Bar Replay *(v1.1.0)*
 
