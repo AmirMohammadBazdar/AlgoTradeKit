@@ -30,6 +30,11 @@ What to try
    3m chart and press Ctrl+V: the same box lands there, at the same times and
    prices (v1.3.0). Right-click any chart away from drawings → `📋 Paste here`
    puts a copy at the click. Fibs, lines, texts and position boxes copy too.
+9. `⊞ LAYOUT` in the page header: drag a chart onto another one's side to put it
+   beside, above or below it, or onto its middle to swap the two; `DONE` keeps
+   it in this browser, `RESET` brings the program's layout back (v1.3.0). Open
+   the page on a phone held upright: the two lower charts stack, one under the
+   other; turned sideways they are side by side again.
 """
 from __future__ import annotations
 
