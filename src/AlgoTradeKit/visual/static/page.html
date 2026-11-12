@@ -2,16 +2,20 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- v1.3.0: a phone draws the page at its own width -->
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>AlgoTradeKit — Chart Page</title>
 <style>
 :root{
   --bg:#0d1117; --bg2:#161b22; --bg3:#21262d; --border:#30363d;
   --text:#e6edf3; --text2:#8b949e; --text3:#6e7681; --accent:#58a6ff;
   --hh:34px;
+  --veil:rgba(13,17,23,.86); --dropbg:rgba(88,166,255,.22);       /* v1.3.0: arranging */
 }
 body.light{
   --bg:#ffffff; --bg2:#f6f8fa; --bg3:#eaeef2; --border:#d0d7de;
   --text:#1f2328; --text2:#57606a; --text3:#8c959f; --accent:#0969da;
+  --veil:rgba(255,255,255,.86); --dropbg:rgba(9,105,218,.18);
 }
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{height:100%;overflow:hidden}
@@ -48,6 +52,34 @@ a#logo:hover{text-decoration:underline}
 .rdiv{height:5px;background:var(--border);cursor:row-resize;flex-shrink:0;opacity:.45}
 .cdiv{width:5px;background:var(--border);cursor:col-resize;flex-shrink:0;opacity:.45}
 .rdiv:hover,.cdiv:hover,.rdiv.dragging,.cdiv.dragging{opacity:1;background:var(--accent)}
+.rdiv,.cdiv{touch-action:none}                 /* v1.3.0: a finger drags them too */
+
+/* ── v1.3.0: a phone. The header shortens its title, then scrolls sideways ── */
+#hdr{overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+#hdr::-webkit-scrollbar{display:none}
+#hdr > *{flex-shrink:0}
+#hdr > #page-title{flex-shrink:1;min-width:30px;white-space:nowrap;overflow:hidden;
+                   text-overflow:ellipsis}
+/* Upright — the window taller than wide: the charts of a row stack */
+body.upright .row.multi{flex-direction:column}
+body.upright .row.multi > .cell{min-width:0;min-height:60px}
+body.upright .row.multi > .cdiv{width:auto;height:5px;cursor:row-resize}
+
+/* ── v1.3.0: arranging. Each chart under a veil, dragged by it ── */
+.veil{display:none;position:absolute;inset:0;z-index:5;background:var(--veil);
+      flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:12px;
+      cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;text-align:center}
+body.arranging .veil{display:flex}
+.veil.dragging{opacity:.45;cursor:grabbing}
+.veil .vt{font-size:14px;font-weight:600;color:var(--text)}
+.veil .vh{font-size:11px;color:var(--text2);max-width:320px}
+#drop{display:none;position:fixed;z-index:20;pointer-events:none;border:2px solid var(--accent);
+      background:var(--dropbg);border-radius:6px;align-items:center;justify-content:center;
+      font-size:12px;font-weight:600;color:var(--accent)}
+#drop.show{display:flex}
+#lay-reset,#lay-done{display:none}
+body.arranging #lay-reset,body.arranging #lay-done{display:inline-block}
+.sync-btn:disabled{opacity:.4;cursor:default}
 
 #empty{margin:auto;color:var(--text3);font-size:12px}
 
@@ -88,12 +120,19 @@ a#logo:hover{text-decoration:underline}
     <span id="rp-note">click a candle on any chart to start</span>
   </div>
   <div id="sync-box">
+    <!-- v1.3.0: the viewer's own arrangement of the charts, kept in this browser -->
+    <button class="sync-btn" id="lay-btn" onclick="arrangeToggle()"
+            title="Arrange the charts: drag one onto another's side, or onto its middle to swap">⊞ LAYOUT</button>
+    <button class="sync-btn" id="lay-reset" onclick="arrangeReset()"
+            title="Back to the program's layout">RESET</button>
+    <button class="sync-btn" id="lay-done" onclick="arrangeToggle(false)">DONE</button>
     <button class="sync-btn" id="sync-time"  onclick="toggleSync('time')"  title="Scroll and zoom every chart together">TIME</button>
     <button class="sync-btn" id="sync-cross" onclick="toggleSync('crosshair')" title="Mirror the crosshair onto every chart">CROSSHAIR</button>
   </div>
 </div>
 
 <div id="page"><div id="empty">loading…</div></div>
+<div id="drop"></div>
 
 <script>
 'use strict';
@@ -135,52 +174,95 @@ function titleOf(id){
 function renderLayout(){
   const page = document.getElementById('page');
   page.innerHTML = '';
-  const rows = layout.rows || [];
-  if(!rows.length){
+  // v1.3.0: the viewer's own arrangement, over the program's
+  rowsNow = mergedRows(readArrangement());
+  if(!rowsNow.length){
     page.innerHTML = '<div id="empty">no charts on this page</div>';
     return;
   }
+  buildRows(rowsNow, makeCell);
+  document.getElementById('lay-btn').style.display = rowsNow.flat().length > 1 ? '' : 'none';
+  applyOrientation(true);
 
+  const first = (rowsNow[0] || [])[0];
+  if(first) setActive(first);
+}
+
+// A chart's cell: its frame, and the veil it is arranged by (v1.3.0)
+function makeCell(id){
+  const cell = document.createElement('div');
+  cell.className = 'cell';
+  cell.id = 'cell-' + id;
+  cell.style.flex = 1;
+  const f = document.createElement('iframe');
+  // chrome=compact drops the frame's own header bar: one page-level header
+  // is enough, and the vertical space matters when charts are stacked.
+  f.src = `view?view=${encodeURIComponent(id)}&chrome=compact&title=${encodeURIComponent(titleOf(id))}`
+        + (editKey ? `&key=${encodeURIComponent(editKey)}` : '');
+  f.title = titleOf(id);
+  f.onload = () => { frames[id] = f.contentWindow; };
+  cell.appendChild(f);
+  const veil = document.createElement('div');
+  veil.className = 'veil';
+  const name = document.createElement('div');
+  name.className = 'vt'; name.textContent = titleOf(id);
+  const how = document.createElement('div');
+  how.className = 'vh';
+  how.textContent = 'Drag it onto another chart: onto a side to go beside, above or below it, '
+                  + 'onto its middle to swap places.';
+  veil.appendChild(name); veil.appendChild(how);
+  veil.addEventListener('pointerdown', ev => arrangeStart(ev, id));
+  cell.appendChild(veil);
+  return cell;
+}
+
+// Rows of cells with a divider between each two, into the page; *cellFor(id)*
+// gives each cell — a new one, or the one already there, moved (v1.3.0).
+function buildRows(rows, cellFor){
+  const page = document.getElementById('page');
   rows.forEach((ids, ri) => {
     if(ri > 0) page.appendChild(makeDivider('rdiv'));
     const row = document.createElement('div');
-    row.className = 'row';
+    row.className = ids.length > 1 ? 'row multi' : 'row';
     row.style.flex = 1;
+    page.appendChild(row);                     // in the page first: a frame moves into it
     ids.forEach((id, ci) => {
       if(ci > 0) row.appendChild(makeDivider('cdiv'));
-      const cell = document.createElement('div');
-      cell.className = 'cell';
-      cell.id = 'cell-' + id;
-      cell.style.flex = 1;
-      const f = document.createElement('iframe');
-      // chrome=compact drops the frame's own header bar: one page-level header
-      // is enough, and the vertical space matters when charts are stacked.
-      f.src = `view?view=${encodeURIComponent(id)}&chrome=compact&title=${encodeURIComponent(titleOf(id))}`
-            + (editKey ? `&key=${encodeURIComponent(editKey)}` : '');
-      f.title = titleOf(id);
-      f.onload = () => { frames[id] = f.contentWindow; };
-      cell.appendChild(f);
-      row.appendChild(cell);
+      place(row, cellFor(id));
     });
-    page.appendChild(row);
   });
+}
 
-  const first = (rows[0] || [])[0];
-  if(first) setActive(first);
+// A cell into a row. One already on the page is moved with its frame's state
+// where the browser can (moveBefore); elsewhere the move reloads that frame.
+function place(row, cell){
+  if(cell.parentElement && typeof row.moveBefore === 'function'){
+    try{ row.moveBefore(cell, null); return; }catch{}
+  }
+  row.appendChild(cell);
 }
 
 // ── Dividers ───────────────────────────────────────────────────
 // Both axes work the same way: the two siblings either side of the handle
 // share their combined flex, so dragging moves the boundary between them.
+// v1.3.0: by mouse or finger (pointer events); between stacked charts the
+// handle drags up and down, and where it is left is remembered.
 function makeDivider(cls){
   const d = document.createElement('div');
   d.className = cls;
-  d.addEventListener('mousedown', ev => startDrag(ev, d, cls === 'rdiv'));
+  d.addEventListener('pointerdown', ev => startDrag(ev, d));
   return d;
 }
 
-function startDrag(ev, handle, vertical){
+function dividerIsVertical(handle){
+  if(handle.classList.contains('rdiv')) return true;
+  const row = handle.parentElement;
+  return document.body.classList.contains('upright') && !!row && row.classList.contains('multi');
+}
+
+function startDrag(ev, handle){
   ev.preventDefault();
+  const vertical = dividerIsVertical(handle);
   handle.classList.add('dragging');
   const before = handle.previousElementSibling, after = handle.nextElementSibling;
   if(!before || !after) return;
@@ -192,8 +274,8 @@ function startDrag(ev, handle, vertical){
   const box = handle.parentElement.getBoundingClientRect();
   const span = vertical ? box.height : box.width;
 
-  // Frames swallow mousemove once the pointer crosses into them, so block
-  // their pointer events for the duration of the drag.
+  // Frames swallow the pointer once it crosses into them, so block their
+  // pointer events for the duration of the drag.
   document.querySelectorAll('iframe').forEach(f => f.style.pointerEvents = 'none');
 
   const onMove = e => {
@@ -204,11 +286,236 @@ function startDrag(ev, handle, vertical){
   const onUp = () => {
     handle.classList.remove('dragging');
     document.querySelectorAll('iframe').forEach(f => f.style.pointerEvents = '');
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onUp);
+    saveSizes();
   };
-  document.addEventListener('mousemove', onMove);
-  document.addEventListener('mouseup', onUp);
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointercancel', onUp);
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  ON A PHONE, AND ARRANGED BY THE VIEWER (v1.3.0)
+//  Upright — the window taller than wide — every row's charts stack, by CSS
+//  only, so turning a phone reloads nothing. The program may keep its rows
+//  side by side (ChartPage(stack_upright=False)). ⊞ LAYOUT lets the viewer
+//  arrange the charts: drag one onto another's side, or its middle to swap.
+//  The arrangement and the dividers' places (wide and upright apart) are this
+//  browser's, for this page's address; RESET forgets them.
+// ═══════════════════════════════════════════════════════════════
+const LAYOUT_KEY = 'atk.page.layout.v1';
+let rowsNow = [];                      // the arrangement shown: [[view id, …], …]
+let arranging = false;
+let arrangeDrag = null;
+
+function programRows(){ return ((layout && layout.rows) || []).map(r => r.slice()); }
+
+function readArrangement(){
+  try{
+    const v = JSON.parse(window.localStorage.getItem(LAYOUT_KEY));
+    return v && typeof v === 'object' ? v : null;
+  }catch{ return null; }
+}
+function writeArrangement(v){
+  try{ window.localStorage.setItem(LAYOUT_KEY, JSON.stringify(v)); }catch{}
+}
+
+// The saved arrangement over the program's: a chart the program no longer has
+// drops out; one it added since goes where the program put it — beside a chart
+// it shares a row with, or in a row of its own at the end.
+function mergedRows(saved){
+  const prog = programRows();
+  const known = new Set(prog.flat());
+  if(!saved || !Array.isArray(saved.rows)) return prog;
+  const seen = new Set();
+  const rows = saved.rows.filter(Array.isArray)
+    .map(r => r.filter(id => typeof id === 'string' && known.has(id) && !seen.has(id)
+                             && seen.add(id)))
+    .filter(r => r.length);
+  prog.forEach(prow => prow.forEach(id => {
+    if(seen.has(id)) return;
+    const mate = prow.find(m => seen.has(m));
+    const row = mate ? rows.find(r => r.includes(mate)) : null;
+    if(row) row.push(id); else rows.push([id]);
+    seen.add(id);
+  }));
+  return rows;
+}
+
+function uprightNow(){
+  return !!layout && layout.stackUpright !== false
+         && window.innerHeight > window.innerWidth;
+}
+
+// Upright or wide, on every resize and turn: a class on the page, and the
+// dividers' places this browser keeps for it.
+function applyOrientation(force){
+  const up = uprightNow();
+  const was = document.body.classList.contains('upright');
+  document.body.classList.toggle('upright', up);
+  if(force || up !== was) applySizes();
+}
+window.addEventListener('resize', () => applyOrientation(false));
+
+function orientationName(){ return document.body.classList.contains('upright') ? 'upright' : 'wide'; }
+
+function pageRows(){
+  const page = document.getElementById('page');
+  return Array.from(page.children || []).filter(el => el.classList && el.classList.contains('row'));
+}
+
+function applySizes(){
+  const saved = readArrangement();
+  const sizes = (saved && saved.sizes && saved.sizes[orientationName()]) || {};
+  const rowFlex = sizes.rows || [], cellFlex = sizes.cells || {};
+  pageRows().forEach((row, i) => { row.style.flex = Number(rowFlex[i]) > 0 ? rowFlex[i] : 1; });
+  rowsNow.flat().forEach(id => {
+    const cell = document.getElementById('cell-' + id);
+    if(cell) cell.style.flex = Number(cellFlex[id]) > 0 ? cellFlex[id] : 1;
+  });
+}
+
+function saveSizes(){
+  const saved = readArrangement() || {};
+  saved.sizes = saved.sizes || {};
+  const cells = {};
+  rowsNow.flat().forEach(id => {
+    const cell = document.getElementById('cell-' + id);
+    if(cell) cells[id] = parseFloat(cell.style.flex) || 1;
+  });
+  saved.sizes[orientationName()] = {
+    rows: pageRows().map(row => parseFloat(row.style.flex) || 1), cells};
+  writeArrangement(saved);
+}
+
+// ⊞ LAYOUT: on, every chart wears its veil and takes no other input; off, as
+// before. Not while a replay runs, and a replay does not start while it is on.
+function arrangeToggle(on){
+  on = on === undefined ? !arranging : !!on;
+  if(on && (replay.active || replay.picking)) return;
+  arranging = on;
+  document.body.classList.toggle('arranging', on);
+  document.getElementById('lay-btn').classList.toggle('on', on);
+  document.getElementById('rp-btn').disabled = on;
+  if(!on) dropShow(null);
+}
+
+// The arrangement after chart *id* is dropped on *target*'s *zone*: «swap»
+// trades their places; «left» / «right» put it beside the target in its row;
+// «above» / «below» in a row of its own over or under the target's row.
+function rearranged(rows, id, target, zone){
+  if(id === target) return rows.map(r => r.slice());
+  if(zone === 'swap'){
+    return rows.map(r => r.map(x => x === id ? target : x === target ? id : x));
+  }
+  const out = rows.map(r => r.filter(x => x !== id)).filter(r => r.length);
+  const ri = out.findIndex(r => r.includes(target));
+  if(ri < 0) return rows.map(r => r.slice());
+  if(zone === 'left' || zone === 'right'){
+    out[ri].splice(out[ri].indexOf(target) + (zone === 'right' ? 1 : 0), 0, id);
+  } else {
+    out.splice(ri + (zone === 'below' ? 1 : 0), 0, [id]);
+  }
+  return out;
+}
+
+// Rebuild the rows around the cells already there (their frames move, not
+// reload, where the browser can); a new arrangement starts with even sizes.
+function arrangeTo(rows){
+  const page = document.getElementById('page');
+  const cells = {};
+  rows.flat().forEach(id => { cells[id] = document.getElementById('cell-' + id); });
+  const old = Array.from(page.children || []);
+  buildRows(rows, id => cells[id] || makeCell(id));
+  old.forEach(el => { try{ el.remove(); }catch{} });
+  rowsNow = rows.map(r => r.slice());
+  applySizes();
+}
+
+function sameRows(a, b){ return JSON.stringify(a) === JSON.stringify(b); }
+
+function arrangeReset(){
+  writeArrangement(null);
+  const prog = programRows();
+  if(!sameRows(prog, rowsNow)) arrangeTo(prog);
+  else applySizes();
+}
+
+// Which chart, and which part of it, a point is over: the middle (30–70 % both
+// ways) swaps; elsewhere the nearest side.
+const DROP_LABEL = {left:'beside it, on the left', right:'beside it, on the right',
+                    above:'above it', below:'below it', swap:'swap places'};
+function dropAt(x, y){
+  for(const id of rowsNow.flat()){
+    const cell = document.getElementById('cell-' + id);
+    if(!cell) continue;
+    const r = cell.getBoundingClientRect();
+    if(x < r.left || x > r.left + r.width || y < r.top || y > r.top + r.height) continue;
+    const fx = (x - r.left) / r.width, fy = (y - r.top) / r.height;
+    let zone = 'swap';
+    if(!(fx > 0.3 && fx < 0.7 && fy > 0.3 && fy < 0.7)){
+      const d = {left: fx, right: 1 - fx, above: fy, below: 1 - fy};
+      zone = Object.keys(d).reduce((a, b) => d[a] <= d[b] ? a : b);
+    }
+    return {id, zone, rect: r};
+  }
+  return null;
+}
+
+function dropShow(drop){
+  const el = document.getElementById('drop');
+  if(!el) return;
+  if(!drop){ el.classList.remove('show'); el.textContent = ''; return; }
+  const r = drop.rect, half = {left:[0, 0, .5, 1], right:[.5, 0, .5, 1], above:[0, 0, 1, .5],
+                               below:[0, .5, 1, .5], swap:[0, 0, 1, 1]}[drop.zone];
+  el.style.left = (r.left + r.width * half[0]) + 'px';
+  el.style.top = (r.top + r.height * half[1]) + 'px';
+  el.style.width = (r.width * half[2]) + 'px';
+  el.style.height = (r.height * half[3]) + 'px';
+  el.textContent = DROP_LABEL[drop.zone];
+  el.classList.add('show');
+}
+
+function arrangeStart(ev, id){
+  if(!arranging) return;
+  ev.preventDefault();
+  const veil = ev.currentTarget || null;
+  if(veil && veil.classList) veil.classList.add('dragging');
+  arrangeDrag = {id, veil, drop: null};
+  document.addEventListener('pointermove', arrangeMove);
+  document.addEventListener('pointerup', arrangeEnd);
+  document.addEventListener('pointercancel', arrangeCancel);
+}
+
+function arrangeMove(ev){
+  if(!arrangeDrag) return;
+  const drop = dropAt(ev.clientX, ev.clientY);
+  arrangeDrag.drop = drop && drop.id !== arrangeDrag.id ? drop : null;
+  dropShow(arrangeDrag.drop);
+}
+
+function arrangeEnd(ev){
+  if(!arrangeDrag) return;
+  if(ev && ev.clientX != null) arrangeMove(ev);
+  const {id, drop} = arrangeDrag;
+  arrangeCancel();
+  if(!drop) return;
+  const rows = rearranged(rowsNow, id, drop.id, drop.zone);
+  if(sameRows(rows, rowsNow)) return;
+  writeArrangement({rows, sizes: {}});            // a new arrangement: even sizes
+  arrangeTo(rows);
+}
+
+function arrangeCancel(){
+  if(arrangeDrag && arrangeDrag.veil && arrangeDrag.veil.classList)
+    arrangeDrag.veil.classList.remove('dragging');
+  arrangeDrag = null;
+  dropShow(null);
+  document.removeEventListener('pointermove', arrangeMove);
+  document.removeEventListener('pointerup', arrangeEnd);
+  document.removeEventListener('pointercancel', arrangeCancel);
 }
 
 // ── Focus ──────────────────────────────────────────────────────
@@ -281,11 +588,12 @@ let replay = {active:false, picking:false, cursor:null, start:null,
 
 function replayToggle(){
   if(replay.active || replay.picking) replayExit();
-  else replayBegin();
+  else if(!arranging) replayBegin();          // v1.3.0: not while arranging
 }
 
 function replayBegin(){
   replay.picking = true;
+  document.getElementById('lay-btn').disabled = true;      // v1.3.0
   document.getElementById('rp-btn').classList.add('on');
   document.getElementById('rp-note').classList.add('show');
   broadcast(null, {t:'replay-arm'});
@@ -363,6 +671,7 @@ function replayExit(){
   replayPause();
   replay.active = replay.picking = false;
   replay.cursor = null;
+  document.getElementById('lay-btn').disabled = false;     // v1.3.0
   document.getElementById('rp-btn').classList.remove('on');
   document.getElementById('rp-note').classList.remove('show');
   document.getElementById('rp-controls').classList.remove('open');
