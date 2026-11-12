@@ -1280,6 +1280,9 @@ if(embedded){
 //  are painted.
 // ═══════════════════════════════════════════════════════════════
 const SNAP_MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+// v1.3.0: the empty candles a picture leaves after its last one (?room=, the
+// program's Chart.picture_room; none when the address does not say)
+const SNAP_ROOM = Math.max(0, Math.min(1000, Math.floor(Number(_q.get('room')) || 0)));
 
 // ═══════════════════════════════════════════════════════════════
 //  TIME ZONES (v1.3.0)
@@ -1553,14 +1556,42 @@ function snapshotHideControls(){
 // An open position starts at its entry, which in a trade's picture is the last
 // candle: leave room after it, an eighth of the candles shown (at least 8), so its
 // entry, SL and TP lines show.
-function roomForPositions(range){
+// The room after a picture's last candle (v1.3.0): the program's `room`, and at
+// least an eighth of the candles shown, and 8, for an open position's lines. It is
+// free space: what comes after the picture's last candle is not drawn in it.
+function roomAfterLast(range){
   if(!range || !mainChart) return;
-  if(!Object.values(drawings).some(d => d.type === 'live_position')) return;
   const shown = mainChart.timeScale().getVisibleLogicalRange();
   if(!shown) return;
-  const room = Math.max(8, Math.round((shown.to - shown.from) / 8));
+  let room = SNAP_ROOM;
+  if(Object.values(drawings).some(d => d.type === 'live_position'))
+    room = Math.max(room, 8, Math.round((shown.to - shown.from) / 8));
+  if(!room) return;
+  snapCutAfter(range.to);
   const wider = {from:shown.from, to:shown.to + room};
   Object.values(panes).forEach(p => { try{ p.chart.timeScale().setVisibleLogicalRange(wider); }catch{} });
+}
+
+// A picture ends at its last candle (v1.3.0): the candles after it, and every
+// indicator's points after it but the overhang a series has past the data (the
+// Ichimoku spans), are not drawn, so the room after it is free space.
+function snapCutAfter(t){
+  const dataEnd = allBars.length ? allBars[allBars.length-1].time : t;
+  if(dataEnd <= t) return;
+  const kept = allBars.filter(b => b.time <= t);
+  try{ mainSeries.setData(kept); }catch{}
+  if(volumeSeries){ try{ volumeSeries.setData(kept.map(volPoint)); }catch{} }
+  Object.values(indMeta).forEach(m => {
+    const full = m.full || [];
+    const ahead = full.length ? Math.max(0, full[full.length-1].time - dataEnd) : 0;
+    try{ m.series.setData(full.filter(p => p.time <= t + ahead)); }catch{}
+  });
+  if(ichimokuCloud){
+    const fa = ichimokuCloud.spanA, fb = ichimokuCloud.spanB;
+    const ahead = fa.length ? Math.max(0, fa[fa.length-1].time - dataEnd) : 0;
+    ichimokuCloud.spanA = fa.filter(p => p.time <= t + ahead);
+    ichimokuCloud.spanB = fb.filter(p => p.time <= t + ahead);
+  }
 }
 
 // After an init: the title line, the zone on every pane, the range, and the flag
@@ -1606,7 +1637,7 @@ function snapshotApply(){
       });
     }
     applyRange();
-    roomForPositions(range);
+    roomAfterLast(range);
     requestAnimationFrame(() => requestAnimationFrame(() => {
       redrawAll();
       window.__atkSnapshotReady = true;
