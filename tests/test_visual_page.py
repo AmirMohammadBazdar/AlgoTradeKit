@@ -115,6 +115,15 @@ class TestLayout:
             {"id": "v1", "title": "A"}, {"id": "v2", "title": "B"}
         ]
 
+    def test_a_page_stacks_upright_unless_told_not_to(self):
+        """v1.3.0 Part 4h: on a screen taller than wide a row's charts stack."""
+        page = ChartPage()
+        page.add(_chart("A"))
+        assert page._layout_payload()["stackUpright"] is True
+        flat = ChartPage(stack_upright=False)
+        flat.add(_chart("A"))
+        assert flat._layout_payload()["stackUpright"] is False
+
     def test_showing_an_empty_page_is_refused(self):
         with pytest.raises(ValueError, match="has no charts"):
             ChartPage().show()
