@@ -3081,7 +3081,7 @@ const upright = () => { ctx.window.innerWidth = 390; ctx.window.innerHeight = 84
 const wide = () => { ctx.window.innerWidth = 1200; ctx.window.innerHeight = 900;
                      fire('resize', ctx.window); };
 const rows = () => ev('rowsNow');
-const KEY = 'atk.page.layout.v1';
+const KEY = 'atk.page.layout.v2';
 const saved = () => JSON.parse(ctx.__store[KEY] || 'null');
 const rect = (left, top, width, height) => () => ({left, top, width, height});
 const place = () => {                      // v1 across the top, v2 | v3 under it
@@ -3114,6 +3114,7 @@ handle.parentElement = pair;
 out.wide = [document.body._cls.has('upright'), ev('dividerIsVertical')(handle)];
 upright();
 out.upright = [document.body._cls.has('upright'), ev('dividerIsVertical')(handle)];
+out.stacked = document.body._cls.has('stacked');
 out.multi = queryAll('.row').filter(r => r._cls.has('multi')).length;
 wide();
 out.back = document.body._cls.has('upright');
@@ -3122,6 +3123,7 @@ out.framesMade = queryAll('iframe').length - made;
     assert result["topLevelError"] is None
     assert result["wide"] == [False, False]
     assert result["upright"] == [True, True]          # stacked: its divider drags up and down
+    assert result["stacked"] is True                   # the default for an upright screen
     assert result["multi"] == 1                        # the v2 | v3 row
     assert result["back"] is False
     assert result["framesMade"] == 0                   # a turn is CSS only
@@ -3130,9 +3132,9 @@ out.framesMade = queryAll('iframe').length - made;
 def test_a_program_may_keep_its_rows_side_by_side():
     result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
 upright();
-out.upright = document.body._cls.has('upright');
+out.stacked = document.body._cls.has('stacked');
 """, extra_globals=_layout_with(stackUpright=False) + _STORAGE)
-    assert result["upright"] is False
+    assert result["stacked"] is False
 
 
 def test_each_drop_moves_a_chart_where_its_label_says():
@@ -3163,13 +3165,13 @@ out.arranging = document.body._cls.has('arranging');
 place();
 out.labels = [drag('v3', 30, 250)];                    // v1's left side
 out.afterLeft = rows();
-out.saved = saved().rows;
+out.saved = saved().rows.wide;
 out.labels.push(drag('v2', 900, 680));                 // v3's middle: swap
 out.afterSwap = rows();
 out.labels.push(drag('v1', 1100, 250));                // onto its own cell: nothing
 out.afterSelf = rows();
 ev('arrangeReset()');
-out.reset = [rows(), saved()];
+out.reset = [rows(), saved().rows.wide || null];
 ev('arrangeToggle(false)');
 out.done = document.body._cls.has('arranging');
 """, extra_globals=_LAYOUT + _STORAGE)
@@ -3185,11 +3187,11 @@ out.done = document.body._cls.has('arranging');
 
 
 def test_a_kept_arrangement_follows_the_programs_changes():
-    store = json.dumps({"rows": [["v3", "gone"], ["v1"]]})
+    store = json.dumps({"rows": {"wide": [["v3", "gone"], ["v1"]]}})
     result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
 out.rows = rows();
 out.active = queryAll('.cell').filter(c => c._cls.has('active')).map(c => c.id);
-""", extra_globals=_LAYOUT + _STORAGE + f"ctx.__store['atk.page.layout.v1'] = {json.dumps(store)};")
+""", extra_globals=_LAYOUT + _STORAGE + f"ctx.__store['atk.page.layout.v2'] = {json.dumps(store)};")
     # «gone» is no longer on the page; v2, new to it, goes beside v3, as the program has it
     assert result["rows"] == [["v3", "v2"], ["v1"]]
     assert result["active"] == ["cell-v3"]
@@ -3297,3 +3299,39 @@ out.indicator = last(ev('indMeta')['RSI(14)'].series);
 """, extra_globals=_SNAPSHOT + _LOGICAL_FROM_TIME + "ctx.location.search += '&room=10';")
     assert result["topLevelError"] is None
     assert result["candles"] == _T1400 and result["indicator"] == _T1400
+
+
+def test_on_a_phone_the_viewer_may_set_any_layout_and_it_is_kept_for_that_shape():
+    """The user, 2026-11-12: «the user should have this ability to set the layout what he
+    wants» — stacking is only the upright default; on a phone the 5m and 15m charts may
+    go side by side, and that is kept for upright screens, the wide one untouched."""
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+upright();
+out.start = [document.body._cls.has('stacked'), ev('visibleRows')('upright')];
+ev('arrangeToggle()');
+// stacked, one chart under another on a 390 px screen
+document.getElementById('cell-v1').getBoundingClientRect = rect(0, 34, 390, 270);
+document.getElementById('cell-v2').getBoundingClientRect = rect(0, 309, 390, 270);
+document.getElementById('cell-v3').getBoundingClientRect = rect(0, 584, 390, 260);
+out.label = drag('v3', 380, 440);                      // the 5m chart's right side
+out.side = [rows(), document.body._cls.has('stacked'), saved().rows.upright];
+wide();
+out.wide = [rows(), document.body._cls.has('stacked'), saved().rows.wide || null];
+place();
+out.wideLabel = drag('v3', 600, 60);                   // wide: above the 1h chart
+out.wideRows = rows();
+upright();
+out.uprightAgain = [rows(), document.body._cls.has('stacked')];
+ev('arrangeReset()');
+out.reset = [rows(), document.body._cls.has('stacked'), saved().rows.upright || null,
+             saved().rows.wide];
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["topLevelError"] is None
+    assert result["start"] == [True, [["v1"], ["v2"], ["v3"]]]   # what the viewer sees
+    assert result["label"] == "beside it, on the right"
+    assert result["side"] == [[["v1"], ["v2", "v3"]], False, [["v1"], ["v2", "v3"]]]
+    assert result["wide"] == [[["v1"], ["v2", "v3"]], False, None]
+    assert result["wideLabel"] == "above it"
+    assert result["wideRows"] == [["v3"], ["v1"], ["v2"]]
+    assert result["uprightAgain"] == [[["v1"], ["v2", "v3"]], False]
+    assert result["reset"] == [[["v1"], ["v2", "v3"]], True, None, [["v3"], ["v1"], ["v2"]]]
