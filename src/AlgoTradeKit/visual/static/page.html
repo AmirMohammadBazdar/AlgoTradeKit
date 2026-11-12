@@ -60,10 +60,11 @@ a#logo:hover{text-decoration:underline}
 #hdr > *{flex-shrink:0}
 #hdr > #page-title{flex-shrink:1;min-width:30px;white-space:nowrap;overflow:hidden;
                    text-overflow:ellipsis}
-/* Upright — the window taller than wide: the charts of a row stack */
-body.upright .row.multi{flex-direction:column}
-body.upright .row.multi > .cell{min-width:0;min-height:60px}
-body.upright .row.multi > .cdiv{width:auto;height:5px;cursor:row-resize}
+/* Upright — the window taller than wide — with no arrangement of the viewer's own
+   for it: the charts of a row stack (the default only) */
+body.stacked .row.multi{flex-direction:column}
+body.stacked .row.multi > .cell{min-width:0;min-height:60px}
+body.stacked .row.multi > .cdiv{width:auto;height:5px;cursor:row-resize}
 
 /* ── v1.3.0: arranging. Each chart under a veil, dragged by it ── */
 .veil{display:none;position:absolute;inset:0;z-index:5;background:var(--veil);
@@ -124,7 +125,7 @@ body.arranging #lay-reset,body.arranging #lay-done{display:inline-block}
     <button class="sync-btn" id="lay-btn" onclick="arrangeToggle()"
             title="Arrange the charts: drag one onto another's side, or onto its middle to swap">⊞ LAYOUT</button>
     <button class="sync-btn" id="lay-reset" onclick="arrangeReset()"
-            title="Back to the program's layout">RESET</button>
+            title="Back to the program's layout, for this screen's shape (wide or upright)">RESET</button>
     <button class="sync-btn" id="lay-done" onclick="arrangeToggle(false)">DONE</button>
     <button class="sync-btn" id="sync-time"  onclick="toggleSync('time')"  title="Scroll and zoom every chart together">TIME</button>
     <button class="sync-btn" id="sync-cross" onclick="toggleSync('crosshair')" title="Mirror the crosshair onto every chart">CROSSHAIR</button>
@@ -174,15 +175,15 @@ function titleOf(id){
 function renderLayout(){
   const page = document.getElementById('page');
   page.innerHTML = '';
-  // v1.3.0: the viewer's own arrangement, over the program's
-  rowsNow = mergedRows(readArrangement());
+  // v1.3.0: the viewer's own arrangement for this screen's shape, or the program's
+  rowsNow = rowsFor(shapeNow());
   if(!rowsNow.length){
     page.innerHTML = '<div id="empty">no charts on this page</div>';
     return;
   }
   buildRows(rowsNow, makeCell);
   document.getElementById('lay-btn').style.display = rowsNow.flat().length > 1 ? '' : 'none';
-  applyOrientation(true);
+  applyShape(true);
 
   const first = (rowsNow[0] || [])[0];
   if(first) setActive(first);
@@ -257,7 +258,7 @@ function makeDivider(cls){
 function dividerIsVertical(handle){
   if(handle.classList.contains('rdiv')) return true;
   const row = handle.parentElement;
-  return document.body.classList.contains('upright') && !!row && row.classList.contains('multi');
+  return document.body.classList.contains('stacked') && !!row && row.classList.contains('multi');
 }
 
 function startDrag(ev, handle){
@@ -298,20 +299,24 @@ function startDrag(ev, handle){
 
 // ═══════════════════════════════════════════════════════════════
 //  ON A PHONE, AND ARRANGED BY THE VIEWER (v1.3.0)
-//  Upright — the window taller than wide — every row's charts stack, by CSS
-//  only, so turning a phone reloads nothing. The program may keep its rows
-//  side by side (ChartPage(stack_upright=False)). ⊞ LAYOUT lets the viewer
-//  arrange the charts: drag one onto another's side, or its middle to swap.
-//  The arrangement and the dividers' places (wide and upright apart) are this
-//  browser's, for this page's address; RESET forgets them.
+//  Each screen shape — wide, or upright (taller than wide) — has its own
+//  arrangement. With none of the viewer's own, a wide page is the program's
+//  layout, and an upright one the same rows stacked, one chart under another,
+//  by CSS only: turning a phone reloads nothing (ChartPage(stack_upright=False)
+//  keeps them side by side). ⊞ LAYOUT lets the viewer arrange the charts as
+//  they like — drag one onto another's side, or its middle to swap — and from
+//  then on that shape shows their arrangement as they set it, side by side
+//  included. It is this browser's, for this page's address, with the dividers'
+//  places; RESET forgets it for the shape the screen has now.
 // ═══════════════════════════════════════════════════════════════
-const LAYOUT_KEY = 'atk.page.layout.v1';
-let rowsNow = [];                      // the arrangement shown: [[view id, …], …]
+const LAYOUT_KEY = 'atk.page.layout.v2';
+let rowsNow = [];                      // the rows the page holds: [[view id, …], …]
 let arranging = false;
 let arrangeDrag = null;
 
 function programRows(){ return ((layout && layout.rows) || []).map(r => r.slice()); }
 
+// {rows: {wide, upright}, sizes: {wide, upright}} — each shape's own
 function readArrangement(){
   try{
     const v = JSON.parse(window.localStorage.getItem(LAYOUT_KEY));
@@ -322,15 +327,15 @@ function writeArrangement(v){
   try{ window.localStorage.setItem(LAYOUT_KEY, JSON.stringify(v)); }catch{}
 }
 
-// The saved arrangement over the program's: a chart the program no longer has
-// drops out; one it added since goes where the program put it — beside a chart
-// it shares a row with, or in a row of its own at the end.
+// Saved rows over the program's: a chart the program no longer has drops out;
+// one it added since goes where the program put it — beside a chart it shares a
+// row with, or in a row of its own at the end.
 function mergedRows(saved){
   const prog = programRows();
   const known = new Set(prog.flat());
-  if(!saved || !Array.isArray(saved.rows)) return prog;
+  if(!Array.isArray(saved)) return prog;
   const seen = new Set();
-  const rows = saved.rows.filter(Array.isArray)
+  const rows = saved.filter(Array.isArray)
     .map(r => r.filter(id => typeof id === 'string' && known.has(id) && !seen.has(id)
                              && seen.add(id)))
     .filter(r => r.length);
@@ -344,22 +349,41 @@ function mergedRows(saved){
   return rows;
 }
 
-function uprightNow(){
-  return !!layout && layout.stackUpright !== false
-         && window.innerHeight > window.innerWidth;
+function shapeNow(){ return window.innerHeight > window.innerWidth ? 'upright' : 'wide'; }
+
+// The viewer's own arrangement for *shape*, merged with the program's, or null
+function ownRows(shape){
+  const saved = readArrangement();
+  const rows = saved && saved.rows && saved.rows[shape];
+  return Array.isArray(rows) ? mergedRows(rows) : null;
 }
 
-// Upright or wide, on every resize and turn: a class on the page, and the
-// dividers' places this browser keeps for it.
-function applyOrientation(force){
-  const up = uprightNow();
-  const was = document.body.classList.contains('upright');
-  document.body.classList.toggle('upright', up);
-  if(force || up !== was) applySizes();
+// Upright with no arrangement of the viewer's own: the default, stacked
+function stackedByDefault(shape){
+  return shape === 'upright' && !!layout && layout.stackUpright !== false && !ownRows(shape);
 }
-window.addEventListener('resize', () => applyOrientation(false));
 
-function orientationName(){ return document.body.classList.contains('upright') ? 'upright' : 'wide'; }
+// The rows the page holds for *shape*: the viewer's, else the program's
+function rowsFor(shape){ return ownRows(shape) || programRows(); }
+
+// The arrangement as the viewer sees it: a stacked page is a column of charts
+function visibleRows(shape){
+  return stackedByDefault(shape) ? rowsFor(shape).flat().map(id => [id]) : rowsFor(shape);
+}
+
+// On every resize and turn: the shape's rows (the cells move only if they
+// differ), whether they stack, and the dividers' places kept for that shape.
+let shapeShown = null;
+function applyShape(force){
+  const shape = shapeNow();
+  document.body.classList.toggle('upright', shape === 'upright');
+  document.body.classList.toggle('stacked', stackedByDefault(shape));
+  const rows = rowsFor(shape);
+  if(!sameRows(rows, rowsNow)) arrangeTo(rows);
+  else if(force || shape !== shapeShown) applySizes();
+  shapeShown = shape;
+}
+window.addEventListener('resize', () => applyShape(false));
 
 function pageRows(){
   const page = document.getElementById('page');
@@ -368,7 +392,7 @@ function pageRows(){
 
 function applySizes(){
   const saved = readArrangement();
-  const sizes = (saved && saved.sizes && saved.sizes[orientationName()]) || {};
+  const sizes = (saved && saved.sizes && saved.sizes[shapeNow()]) || {};
   const rowFlex = sizes.rows || [], cellFlex = sizes.cells || {};
   pageRows().forEach((row, i) => { row.style.flex = Number(rowFlex[i]) > 0 ? rowFlex[i] : 1; });
   rowsNow.flat().forEach(id => {
@@ -385,8 +409,18 @@ function saveSizes(){
     const cell = document.getElementById('cell-' + id);
     if(cell) cells[id] = parseFloat(cell.style.flex) || 1;
   });
-  saved.sizes[orientationName()] = {
+  saved.sizes[shapeNow()] = {
     rows: pageRows().map(row => parseFloat(row.style.flex) || 1), cells};
+  writeArrangement(saved);
+}
+
+// The viewer's arrangement for *shape* (null forgets it), with even sizes
+function saveRows(shape, rows){
+  const saved = readArrangement() || {};
+  saved.rows = saved.rows || {};
+  saved.sizes = saved.sizes || {};
+  if(rows) saved.rows[shape] = rows; else delete saved.rows[shape];
+  delete saved.sizes[shape];
   writeArrangement(saved);
 }
 
@@ -436,11 +470,10 @@ function arrangeTo(rows){
 
 function sameRows(a, b){ return JSON.stringify(a) === JSON.stringify(b); }
 
+// RESET: the program's layout again, for the shape the screen has now
 function arrangeReset(){
-  writeArrangement(null);
-  const prog = programRows();
-  if(!sameRows(prog, rowsNow)) arrangeTo(prog);
-  else applySizes();
+  saveRows(shapeNow(), null);
+  applyShape(true);
 }
 
 // Which chart, and which part of it, a point is over: the middle (30–70 % both
@@ -502,10 +535,12 @@ function arrangeEnd(ev){
   const {id, drop} = arrangeDrag;
   arrangeCancel();
   if(!drop) return;
-  const rows = rearranged(rowsNow, id, drop.id, drop.zone);
-  if(sameRows(rows, rowsNow)) return;
-  writeArrangement({rows, sizes: {}});            // a new arrangement: even sizes
-  arrangeTo(rows);
+  // From what the viewer sees: on a stacked page, a column of charts
+  const shape = shapeNow(), seen = visibleRows(shape);
+  const rows = rearranged(seen, id, drop.id, drop.zone);
+  if(sameRows(rows, seen)) return;
+  saveRows(shape, rows);                          // theirs for this shape now, even sizes
+  applyShape(true);
 }
 
 function arrangeCancel(){
