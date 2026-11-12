@@ -245,3 +245,46 @@ class TestRefusalsAndPictures:
         assert query["tz"] == ["Asia/Tehran"] and query["stz"] == ["Europe/Athens"]
         assert query["title"][0].endswith("2026-10-31 00:15 (UTC+03:30)")
         assert parse_qs(chart._snapshot_query(timezone="UTC"))["tz"] == ["UTC"]
+
+
+class TestPictureRoom:
+    """v1.3.0 Part 4h: a picture leaves empty candles after its last one — 10 unless the
+    program says otherwise, for one picture, one chart or every picture."""
+
+    def _room(self, chart, **kw):
+        return parse_qs(chart._snapshot_query(**kw))["room"]
+
+    def test_ten_by_default(self):
+        chart = Chart(title="XAU")
+        chart.set_data(_frame())
+        assert Chart.picture_room == 10
+        assert self._room(chart) == ["10"]
+
+    def test_one_picture_one_chart_or_every_picture(self, monkeypatch):
+        chart = Chart(title="XAU")
+        chart.set_data(_frame())
+        assert self._room(chart, room=0) == ["0"] and self._room(chart, room=25) == ["25"]
+        chart.picture_room = 3
+        assert self._room(chart) == ["3"]
+        monkeypatch.setattr(Chart, "picture_room", 6)          # every chart's pictures
+        other = Chart(title="BTC")
+        other.set_data(_frame())
+        assert self._room(other) == ["6"] and self._room(chart) == ["3"]
+
+    @pytest.mark.parametrize("room", [-1, 1001, 2.5, "10", True])
+    def test_a_room_that_is_not_a_count_of_candles_is_refused(self, room):
+        chart = Chart(title="XAU")
+        chart.set_data(_frame())
+        with pytest.raises(ValueError, match="right_room"):
+            chart._snapshot_query(room=room)
+
+    def test_screenshot_takes_right_room(self, monkeypatch):
+        import AlgoTradeKit.visual._snapshot as snap
+
+        asked = []
+        monkeypatch.setattr(snap, "snapshot", lambda address, w, h: asked.append(address) or b"png")
+        chart = Chart(title="XAU")
+        chart.set_data(_frame())
+        chart.screenshot(right_room=4)
+        chart.screenshot()
+        assert [parse_qs(a.split("?", 1)[1])["room"] for a in asked] == [["4"], ["10"]]
