@@ -2686,9 +2686,8 @@ out.option = [options.length === list.length, tehran.textContent.slice(7), tehra
 # ---------------------------------------------------------------------------
 # Ctrl+C and Ctrl+V reach a page as copy and paste events whose clipboardData
 # carries text both ways; a page served over plain http has no clipboard API.
-# `clip.text` stands for the PC's clipboard. The example is QUESTIONS-copy-paste.md
-# Q4f.1's: XAUUSD 5m on 2026-11-10, candle i at x = 10 i, price p at
-# y = (4060 - p) * 10.
+# `clip.text` stands for the PC's clipboard. The example: XAUUSD 5m on 2026-11-10,
+# candle i at x = 10 i, price p at y = (4060 - p) * 10.
 
 _CLIP = """
 const clip = {text: ''};
@@ -2910,7 +2909,7 @@ out.after = clip.text;
     assert result["badge"] == "User"
     assert result["lineText"] == {"type": "trendline", "time1": 1794304800, "price1": 4045,
                                   "time2": None, "price2": 4045, "color": "#2196f3",
-                                  "lineWidth": 1}         # running; cbc's dots stay with cbc
+                                  "lineWidth": 1}         # running; a program's dots stay its own
     assert result["vlineRow"] == "none" and result["vlineKey"] is False
     assert result["signalRow"] == "none"
     assert result["after"] == "unchanged"
