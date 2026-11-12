@@ -3062,3 +3062,238 @@ out.top = ev('hitTest(40, 101)');
     assert result["middle"] == {"id": "zone", "handle": "interior"}
     assert result["edge"] == {"id": "zone", "handle": "interior"}
     assert result["top"] == {"id": "zone", "handle": "tc"}
+
+
+# ---------------------------------------------------------------------------
+# page.html — the page on a phone, and the viewer's own arrangement (v1.3.0, Part 4h)
+# ---------------------------------------------------------------------------
+# _LAYOUT's page: v1 across the top, v2 and v3 side by side under it. The harness's
+# window is 1200 × 900, wide; `upright()` turns it to a phone held upright.
+
+_ARRANGE = """
+// a browser's document forgets a listener; the stub's could not
+document.removeEventListener = (type, fn) => {
+  const list = docListeners[type] || [];
+  if (list.includes(fn)) list.splice(list.indexOf(fn), 1);
+};
+const upright = () => { ctx.window.innerWidth = 390; ctx.window.innerHeight = 844;
+                        fire('resize', ctx.window); };
+const wide = () => { ctx.window.innerWidth = 1200; ctx.window.innerHeight = 900;
+                     fire('resize', ctx.window); };
+const rows = () => ev('rowsNow');
+const KEY = 'atk.page.layout.v1';
+const saved = () => JSON.parse(ctx.__store[KEY] || 'null');
+const rect = (left, top, width, height) => () => ({left, top, width, height});
+const place = () => {                      // v1 across the top, v2 | v3 under it
+  document.getElementById('cell-v1').getBoundingClientRect = rect(0, 34, 1200, 430);
+  document.getElementById('cell-v2').getBoundingClientRect = rect(0, 469, 597, 431);
+  document.getElementById('cell-v3').getBoundingClientRect = rect(602, 469, 598, 431);
+};
+const drag = (id, x, y) => {
+  ev('arrangeStart')({preventDefault() {}, currentTarget: null}, id);
+  fire('pointermove', document.body, {clientX: x, clientY: y});
+  const label = document.getElementById('drop').textContent;
+  fire('pointerup', document.body, {clientX: x, clientY: y});
+  return label;
+};
+"""
+
+
+def _layout_with(**extra) -> str:
+    """_LAYOUT's page with more in its /layout answer."""
+    return _LAYOUT.replace("rows: [['v1'], ['v2', 'v3']],",
+                           "rows: [['v1'], ['v2', 'v3']], " + json.dumps(extra)[1:-1] + ",")
+
+
+def test_upright_a_rows_charts_stack_and_no_frame_is_made_again():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+const made = queryAll('iframe').length;
+const pair = queryAll('.row').find(r => r._cls.has('multi'));
+const handle = queryAll('.cdiv')[0];
+handle.parentElement = pair;
+out.wide = [document.body._cls.has('upright'), ev('dividerIsVertical')(handle)];
+upright();
+out.upright = [document.body._cls.has('upright'), ev('dividerIsVertical')(handle)];
+out.multi = queryAll('.row').filter(r => r._cls.has('multi')).length;
+wide();
+out.back = document.body._cls.has('upright');
+out.framesMade = queryAll('iframe').length - made;
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["topLevelError"] is None
+    assert result["wide"] == [False, False]
+    assert result["upright"] == [True, True]          # stacked: its divider drags up and down
+    assert result["multi"] == 1                        # the v2 | v3 row
+    assert result["back"] is False
+    assert result["framesMade"] == 0                   # a turn is CSS only
+
+
+def test_a_program_may_keep_its_rows_side_by_side():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+upright();
+out.upright = document.body._cls.has('upright');
+""", extra_globals=_layout_with(stackUpright=False) + _STORAGE)
+    assert result["upright"] is False
+
+
+def test_each_drop_moves_a_chart_where_its_label_says():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+const R = ev('rearranged');
+const base = [['v1'], ['v2', 'v3']];
+out.cases = [R(base, 'v1', 'v3', 'swap'), R(base, 'v1', 'v3', 'left'),
+             R(base, 'v3', 'v2', 'left'), R(base, 'v1', 'v2', 'right'),
+             R(base, 'v3', 'v1', 'above'), R(base, 'v1', 'v2', 'below'),
+             R(base, 'v2', 'v2', 'left')];
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["cases"] == [
+        [["v3"], ["v2", "v1"]],                        # swap
+        [["v2", "v1", "v3"]],                          # beside, on the left
+        [["v1"], ["v3", "v2"]],
+        [["v2", "v1", "v3"]],                          # beside, on the right
+        [["v3"], ["v1"], ["v2"]],                      # above, a row of its own
+        [["v2", "v3"], ["v1"]],                        # below
+        [["v1"], ["v2", "v3"]],                        # onto itself: nothing
+    ]
+
+
+def test_arranging_by_dragging_is_kept_and_reset_forgets_it():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+out.button = document.getElementById('lay-btn').style.display;
+ev('arrangeToggle()');
+out.arranging = document.body._cls.has('arranging');
+place();
+out.labels = [drag('v3', 30, 250)];                    // v1's left side
+out.afterLeft = rows();
+out.saved = saved().rows;
+out.labels.push(drag('v2', 900, 680));                 // v3's middle: swap
+out.afterSwap = rows();
+out.labels.push(drag('v1', 1100, 250));                // onto its own cell: nothing
+out.afterSelf = rows();
+ev('arrangeReset()');
+out.reset = [rows(), saved()];
+ev('arrangeToggle(false)');
+out.done = document.body._cls.has('arranging');
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["topLevelError"] is None
+    assert result["button"] == "" and result["arranging"] is True
+    assert result["labels"] == ["beside it, on the left", "swap places", ""]
+    assert result["afterLeft"] == [["v3", "v1"], ["v2"]]
+    assert result["saved"] == [["v3", "v1"], ["v2"]]
+    assert result["afterSwap"] == [["v2", "v1"], ["v3"]]
+    assert result["afterSelf"] == [["v2", "v1"], ["v3"]]
+    assert result["reset"] == [[["v1"], ["v2", "v3"]], None]
+    assert result["done"] is False
+
+
+def test_a_kept_arrangement_follows_the_programs_changes():
+    store = json.dumps({"rows": [["v3", "gone"], ["v1"]]})
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+out.rows = rows();
+out.active = queryAll('.cell').filter(c => c._cls.has('active')).map(c => c.id);
+""", extra_globals=_LAYOUT + _STORAGE + f"ctx.__store['atk.page.layout.v1'] = {json.dumps(store)};")
+    # «gone» is no longer on the page; v2, new to it, goes beside v3, as the program has it
+    assert result["rows"] == [["v3", "v2"], ["v1"]]
+    assert result["active"] == ["cell-v3"]
+
+
+def test_a_dividers_place_is_kept_for_wide_and_for_upright_apart():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+document.getElementById('cell-v2').style.flex = 2;
+ev('saveSizes()');
+out.kept = saved().sizes.wide.cells.v2;
+upright();
+out.upright = document.getElementById('cell-v2').style.flex;
+document.getElementById('cell-v2').style.flex = 0.5;
+ev('saveSizes()');
+wide();
+out.wide = document.getElementById('cell-v2').style.flex;
+upright();
+out.uprightAgain = document.getElementById('cell-v2').style.flex;
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["kept"] == 2
+    assert result["upright"] == 1 and result["wide"] == 2 and result["uprightAgain"] == 0.5
+
+
+def test_a_moved_chart_keeps_its_frame_where_the_browser_can():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+const made = queryAll('iframe').length;
+const moved = [];
+const mk = document.createElement;
+document.createElement = tag => {
+  const el = mk(tag);
+  el.moveBefore = (node, ref) => { moved.push(node.id); el.children.push(node); };
+  return el;
+};
+['v1', 'v2', 'v3'].forEach(id => { document.getElementById('cell-' + id).parentElement = {}; });
+const before = document.getElementById('cell-v3');
+ev('arrangeTo')([['v2'], ['v3', 'v1']]);
+out.moved = moved;
+out.same = document.getElementById('cell-v3') === before;
+out.framesMade = queryAll('iframe').length - made;
+out.rows = rows();
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["moved"] == ["cell-v2", "cell-v3", "cell-v1"]
+    assert result["same"] is True and result["framesMade"] == 0
+    assert result["rows"] == [["v2"], ["v3", "v1"]]
+
+
+def test_arranging_and_a_replay_exclude_each_other():
+    result = _run(PAGE_HTML, _SETTLE + _ARRANGE + """
+ev('arrangeToggle(true)');
+ev('replayToggle()');
+out.noReplay = [ev('replay.picking'), document.getElementById('rp-btn').disabled];
+ev('arrangeToggle(false)');
+ev('replayToggle()');
+out.replay = [ev('replay.picking'), document.getElementById('lay-btn').disabled];
+ev('arrangeToggle(true)');
+out.noArranging = ev('arranging');
+ev('replayExit()');
+out.after = document.getElementById('lay-btn').disabled;
+""", extra_globals=_LAYOUT + _STORAGE)
+    assert result["noReplay"] == [False, True]
+    assert result["replay"] == [True, True]
+    assert result["noArranging"] is False
+    assert result["after"] is False
+
+
+def test_one_chart_has_nothing_to_arrange():
+    one = _LAYOUT.replace("rows: [['v1'], ['v2', 'v3']],", "rows: [['v1']],")
+    result = _run(PAGE_HTML, _SETTLE + """
+out.button = document.getElementById('lay-btn').style.display;
+""", extra_globals=one + _STORAGE)
+    assert result["button"] == "none"
+
+
+@pytest.mark.parametrize("room, position, last", [(10, False, 34), (10, True, 34),
+                                                  (20, True, 44), (0, False, 24)])
+def test_a_picture_leaves_its_room_after_the_last_candle(room, position, last):
+    """v1.3.0 Part 4h: the program's room (Chart.picture_room, 10) after the last of the
+    25 candles shown; an open position still gets at least 8."""
+    drawing = (f"ctx.__init.drawings = [{{id: 'pos', type: 'live_position', open_time: {_T1400},"
+               " entry_price: 1.5, stop_loss: 1, direction: 'long', next_tp: 2}];"
+               if position else "")
+    result = _run(CHART_HTML, _SNAPSHOT_INIT + drawing + """
+ev('handleMsg(globalThis.__init)');
+await frames();
+out.logical = ev('Object.values(panes).map(p => p.chart.timeScale().getVisibleLogicalRange())');
+""", extra_globals=_SNAPSHOT + _LOGICAL_FROM_TIME + f"ctx.location.search += '&room={room}';")
+    assert result["logical"] == [{"from": 0, "to": last}] * 2
+
+
+def test_a_pictures_room_is_free_space_when_later_candles_exist():
+    """A picture of 08:00–14:00 on a chart that goes on to 16:00: its room shows no
+    candle after 14:00, nor the indicator past it."""
+    result = _run(CHART_HTML, _SNAPSHOT_INIT + f"""
+for (let t = {_T1400} + 900; t <= {_T1400} + 8 * 900; t += 900)
+  ctx.__init.bars.push({{time: t, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1}});
+ctx.__init.indicators[0].data = ctx.__init.bars.slice(14).map(b => ({{time: b.time, value: 50}}));
+ev('handleMsg(globalThis.__init)');
+await frames();
+const last = s => {{
+  const d = s.setData._last || [];
+  return d.length ? d[d.length - 1].time : null;
+}};
+out.candles = last(ev('mainSeries'));
+out.indicator = last(ev('indMeta')['RSI(14)'].series);
+""", extra_globals=_SNAPSHOT + _LOGICAL_FROM_TIME + "ctx.location.search += '&room=10';")
+    assert result["topLevelError"] is None
+    assert result["candles"] == _T1400 and result["indicator"] == _T1400
